@@ -1,0 +1,203 @@
+{
+  "$defs": {
+    "Horizon": {
+      "additionalProperties": false,
+      "properties": {
+        "min_hours": {
+          "exclusiveMinimum": 0,
+          "title": "Min Hours",
+          "type": "integer"
+        },
+        "max_hours": {
+          "exclusiveMinimum": 0,
+          "title": "Max Hours",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "min_hours",
+        "max_hours"
+      ],
+      "title": "Horizon",
+      "type": "object"
+    },
+    "TradeIntent": {
+      "additionalProperties": false,
+      "properties": {
+        "symbol": {
+          "pattern": "^[A-Z][A-Z0-9.\\-]{0,15}$",
+          "title": "Symbol",
+          "type": "string"
+        },
+        "action": {
+          "enum": [
+            "BUY",
+            "SELL",
+            "HOLD",
+            "ADD",
+            "REDUCE"
+          ],
+          "title": "Action",
+          "type": "string"
+        },
+        "notional_usd": {
+          "anyOf": [
+            {
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*(?:\\d{0,12}|(?=[\\d.]{1,21}0*$)\\d{0,12}\\.\\d{0,8}0*$)",
+              "type": "string"
+            }
+          ],
+          "title": "Notional Usd"
+        },
+        "confidence": {
+          "anyOf": [
+            {
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Confidence"
+        },
+        "expected_return_pct": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Expected Return Pct"
+        },
+        "horizon": {
+          "$ref": "#/$defs/Horizon"
+        },
+        "thesis": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Thesis",
+          "type": "array"
+        },
+        "invalidation_conditions": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Invalidation Conditions",
+          "type": "array"
+        },
+        "evidence_ids": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Evidence Ids",
+          "type": "array"
+        },
+        "max_execution_cost_bps": {
+          "maximum": 1000,
+          "minimum": 0,
+          "title": "Max Execution Cost Bps",
+          "type": "integer"
+        },
+        "decision_id": {
+          "format": "uuid",
+          "title": "Decision Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "symbol",
+        "action",
+        "notional_usd",
+        "confidence",
+        "expected_return_pct",
+        "horizon",
+        "thesis",
+        "invalidation_conditions",
+        "evidence_ids",
+        "max_execution_cost_bps",
+        "decision_id"
+      ],
+      "title": "TradeIntent",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "0.1",
+      "default": "0.1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "execution_mode": {
+      "const": "research",
+      "default": "research",
+      "title": "Execution Mode",
+      "type": "string"
+    },
+    "run_id": {
+      "format": "uuid",
+      "title": "Run Id",
+      "type": "string"
+    },
+    "portfolio_snapshot_id": {
+      "format": "uuid",
+      "title": "Portfolio Snapshot Id",
+      "type": "string"
+    },
+    "as_of": {
+      "format": "date-time",
+      "title": "As Of",
+      "type": "string"
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "expires_at": {
+      "format": "date-time",
+      "title": "Expires At",
+      "type": "string"
+    },
+    "evidence_hashes": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "title": "Evidence Hashes",
+      "type": "object"
+    },
+    "intents": {
+      "items": {
+        "$ref": "#/$defs/TradeIntent"
+      },
+      "title": "Intents",
+      "type": "array"
+    }
+  },
+  "required": [
+    "run_id",
+    "portfolio_snapshot_id",
+    "as_of",
+    "created_at",
+    "expires_at",
+    "evidence_hashes",
+    "intents"
+  ],
+  "title": "DecisionBatch",
+  "type": "object"
+}

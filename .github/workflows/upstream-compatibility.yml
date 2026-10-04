@@ -1,0 +1,139 @@
+name: Latest TradingAgents compatibility
+
+on:
+  schedule:
+    - cron: "23 4 * * *"
+  workflow_dispatch:
+
+# This workflow tests candidates and saves proposed locks. It cannot publish,
+# push, merge, deploy, or access wallet/LLM credentials.
+permissions:
+  contents: read
+
+concurrency:
+  group: upstream-compatibility-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  discover-release:
+    name: Discover one stable release and commit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      ref: ${{ steps.candidate.outputs.ref }}
+      commit: ${{ steps.candidate.outputs.commit }}
+    steps:
+      - name: Check out our code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install uv and Python
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: "0.11.32"
+          python-version: "3.12"
+          enable-cache: false
+
+      - name: Reproduce the last verified upstream checkouts
+        run: uv run --no-project python scripts/upstream.py bootstrap
+
+      - name: Resolve the candidate once for both platforms
+        id: candidate
+        shell: bash
+        run: |
+          uv run --no-project python - <<'PY'
+          import json
+          import os
+          import re
+          import subprocess
+
+          result = json.loads(subprocess.check_output(
+              ["uv", "run", "--no-project", "python", "scripts/upstream.py", "check",
+               "--repo", "trading-agents"], text=True,
+          ))
+          tag = result["latest"]
+          commit = result["candidate_commit"]
+          if not re.fullmatch(r"v\d+\.\d+\.\d+", tag):
+              raise ValueError("Discovery returned an invalid stable release tag")
+          if not re.fullmatch(r"[0-9a-f]{40}", commit):
+              raise ValueError("Discovery returned an invalid commit")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"ref={tag}\ncommit={commit}\n")
+          print(f"Testing {tag} at {commit} on both platforms")
+          PY
+
+  latest-release:
+    name: Latest stable (${{ matrix.os }})
+    needs: discover-release
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - name: Check out our code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install uv and Python
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: "0.11.32"
+          python-version: "3.12"
+          enable-cache: false
+
+      - name: Reproduce the last verified upstream checkouts
+        run: uv run --no-project python scripts/upstream.py bootstrap
+
+      - name: Install the last verified dependencies
+        run: uv sync --frozen --extra evaluation
+
+      - name: Test the latest stable candidate before promoting its local lock
+        shell: bash
+        env:
+          UPSTREAM_REF: ${{ needs.discover-release.outputs.ref }}
+          UPSTREAM_COMMIT: ${{ needs.discover-release.outputs.commit }}
+        run: uv run --frozen --extra evaluation python scripts/upstream.py update --repo trading-agents --ref "$UPSTREAM_REF" --expected-commit "$UPSTREAM_COMMIT"
+
+      - name: Check candidate dependency metadata
+        run: uv pip check
+
+      - name: Lint our code against the candidate environment
+        run: uv run --frozen --extra evaluation ruff check src tests scripts
+
+      - name: Test our contracts and adapters without network access
+        run: uv run --frozen --extra evaluation pytest --junitxml=runtime/verification/ours.xml
+
+      - name: Run the candidate's isolated upstream test suite
+        if: runner.os == 'Linux'
+        working-directory: vendor/trading-agents
+        run: uv run --project ../.. --frozen --extra evaluation pytest -c pyproject.toml tests --junitxml=../../runtime/verification/upstream.xml
+
+      - name: Build our distribution against the candidate
+        run: uv build --no-sources
+
+      - name: Save verified candidate locks for review
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: verified-upstream-candidate-${{ matrix.os }}
+          path: |
+            upstream.lock.json
+            uv.lock
+            pyproject.toml
+            runtime/upstream-updates/*.json
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Save verification reports
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: upstream-compatibility-${{ matrix.os }}
+          path: |
+            runtime/verification/*.xml
+            runtime/upstream-updates/*.json
+          retention-days: 30
+          if-no-files-found: warn

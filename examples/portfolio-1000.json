@@ -1,0 +1,10 @@
+{
+  "snapshot_id": "1dc962a1-1370-4b25-bf1e-9192d012653d",
+  "as_of": "2026-10-04T00:00:00Z",
+  "currency": "USD",
+  "cash_asset": "USDC",
+  "cash_usd": "1000",
+  "reserved_cash_usd": "0",
+  "max_position_pct": "0.25",
+  "positions": []
+}

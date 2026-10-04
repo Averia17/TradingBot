@@ -1,0 +1,52 @@
+[
+  {
+    "repo": "TauricResearch/TradingAgents",
+    "branch": "main",
+    "stars": 109758,
+    "pushed_at": "2026-10-03T21:30:10Z",
+    "license": "Apache-2.0",
+    "release": "v0.6.0",
+    "release_commitish": "main",
+    "release_date": "2026-10-03T21:30:11Z"
+  },
+  {
+    "repo": "nautechsystems/nautilus_trader",
+    "branch": "develop",
+    "stars": 29622,
+    "pushed_at": "2026-10-04T15:36:16Z",
+    "license": "LGPL-3.0",
+    "release": "v1.231.0",
+    "release_commitish": "develop",
+    "release_date": "2026-08-02T18:53:49Z"
+  },
+  {
+    "repo": "xt2201/FinMem",
+    "branch": "main",
+    "stars": 0,
+    "pushed_at": "2026-04-27T14:41:11Z",
+    "license": "MIT",
+    "release": null,
+    "release_commitish": null,
+    "release_date": null
+  },
+  {
+    "repo": "ilkamo/jupiter-go",
+    "branch": "main",
+    "stars": 126,
+    "pushed_at": "2026-08-11T16:25:46Z",
+    "license": "MIT",
+    "release": null,
+    "release_commitish": null,
+    "release_date": null
+  },
+  {
+    "repo": "solana-foundation/solana-go",
+    "branch": "main",
+    "stars": 1591,
+    "pushed_at": "2026-09-25T22:02:52Z",
+    "license": "Apache-2.0",
+    "release": "v2.1.0",
+    "release_commitish": "v2",
+    "release_date": "2026-09-15T22:42:38Z"
+  }
+]

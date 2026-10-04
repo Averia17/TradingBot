@@ -1,0 +1,25 @@
+{
+  "checked_at": "2026-10-04",
+  "repositories": [
+    {
+      "name": "trading-agents",
+      "url": "https://github.com/TauricResearch/TradingAgents.git",
+      "ref": "v0.6.0",
+      "source_commit": "1394a3f72aa4393e1a98f51b382434c4b4c2d972",
+      "license": "Apache-2.0",
+      "role": "runtime",
+      "distribution": "tradingagents",
+      "patches": []
+    },
+    {
+      "name": "nautilus-trader",
+      "url": "https://github.com/nautechsystems/nautilus_trader.git",
+      "ref": "v1.231.0",
+      "source_commit": "27a8e54e7ac3c57d6cbf8891f0283dfbaee97317",
+      "license": "LGPL-3.0-or-later",
+      "role": "source reference; runtime from pinned binary wheel",
+      "distribution": "nautilus_trader",
+      "patches": []
+    }
+  ]
+}

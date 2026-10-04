@@ -1,0 +1,24 @@
+diff --git a/tests/test_suite_isolation.py b/tests/test_suite_isolation.py
+index a14590d..33fab09 100644
+--- a/tests/test_suite_isolation.py
++++ b/tests/test_suite_isolation.py
+@@ -33,13 +33,16 @@ def test_a_test_saves_cli_selections_to_its_own_directory(tmp_path):
+ 
+ 
+ @pytest.mark.unit
+-def test_yfinance_keeps_its_cache_out_of_the_users_home():
+-    """yfinance caches each symbol's time zone on disk, in the home directory by default."""
++def test_yfinance_keeps_its_cache_in_the_suites_temporary_directory():
++    """Windows TEMP can be below Path.home(); check the isolated cache itself."""
+     from pathlib import Path
++    from tempfile import gettempdir
+ 
+     from yfinance.cache import _TzDBManager
+ 
+-    assert not Path(_TzDBManager.get_location()).is_relative_to(Path.home())
++    location = Path(_TzDBManager.get_location()).resolve()
++    assert location.parent == Path(gettempdir()).resolve()
++    assert location.name.startswith("tradingagents-tests-yf-")
+ 
+ 
+ @pytest.mark.unit

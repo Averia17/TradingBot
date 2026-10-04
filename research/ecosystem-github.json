@@ -1,0 +1,112 @@
+[
+  {
+    "repo": "pipiku915/FinMem-LLM-StockTrading",
+    "stars": 962,
+    "forks": 195,
+    "issues_plus_pr": 8,
+    "pushed": "2024-08-18T01:58:13Z",
+    "license": "MIT",
+    "archived": false,
+    "branch": "main",
+    "url": "https://github.com/pipiku915/FinMem-LLM-StockTrading"
+  },
+  {
+    "repo": "DVampire/FinAgent",
+    "stars": 75,
+    "forks": 27,
+    "issues_plus_pr": 3,
+    "pushed": "2024-08-31T18:13:57Z",
+    "license": "MIT",
+    "archived": false,
+    "branch": "main",
+    "url": "https://github.com/DVampire/FinAgent"
+  },
+  {
+    "repo": "DVampire/FinWorld",
+    "stars": 133,
+    "forks": 27,
+    "issues_plus_pr": 1,
+    "pushed": "2025-10-07T10:46:34Z",
+    "license": "MIT",
+    "archived": false,
+    "branch": "main",
+    "url": "https://github.com/DVampire/FinWorld"
+  },
+  {
+    "repo": "AI4Finance-Foundation/FinRL",
+    "stars": 16550,
+    "forks": 3537,
+    "issues_plus_pr": 307,
+    "pushed": "2026-09-28T23:32:46Z",
+    "license": "MIT",
+    "archived": false,
+    "branch": "master",
+    "url": "https://github.com/AI4Finance-Foundation/FinRL"
+  },
+  {
+    "repo": "AI4Finance-Foundation/FinRL-Trading",
+    "stars": 3780,
+    "forks": 1107,
+    "issues_plus_pr": 54,
+    "pushed": "2026-09-18T01:13:20Z",
+    "license": "Apache-2.0",
+    "archived": false,
+    "branch": "master",
+    "url": "https://github.com/AI4Finance-Foundation/FinRL-Trading"
+  },
+  {
+    "repo": "virattt/ai-hedge-fund",
+    "stars": 63857,
+    "forks": 11223,
+    "issues_plus_pr": 177,
+    "pushed": "2026-10-02T14:19:04Z",
+    "license": "MIT",
+    "archived": false,
+    "branch": "main",
+    "url": "https://github.com/virattt/ai-hedge-fund"
+  },
+  {
+    "repo": "chrisworsey55/atlas-gic",
+    "stars": 2307,
+    "forks": 416,
+    "issues_plus_pr": 5,
+    "pushed": "2026-09-22T11:51:44Z",
+    "license": "NOASSERTION",
+    "archived": false,
+    "branch": "main",
+    "url": "https://github.com/chrisworsey55/atlas-gic"
+  },
+  {
+    "repo": "hsliuping/TradingAgents-CN",
+    "stars": 32146,
+    "forks": 6719,
+    "issues_plus_pr": 298,
+    "pushed": "2026-09-22T12:11:05Z",
+    "license": "NOASSERTION",
+    "archived": false,
+    "branch": "v3.0",
+    "url": "https://github.com/hsliuping/TradingAgents-CN"
+  },
+  {
+    "repo": "TraderAlice/OpenAlice",
+    "stars": 7207,
+    "forks": 1134,
+    "issues_plus_pr": 116,
+    "pushed": "2026-10-04T13:00:20Z",
+    "license": "AGPL-3.0",
+    "archived": false,
+    "branch": "master",
+    "url": "https://github.com/TraderAlice/OpenAlice"
+  },
+  {
+    "repo": "Alchemist-X/predict-raven",
+    "stars": 75,
+    "forks": 29,
+    "issues_plus_pr": 11,
+    "pushed": "2026-09-29T20:40:41Z",
+    "license": "MIT",
+    "archived": false,
+    "branch": "main",
+    "url": "https://github.com/Alchemist-X/predict-raven"
+  }
+]

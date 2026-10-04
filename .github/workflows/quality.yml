@@ -1,0 +1,69 @@
+name: Quality
+
+on:
+  pull_request:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: quality-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: Quality (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - name: Check out our code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install uv and Python
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: "0.11.32"
+          python-version: "3.12"
+          enable-cache: false
+
+      - name: Reproduce clean upstream checkouts
+        run: uv run --no-project python scripts/upstream.py bootstrap
+
+      - name: Install locked dependencies
+        run: uv sync --frozen --extra evaluation
+
+      - name: Check dependency metadata
+        run: uv pip check
+
+      - name: Lint our code
+        run: uv run --frozen --extra evaluation ruff check src tests scripts
+
+      - name: Test our contracts and adapters without network access
+        run: uv run --frozen --extra evaluation pytest --junitxml=runtime/verification/ours.xml
+
+      # Upstream's default suite excludes its external-service integration marker.
+      # Linux also avoids its Windows-only assumption that TEMP is outside HOME.
+      - name: Run upstream's isolated test suite
+        if: runner.os == 'Linux'
+        working-directory: vendor/trading-agents
+        run: uv run --project ../.. --frozen --extra evaluation pytest -c pyproject.toml tests --junitxml=../../runtime/verification/upstream.xml
+
+      - name: Build our distribution
+        run: uv build --no-sources
+
+      - name: Save verification reports
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: quality-${{ matrix.os }}
+          path: runtime/verification/*.xml
+          retention-days: 14
+          if-no-files-found: warn
