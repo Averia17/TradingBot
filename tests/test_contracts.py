@@ -8,6 +8,21 @@ from pydantic import ValidationError
 from tradingbot.contracts import IntentProposal, PortfolioSnapshot, Position, validate_proposals
 
 
+@pytest.mark.parametrize("change", [
+    {"as_of": "2026-10-04T00:00:00"},
+    {"expires_at": "2026-10-03T00:00:00Z"},
+    {"evidence_hashes": {"TSLA:market_report": "not-a-hash"}},
+    {"intents": []},
+])
+def test_batch_rejects_incoherent_wire_fields(change):
+    from tradingbot.contracts import DecisionBatch
+    from tradingbot.demo import demo_batch
+
+    batch, _, _ = demo_batch()
+    with pytest.raises(ValidationError):
+        DecisionBatch.model_validate(batch.model_dump(mode="json") | change)
+
+
 def portfolio(**changes):
     return PortfolioSnapshot(
         snapshot_id=uuid4(),

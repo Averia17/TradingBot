@@ -1,0 +1,97 @@
+{
+  "$defs": {
+    "Position": {
+      "additionalProperties": false,
+      "properties": {
+        "symbol": {
+          "pattern": "^[A-Z][A-Z0-9.\\-]{0,15}$",
+          "title": "Symbol",
+          "type": "string"
+        },
+        "instrument_id": {
+          "minLength": 1,
+          "title": "Instrument Id",
+          "type": "string"
+        },
+        "quantity": {
+          "pattern": "^(?:0|[1-9][0-9]{0,11})(?:\\.[0-9]{1,8})?$",
+          "title": "Quantity",
+          "type": "string"
+        },
+        "mark_price_usd": {
+          "pattern": "^(?:0|[1-9][0-9]{0,11})(?:\\.[0-9]{1,8})?$",
+          "title": "Mark Price Usd",
+          "type": "string"
+        }
+      },
+      "required": [
+        "symbol",
+        "instrument_id",
+        "quantity",
+        "mark_price_usd"
+      ],
+      "title": "Position",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "snapshot_id": {
+      "format": "uuid",
+      "title": "Snapshot Id",
+      "type": "string"
+    },
+    "as_of": {
+      "format": "date-time",
+      "title": "As Of",
+      "type": "string"
+    },
+    "currency": {
+      "const": "USD",
+      "default": "USD",
+      "title": "Currency",
+      "type": "string"
+    },
+    "cash_asset": {
+      "default": "USDC",
+      "enum": [
+        "USDC",
+        "USD"
+      ],
+      "title": "Cash Asset",
+      "type": "string"
+    },
+    "cash_usd": {
+      "pattern": "^(?:0|[1-9][0-9]{0,11})(?:\\.[0-9]{1,8})?$",
+      "title": "Cash Usd",
+      "type": "string"
+    },
+    "reserved_cash_usd": {
+      "default": "0",
+      "pattern": "^(?:0|[1-9][0-9]{0,11})(?:\\.[0-9]{1,8})?$",
+      "title": "Reserved Cash Usd",
+      "type": "string"
+    },
+    "max_position_pct": {
+      "default": "0.25",
+      "pattern": "^(?:0|[1-9][0-9]{0,11})(?:\\.[0-9]{1,8})?$",
+      "title": "Max Position Pct",
+      "type": "string"
+    },
+    "positions": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/Position"
+      },
+      "title": "Positions",
+      "type": "array"
+    }
+  },
+  "required": [
+    "snapshot_id",
+    "as_of",
+    "cash_usd"
+  ],
+  "title": "PortfolioSnapshot",
+  "type": "object"
+}

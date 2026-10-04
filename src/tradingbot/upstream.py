@@ -29,10 +29,12 @@ class UpstreamError(RuntimeError):
     pass
 
 
-def _git(checkout: Path, *args: str) -> str:
+def _git(checkout: Path, *args: str, missing_ok: bool = False) -> str:
     result = subprocess.run(
         ["git", "-C", str(checkout), *args], capture_output=True, text=True, check=False
     )
+    if missing_ok and result.returncode == 1:
+        return ""
     if result.returncode:
         raise UpstreamError(f"Git operation failed ({' '.join(args)}): {result.stderr.strip()}")
     return result.stdout.strip()
@@ -80,7 +82,7 @@ def _checkout(root: Path, repo: dict) -> Path:
     return checkout
 
 
-def _verify_repo(root: Path, repo: dict) -> None:
+def _verify_clean_checkout(root: Path, repo: dict) -> Path:
     checkout = _checkout(root, repo)
     if not checkout.exists():
         raise UpstreamError(f"Missing checkout: {repo['name']}; run bootstrap")
@@ -90,6 +92,11 @@ def _verify_repo(root: Path, repo: dict) -> None:
         raise UpstreamError(f"Unexpected upstream remote: {repo['name']}")
     if _git(checkout, "status", "--porcelain", "--untracked-files=all"):
         raise UpstreamError(f"Refusing dirty upstream checkout: {repo['name']}")
+    return checkout
+
+
+def _verify_repo(root: Path, repo: dict) -> None:
+    checkout = _verify_clean_checkout(root, repo)
     if _git(checkout, "rev-parse", "HEAD") != repo["source_commit"]:
         raise UpstreamError(f"HEAD differs from approved lock: {repo['name']}; no reset performed")
 
@@ -129,6 +136,12 @@ def bootstrap(root: Path) -> None:
                 # an upstream release branch and tag have the same name.
                 _run(["git", "init", str(checkout)], root)
                 _git(checkout, "remote", "add", "upstream", repo["url"])
+            _verify_clean_checkout(root, repo)
+            if not _git(checkout, "rev-parse", "--verify", "--quiet", "HEAD", missing_ok=True):
+                # A failed first fetch is retryable only while checkout has no
+                # files at all (including ignored files) and no commit/index edits.
+                if any(path.name != ".git" for path in checkout.iterdir()):
+                    raise UpstreamError("Incomplete checkout contains files; refusing to overwrite")
                 _git(
                     checkout,
                     "fetch",

@@ -30,6 +30,9 @@ def test_schema_export_uses_same_contract_as_adapter(tmp_path):
     schema = json.loads(output.read_text(encoding="utf-8"))
     assert schema["additionalProperties"] is False
     assert schema["properties"]["execution_mode"]["const"] == "research"
+    money = schema["$defs"]["TradeIntent"]["properties"]["notional_usd"]
+    assert money["type"] == "string"
+    assert "pattern" in money
 
 
 def test_invalid_portfolio_fails_before_provider_or_market_call(tmp_path):

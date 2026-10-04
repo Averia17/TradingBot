@@ -6,6 +6,14 @@
 
 ## Phase 0 — Verification
 
+Архитектурное уточнение 05.10.2026 и Go migration tickets S1–S6 вынесены в
+[service-migration.md](service-migration.md). Новый backend пишем на Go,
+Python сохраняет upstream research/evaluation. Исходные acceptance gates ниже
+остаются обязательными; наличие новой архитектуры их не завершает.
+Исторические Python-пути для scheduler/jobs/control/ledger заменяются на
+Go module `go/` при реализации; Python-пути research/evaluation сохраняются
+с учётом фактической текущей структуры.
+
 ### [ ] P0-01 — Account-specific eligibility dossier
 
 - **Goal:** выбрать разрешённые research и execution paths.

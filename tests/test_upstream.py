@@ -100,6 +100,27 @@ def test_bootstrap_fetches_tag_when_release_branch_has_the_same_name(tmp_path, m
     assert git(root / "vendor/trading-agents", "rev-parse", "HEAD") == tagged_commit
 
 
+@pytest.mark.parametrize("has_user_file", [False, True])
+def test_bootstrap_resumes_empty_partial_checkout_but_preserves_user_files(project, has_user_file):
+    original, remote = project
+    root = original.parent / "resume"
+    root.mkdir()
+    (root / "upstream.lock.json").write_bytes((original / "upstream.lock.json").read_bytes())
+    checkout = root / "vendor" / "trading-agents"
+    checkout.mkdir(parents=True)
+    git(checkout, "init", "-q")
+    git(checkout, "remote", "add", "upstream", remote.as_uri())
+    if has_user_file:
+        (checkout / ".git" / "info" / "exclude").write_text("local.txt\n", encoding="utf-8")
+        (checkout / "local.txt").write_bytes(b"local ignored data")
+        with pytest.raises(UpstreamError, match="contains files"):
+            bootstrap(root)
+        assert (checkout / "local.txt").read_bytes() == b"local ignored data"
+    else:
+        bootstrap(root)
+        verify(root)
+
+
 def test_dirty_checkout_refuses_update_without_discarding_files(project):
     root, _ = project
     checkout = root / "vendor/trading-agents"

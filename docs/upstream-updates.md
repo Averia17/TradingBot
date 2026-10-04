@@ -87,6 +87,9 @@ Updater предназначен для рабочего checkout разрабо
 затем удалить только файл блокировки. Восстановление после выключения питания
 не гарантируется; Git сохраняет исходный commit, но backups транзакции в памяти.
 Dirty checkout не сбрасывается и не очищается автоматически.
+Если первый fetch прервался, bootstrap может продолжить пустой Git checkout
+без HEAD с проверенным remote. Наличие любых пользовательских файлов, включая
+ignored файлы, запрещает это возобновление; они не удаляются.
 
 ## Совместимость новых релизов
 
@@ -115,11 +118,17 @@ Offline green не доказывает provider availability, качество 
 проверенные candidate lock-файлы. CI не изменяет ветки и не разворачивает бота.
 Локальное продвижение выполняется командой updater выше.
 
-Пока у нашего Git нет remote, workflows не работают на сервере. Для активации
-нужно разместить проект на GitHub и workflows на default branch. Required
-checks/branch protection на сервере пока не настроены. Плановый запуск GitHub
+На 05.10.2026 local remote `origin` уже настроен на GitHub. Наличие remote не
+подтверждает публикацию workflows и их выполнение: hosted Actions и required
+checks/branch protection здесь не проверены. Для планового запуска workflows
+должны находиться на default branch с включёнными Actions. Плановый запуск GitHub
 может задержаться; это не обещание немедленной проверки каждого commit.
 Подробнее: `.github/README.md`.
+
+Целевая service architecture и отдельные runtime artifacts описаны в
+[architecture](architecture.md). Текущий updater обслуживает dev/build checkout;
+переход к независимым research/evaluation locks и deployment описан в
+[service migration](../tasks/service-migration.md).
 
 Полный upstream suite запускается в Linux CI. На Windows upstream v0.6.0
 содержит тест, который ошибочно предполагает, что системный TEMP всегда вне

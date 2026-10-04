@@ -4,6 +4,8 @@ TradingAgents анализирует рынок и предлагает реше
 
 **Сейчас реализована первая исследовательская веха, не live-бот.** Есть настоящий entry point для TradingAgents, офлайн fixture demo, JSON contract, portfolio checks, call budget и проверка native Nautilus engine. Реальные LLM решения требуют настроенного API; fake demo не выдаётся за анализ/alpha. Кошелёк не подключён.
 
+Принята архитектура **Go services + Python adapters**: новый control/state/risk/execution backend пишем на Go, TradingAgents и Nautilus сохраняем в Python runtime. Сервисы будут общаться через versioned contracts и обновляться отдельными artifacts. Go services и deployment пока не реализованы. [Архитектура и схема](docs/architecture.md), [правила разработки AGENTS.md](AGENTS.md), [переход по срезам](tasks/service-migration.md).
+
 ## Выбранные компоненты
 
 | Компонент | Выбор | Использование |
@@ -35,7 +37,7 @@ uv run --frozen --extra evaluation pytest
 .\scripts\update-upstream.ps1
 ```
 
-Ежедневный CI проверки latest stable подготовлен в `.github/workflows/`; активируется после размещения проекта на GitHub. Наши расширения пишем в `src/tradingbot/`, upstream файлы остаются чистыми.
+Ежедневный CI проверки latest stable подготовлен в `.github/workflows/`. Local GitHub remote уже настроен; выполнение hosted Actions и правила защиты веток не проверены. Python расширения пишем в `src/tradingbot/`, будущий Go module — в `go/`; upstream файлы остаются чистыми.
 
 `demo`: TSLA/NVDA, $1 000 USDC, синтетический HOLD с unknown forecast/confidence, 0 API calls. Artifacts в уникальном `runtime/demo-*`. `probe-engine`: реальные Nautilus cash/position/fill operations на искусственных quotes и заранее заданных orders; не подсоединён к AI intents и не backtest доходности.
 

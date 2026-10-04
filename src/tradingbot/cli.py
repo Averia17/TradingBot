@@ -94,7 +94,7 @@ def main(argv=None) -> int:
     try:
         if args.command == "schema":
             args.output.parent.mkdir(parents=True, exist_ok=True)
-            write_json(args.output, DecisionBatch.model_json_schema())
+            write_json(args.output, DecisionBatch.model_json_schema(mode="serialization"))
         elif args.command == "doctor":
             from tradingbot.adapters.tradingagents import check_compatibility
 

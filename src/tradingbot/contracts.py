@@ -5,9 +5,18 @@ from decimal import Decimal
 from typing import Annotated, Literal, Self
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel, ConfigDict, Field, PlainSerializer, WithJsonSchema,
+    field_validator, model_validator,
+)
 
-Money = Annotated[Decimal, Field(ge=0, max_digits=20, decimal_places=8)]
+DECIMAL_PATTERN = r"^(?:0|[1-9][0-9]{0,11})(?:\.[0-9]{1,8})?$"
+DecimalWire = Annotated[
+    Decimal,
+    PlainSerializer(lambda value: format(value, "f"), return_type=str),
+    WithJsonSchema({"type": "string", "pattern": DECIMAL_PATTERN}, mode="serialization"),
+]
+Money = Annotated[DecimalWire, Field(ge=0, max_digits=20, decimal_places=8)]
 Symbol = Annotated[str, Field(pattern=r"^[A-Z][A-Z0-9.\-]{0,15}$")]
 NonEmpty = Annotated[str, Field(min_length=1)]
 
@@ -19,8 +28,8 @@ class Contract(BaseModel):
 class Position(Contract):
     symbol: Symbol
     instrument_id: NonEmpty
-    quantity: Annotated[Decimal, Field(gt=0, max_digits=20, decimal_places=8)]
-    mark_price_usd: Annotated[Decimal, Field(gt=0, max_digits=20, decimal_places=8)]
+    quantity: Annotated[DecimalWire, Field(gt=0, max_digits=20, decimal_places=8)]
+    mark_price_usd: Annotated[DecimalWire, Field(gt=0, max_digits=20, decimal_places=8)]
 
     @property
     def value_usd(self) -> Decimal:
@@ -34,7 +43,9 @@ class PortfolioSnapshot(Contract):
     cash_asset: Literal["USDC", "USD"] = "USDC"
     cash_usd: Money
     reserved_cash_usd: Money = Decimal("0")
-    max_position_pct: Annotated[Decimal, Field(gt=0, le=1)] = Decimal("0.25")
+    max_position_pct: Annotated[
+        DecimalWire, Field(gt=0, le=1, max_digits=20, decimal_places=8)
+    ] = Decimal("0.25")
     positions: tuple[Position, ...] = ()
 
     @field_validator("as_of")
@@ -110,8 +121,30 @@ class DecisionBatch(Contract):
     as_of: datetime
     created_at: datetime
     expires_at: datetime
-    evidence_hashes: dict[str, str]
-    intents: tuple[TradeIntent, ...]
+    evidence_hashes: dict[NonEmpty, Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]]
+    intents: Annotated[tuple[TradeIntent, ...], Field(min_length=1)]
+
+    @field_validator("as_of", "created_at", "expires_at")
+    @classmethod
+    def timezone_required(cls, value: datetime) -> datetime:
+        if value.utcoffset() is None:
+            raise ValueError("batch timestamps must include a timezone")
+        return value
+
+    @model_validator(mode="after")
+    def coherent_batch(self) -> Self:
+        if self.as_of > self.created_at or self.expires_at <= self.created_at:
+            raise ValueError("batch timestamps out of order")
+        if len({i.symbol for i in self.intents}) != len(self.intents):
+            raise ValueError("duplicate symbols")
+        if len({i.decision_id for i in self.intents}) != len(self.intents):
+            raise ValueError("duplicate decision IDs")
+        for intent in self.intents:
+            if intent.action != "HOLD" and not intent.evidence_ids:
+                raise ValueError("non-HOLD requires evidence")
+            if any(ref not in self.evidence_hashes for ref in intent.evidence_ids):
+                raise ValueError("unknown evidence reference")
+        return self
 
 
 def validate_proposals(
