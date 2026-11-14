@@ -1,8 +1,14 @@
 # Implementation backlog — 04.10.2026
 
-**План, не выполненная реализация.** 51 ticket. Все unchecked. Пути ниже — предлагаемые будущие files/components, не утверждение об их наличии. Scope: один account, одна сеть, без leverage/bridge; main plan [plan.md](plan.md). Один ticket ориентировочно 0.5–2 engineer-days; если выход за пределы — разбить по acceptance artifact. Dependencies обязательны для dependent work, независимые исследования можно выполнять отдельно.
+**Backlog P0–P8.** Текущий статус и порядок работ — в [основном плане](plan.md).
+Галочка означает выполнение полного acceptance ticket. Пути в ранних задачах
+отражают исходный план и уточняются по [структуре Go/Python](service-migration.md).
 
-**Обновление реализации:** готов первый research контур, см. [Milestone 1](../docs/implementation-m1.md). P1-01: pinned installation/offline verification выполнены; P1-02/04/05 и P2-04 имеют частичную реализацию (contracts, usage/call cap, portfolio adapter, native-engine probe). Полные tickets остаются unchecked: реальные LLM outputs, полная billing/schema/PIT/ledger семантика и corporate-action acceptance ещё не выполнены. Это не завершение P0–P8 или live gate.
+**Уже есть:** P1-01 pinned setup и offline verification. P1-02/04/05 и P2-04
+частично покрыты research DTO, общими Go/Python fixtures и schemas, call cap,
+usage, portfolio adapter и native-engine probe. Полное acceptance требует
+проверок provider outputs, billing, PIT, ledger и corporate actions.
+Исторические результаты сохранены в [отчёте M1](../docs/implementation-m1.md).
 
 ## Phase 0 — Verification
 
@@ -26,7 +32,7 @@ Go module `go/` при реализации; Python-пути research/evaluation
 ### [ ] P0-02 — Pin upstream and license manifest
 
 - **Goal:** воспроизводимый состав reuse.
-- **Context:** TA v0.6.0 свежий; alternatives/licensing неоднородны.
+- **Context:** версии TA/Nautilus берём из `upstream.lock.json`. Дополнительные SDK требуют pin и license review.
 - **Files/components:** `docs/dependencies.md`, `research/upstream-manifest.json`.
 - **Acceptance:** immutable SHAs TA/Nautilus/SDK; release date, license, patch policy, unresolved compatibility; нет proprietary ATLAS prompts в поставке.
 - **Tests:** referenced SHAs/files существуют; license identifiers/conditions сверены с LICENSE.
@@ -74,7 +80,7 @@ Go module `go/` при реализации; Python-пути research/evaluation
 
 - **Goal:** первый coding artifact без wallet.
 - **Context:** release main не плавающая dependency.
-- **Files/components:** `python/pyproject.toml`, lockfile, `experiments/baseline/`, upstream fork reference.
+- **Files/components:** `pyproject.toml`, `uv.lock`, `upstream.lock.json`, `src/tradingbot/`, baseline artifacts, clean upstream checkouts.
 - **Acceptance:** setup documented; installed version matches SHA; upstream checks recorded; single-symbol fixture run archived with hashes; no execution credentials.
 - **Tests:** fresh-environment offline replay; network disabled fixtures; upstream test outcome report.
 - **Dependencies:** P0-02; P0-03 sample.
@@ -83,10 +89,10 @@ Go module `go/` при реализации; Python-пути research/evaluation
 
 - **Goal:** заменить ambiguous sizing/action outputs.
 - **Context:** upstream typed PM не готовый executable order.
-- **Files/components:** `contracts/intent.json`, `contracts/portfolio.json`, `python/trader/contracts.py`, fixtures.
+- **Files/components:** `shared/trade-intent/`, `src/tradingbot/contracts.py`, `go/internal/contract/`, fixtures. Held-wrapper identity расширяется отдельным контрактом перед paper/live.
 - **Acceptance:** five actions, target/delta/units, horizon/expiry/evidence/scenarios; no NaN/negative/inconsistent amount; fallback free text rejected.
 - **Tests:** invalid action, probability sums, inconsistent units, stale snapshot, SELL without instrument.
-- **Dependencies:** P1-01, P0-04.
+- **Dependencies:** P1-01. Для research проверяем на fixtures и публичных данных registry. Для работы с реальными held instruments требуется P0-04 и проверка конкретного account path.
 
 ### [ ] P1-03 — Immutable snapshot tool boundary
 
@@ -294,14 +300,14 @@ Go module `go/` при реализации; Python-пути research/evaluation
 
 ## Phase 5 — Paper operation
 
-### [ ] P5-01 — SQL jobs, leasing and outbox
+### [ ] P5-01 — Paper scheduling over durable research jobs
 
 - **Goal:** dependable event scheduling без Redis/Kafka.
 - **Context:** duplicate triggers не должны создавать двойные trades.
-- **Files/components:** `db/migrations/003_jobs.sql`, `python/trader/jobs.py`.
-- **Acceptance:** idempotent event IDs, lease expiration, attempt history, budgets and one account writer.
-- **Tests:** two workers lease once; crash/restart; expired lease recovery, duplicate catalyst.
-- **Dependencies:** P2-01, P4-05.
+- **Files/components:** Go scheduler поверх jobs/leases/outbox из S2 и research worker из S3.
+- **Acceptance:** расписание и события стратегии создают jobs с устойчивым trigger ID, заданным budget и ссылкой на policy/snapshot. Состояние восстанавливается из SQL.
+- **Tests:** duplicate catalyst, missed schedule after restart, lease recovery, concurrent trigger delivery.
+- **Dependencies:** S2, S3, P2-01, P4-05.
 
 ### [ ] P5-02 — Position/thesis review lifecycle
 

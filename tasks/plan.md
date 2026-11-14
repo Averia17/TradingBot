@@ -4,19 +4,51 @@
 
 Обозначения: **проверено** — исходный код или первичный источник; **заявлено автором** — результат публикации/README без независимого воспроизведения; **проектное решение** — предложение для нашей системы; **UNKNOWN** — данных для вывода нет. Дата проверки всех ссылок — 04.10.2026; версии и доказательства перечислены в [реестре источников](../research/SOURCES.md). Наличие документации не подтверждает доступ конкретного пользователя к продукту.
 
-**Уточнение архитектуры 05.10.2026:** новый собственный backend — Go services; Python сохраняется для TradingAgents/Nautilus и связанных SDK. Upstream остаётся чистым checkout, расширения — снаружи, service artifacts обновляются независимо. Актуальные границы и последовательность задают [ADR-001](../docs/decisions/001-go-services-python-adapters.md), [architecture](../docs/architecture.md), [service migration](service-migration.md) и [AGENTS.md](../AGENTS.md). Нижележащий исследовательский срез сохранён; предложения о маленьком fork/общем runtime уступают этому принятому решению. Go services и PostgreSQL ещё не реализованы.
+**Архитектура:** Go отвечает за API, jobs, ledger, risk, execution и reconciliation. Python сохраняем для TradingAgents, Nautilus и связанных SDK. Upstream остаётся чистым checkout, расширения находятся в нашем коде, deployment проектируется с независимыми artifacts. Границы закреплены в [ADR-001](../docs/decisions/001-go-services-python-adapters.md), [архитектуре](../docs/architecture.md) и [AGENTS.md](../AGENTS.md). Сведения о рынке, версиях и расходах в исследовательских разделах относятся к срезу 04.10.2026. Актуальные версии берём из [lockfile](../upstream.lock.json), актуальный порядок работ из таблицы ниже.
+
+## Ретроспектива на 15.11.2026
+
+| Область | Что можно проверить сегодня | Чего не хватает |
+|---|---|---|
+| Research | Python CLI, чистые pinned upstream checkouts и updater. Настоящий TradingAgents graph проверяется с offline models. Общий allocator выдаёт исследовательский batch с пятью действиями и проверкой совокупного cash/exposure | Разрешённый provider run, фактический USD billing, spend cap, неизменяемый point-in-time (PIT) контекст аналитиков и воспроизводимый архив |
+| Межсервисная граница | Go control проверяет research batch и согласованность с portfolio. Python producer и Go consumer используют общие serialization schemas и fixtures. Control хранит jobs, выдаёт ограниченные по времени попытки и принимает синтетические результаты | Python worker, публикация фактических usage/provenance и deployment с контролем доступа |
+| Оценка и экономика | Native Nautilus engine выполняет тестовые fills и обновляет cash/positions на синтетических котировках | AI intents в хронологическом replay, corporate actions, доступный benchmark, фактические затраты и prospective paper evidence |
+| Состояние и эксплуатация | Локальные dependency locks, updater и CI-конфигурация. PostgreSQL атомарно хранит задания и результаты с их outbox-событиями | Economic ledger, reservations, deployment, restore, hosted CI evidence, paper reconciliation, live executor и signer |
+| Доступ и доходность | Исследовательский срез содержит кандидатов и сценарные оценки | Страна и права конкретного аккаунта, права на PIT data, исполнимые цены и p95 расходы, наша net risk-adjusted доходность |
+
+Исследовательский wire contract `0.1` допускает только `research`. Для paper нужен отдельный account. Для live нужны собственный протокол, подтверждённый маршрут, проверенные ограничения и активация owner policy. Успешный тест отдельных компонентов ещё не закрывает acceptance всей фазы.
+
+## Рабочая последовательность
+
+[Backlog P0–P8](todo.md) задаёт acceptance и проверки по задачам. [Переход S1–S6](service-migration.md) раскладывает их инфраструктурные зависимости. Jobs для запуска research проходят S2 до финальной paper orchestration P5-01. Подготовку разрешённых источников, истории и котировок можно вести параллельно офлайн-разработке.
+
+| Порядок | Что строим и проверяем | Условие перехода |
+|---|---|---|
+| 1 · S1 | Go control и строгая граница Python → Go. Общие fixtures, точные строковые суммы, version/expiry/evidence и фактические health/capabilities | Go принимает Python-produced исследовательский результат и отклоняет несовместимый ввод. Локально проверены package gates и HTTP |
+| 2 · S2 | Версионированный job envelope, immutable portfolio/data snapshot и ledger-independent research queue. Сначала durable create/read, затем lease/heartbeat, fenced completion и outbox | Реальный PostgreSQL, ACK после commit, restart, конкурентный lease, idempotency по ID/hash, late results отклоняются, retry ограничен |
+| 3 · S3–S4, P1 | Python worker вызывает текущий adapter и сохраняет результат через Go. Затем usage/provenance, cancellation, отдельные locks/images, Compose, drain/rollback и contract CI | Offline cross-process путь через настоящий graph с scripted models. Реальные usage и ошибка provider видимы. Фактические счета проверяются отдельным ограниченным provider run при доступе и бюджете |
+| Параллельно · P0 | Data rights и PIT samples, registry инструмента, чистота/лицензии зависимостей, account-specific permissions, quote-study протокол и экономические критерии до эксперимента | Зафиксированы проверенные capabilities и пробелы. Кандидат Solana/USDC/xStocks через Jupiter и обычный брокер сравниваются по допуску, фактическому размеру и стоимости. xChange/Ondo условны |
+| 4 · P2 + начало S5 | В Go создать экономический ledger и paper limits. Собрать PIT prices/news/filings/vintages/universe/actions. Подключить Nautilus к хронологическим решениям, задержкам, следующим доступным fills, benchmark и costs | Cash/qty/fees conservation, exact precision, split/dividend/multiplier, halts/delistings, no look-ahead, воспроизводимый NAV. Ограничения исторического LLM evidence явно записаны |
+| 5 · P3 | С разрешённым read-only доступом собрать quote matrix по размеру, стороне и сессии. Нормализовать held instrument, raw units и share-equivalent стоимость. Проверить комиссии, spread, impact, failed tx, FX/depeg и OPEX | Есть измеренный допустимый путь при размере пилота. Котировки с истёкшим TTL, неподтверждённая доступность и пропуски видимы в результате. Убыточный маршрут закрывается либо заменяется проверенным |
+| 6 · P4 | Хранить действительные и shadow outcomes с момента доступности, добавлять ограниченную SQL memory/reflection. Сравнить deterministic, single-agent, full workflow и memory ablations | Выбран по заранее объявленному net/risk критерию и заморожен вариант с учётом стоимости. Доступность данных и исходов проверена на момент решения |
+| 7 · P5 / S5 | Запустить thesis/catalyst scheduler, isolated paper account, reservations и reconciliation. Измерять стоимость, latency, drift и ошибки. Проверить остановку, восстановление и поведение при outage | G5 подтверждает эксплуатационную надёжность и достаточную prospective выборку. Неубедительная выборка оставляет режим paper. Без средств и signer |
+| 8 · P6 / S6 | Реализовать отдельный live protocol и один одобренный venue path. Проверить точное декодирование транзакций, независимый signer, owner limits, idempotency, finality и restore в sandbox | G6 требует проверенного access/security/recovery, независимого наблюдения балансов и отсутствия нерешённых критических путей. UNKNOWN удерживает reservation |
+| 9 · P7 | При G0/G3/G5/G6 и явной активации владельца: micro canary, фактический settlement, контрольный выход и ограниченный автономный pilot | G7 фиксирует фактические fees/slippage, paper/live drift, незавершённые операции, drawdown и решение stop/paper/continue |
+| 10 · P8 | Обновить условия доступа и цену следующего размера, провести независимую перепроверку security, отчётов и capacity | Владелец принимает scale/simplify/stop. Масштабирование требует достаточной положительной net risk-adjusted доходности относительно доступного benchmark, с cash idle, комиссиями, chain fees, LLM, данными и инфраструктурой |
+
+До live-пилота нужны подтверждение страны и условий конкретного аккаунта, разрешённые API и инструменты, проверенные caps владельца и накопленные наблюдения. Оплачиваемые model/data runs требуют согласованного бюджета. Исходный план закладывал минимум 20 торговых дней сбора котировок и 8–12 недель проверки стабильности forward paper. Для горизонтов в месяцы срок статистической проверки определяется выборкой и может быть больше.
 
 ## 1. Executive Summary
 
 **START WITH CONDITIONS — начать исследование и forward paper, не начинать автономную live-торговлю сейчас.** На сегодня нет доказанного net risk-adjusted alpha этой системы, подтверждённого retail-доступа к выбранному RFQ и измеренных исполнимых котировок для $1 000. На таком капитале регулярные расходы могут быть сильнее потенциального торгового преимущества.
 
-Использовать чистый checkout **TauricResearch/TradingAgents v0.6.0**, зафиксировав commit `1394a3f72aa4393e1a98f51b382434c4b4c2d972`, как исследовательский AI workflow. Подключить существующий **NautilusTrader BacktestEngine**. Python отвечает за исследования и решения; Go — за control/scheduler/ledger, risk checks, котировки, исполнение и reconciliation; PostgreSQL — за портфель, события, задания и воспроизводимую память. Сырые данные — immutable Parquet/JSON-файлы с хешами и резервной копией. Один EU VPS для research/control и отдельный изолированный signer для live. Docker Compose; без Kafka, Redis, Kubernetes и векторной БД в MVP.
+Использовать чистый checkout **TauricResearch/TradingAgents** как research workflow и **NautilusTrader BacktestEngine** для оценки. Текущие версии и SHA фиксирует [upstream lock](../upstream.lock.json). Python отвечает за исследования и решения, Go — за control/scheduler/ledger, risk checks, котировки, исполнение и reconciliation, PostgreSQL — за портфель, события, задания и воспроизводимую память. Сырые данные храним в immutable Parquet/JSON-файлах с хешами и резервной копией. Первый deployment — Docker Compose на EU VPS с отдельным изолированным signer для live.
 
 Первый execution-кандидат для self-custody — **одна сеть Solana, USDC, разрешённые xStocks, Jupiter Swap v2**; xChange и Ondo подключаются только после подтверждения доступа, minimum size и фактической экономики. Это кандидат для эксперимента, не доказанный лучший маршрут. Обычный брокер — полноценная альтернатива и контрольный execution baseline; если он дешевле и tokenization не даёт измеримой выгоды, выбирать брокера.
 
 Для $1 000 исследовательский lean-режим ориентировочно стоит **$35–100/месяц**, полноценный режим с платными данными может стоить **$100–400+**; это плановые бюджеты, не тарифные предложения. Даже $60/месяц требуют 72% годового простого excess return только для покрытия фиксированных расходов. Поэтому $1 000 — бюджет проверки технологии с заранее ограниченным убытком; экономически жизнеспособный капитал пока UNKNOWN. Доходность не прогнозируется.
 
-Первая задача — **P0-01: подтвердить eligibility и API-доступ для конкретной страны/категории клиента и получить условия исполнения**. Первая задача разработки после этого — **P1-01: воспроизводимый TradingAgents baseline на зафиксированном commit без подключения кошелька**. Полный [backlog](todo.md).
+**P0-01** остаётся первой задачей по подтверждению доступа. Офлайн-разработка идёт параллельно по S1 → S2 → S3. Полный [backlog](todo.md).
 
 ## 2. Current State of the Ecosystem — October 2026
 
@@ -63,7 +95,7 @@ GitHub API snapshot показывает 35 open issues и 42 open PR на ср�
 
 | Проект / pinned snapshot | Сильная сторона | Ограничение source review | Решение |
 |---|---|---|---|
-| TradingAgents / `1394a3f` | Debate, portfolio context, современная память, Apache-2.0 | Не portfolio execution simulator; intraday/PIT/sizing доработать | Основной research fork |
+| TradingAgents / `1394a3f` | Debate, portfolio context, современная память, Apache-2.0 | Не portfolio execution simulator; intraday/PIT/sizing доработать | Выбранный research core на историческом срезе |
 | FinAgent / `17248a0` | Intelligence + high/low-level reflection, MIT | Runtime старый; state содержит look-forward slice: train/eval границу надо трассировать; FAISS exceptions скрываются | Повторить идеи в ablation, не переносить runtime |
 | FinMem / `be814aa` | Recency/importance/relevance, memory layers, MIT | Старый runtime, embedding cost, pickle persistence | Опциональный memory baseline после простой SQL-памяти |
 | FinRL-X / `4409abe` | Selection/allocation/timing/risk, bt, Alpaca, Apache-2.0 | Quarter-date map не фактическое filing time; current S&P universe в screener | Baseline/идеи, не готовый PIT evaluator |
@@ -507,23 +539,26 @@ Alerts только actionable: risk/fee breach, unauthorized signing attempt, h
 
 ## 29. Technology Stack
 
-Python: pinned TradingAgents fork, Pydantic contracts, pandas/Arrow/Parquet, NautilusTrader, pytest/property tests, provider SDKs. Qlib optional после простого scorer, не обязательная dependency. Go: generated venue clients, maintained Solana SDK, decimal/integer math, pgx, stdlib HTTP/TLS; no Python wallet tool. PostgreSQL supported version pin после compatibility check, SQL migrations, transaction outbox/jobs. Local research Windows допустим; deployment Linux EU VPS.
+Python: pinned TradingAgents checkout, Pydantic contracts, pandas/Arrow/Parquet, NautilusTrader, pytest, provider SDKs. Qlib optional после простого scorer. Go: generated venue clients, maintained Solana SDK, decimal/integer math, pgx, stdlib HTTP/TLS. PostgreSQL: versioned migrations, transactional outbox/jobs. Local research работает на Windows, deployment планируется на Linux в ЕС.
 
-Compose services сначала Python worker+Postgres; затем Go executor; signer отдельным trust boundary/host. Schedule/job leasing в Postgres; один account writer, no distributed microservices maze. Metrics/logging сначала стандартные библиотеки и файлы/SQL, отдельный monitoring stack когда justified. Versions/SBOM/license lock обновляются controlled workflow; exact package versions пока не проверены installation spike и не выдаются за готовый lockfile.
+Первый Compose profile объединяет Go control, PostgreSQL и Python research worker. Evaluation имеет отдельные Python dependencies, executor выделяется перед подключением торговых credentials, signer работает на отдельном host. Schedule/job leasing в PostgreSQL, один account writer. Начальные metrics/logging используют стандартные библиотеки. Версии, SBOM и лицензии фиксируются при сборке artifacts.
 
 EU VPS не гарантирует EU data processing у LLM/vendor. До реальных персональных/портфельных данных проверить provider region, retention, DPA и account terms. KYC документы не передавать LLM. Cloud-region requirements — отдельный deployment gate.
 
 ## 30. Repository Structure
 
-Ниже **проектная** структура будущего приложения; сегодня созданы только документы и research snapshots.
+В дереве указаны текущие компоненты и пути будущих срезов.
 
 ```text
 docs/                    ADR, contracts, experiment protocol, runbooks
-research/                pinned upstream checkouts, source/evidence registry
-tasks/                   plan.md, todo.md
-contracts/               intent, snapshot, quote, event schemas + fixtures
-python/trader/           ingestion, snapshots, universe, agents, memory, evaluation
-go/cmd/executor/         CLI/service entry
+research/                source/evidence registry
+vendor/                  отдельные чистые upstream checkouts
+tasks/                   plan.md, todo.md, service-migration.md
+shared/trade-intent/     research schemas and fixtures
+src/tradingbot/          Python research CLI, adapters and Nautilus probe
+go/cmd/control/          Go control entry point
+go/internal/contract/    Go consumer for the research wire contract
+go/cmd/executor/         future execution entry point
 go/internal/risk/        caps, reservations, freshness
 go/internal/venues/      jupiter, xchange, ondo, optional broker
 go/internal/verify/      decoded transaction policy
@@ -536,7 +571,7 @@ tests/fixtures/          recorded responses, corrupt/adversarial cases
 deploy/                  Compose, service/IAM templates
 ```
 
-Fork upstream в отдельном managed repository/vendor reference, не смешивать его memory/output с authoritative ledger. Secrets/runtime wallets не находятся в repo. Restore copy исследования не является deployable project.
+Наши адаптеры работают с чистыми upstream checkouts. Authoritative ledger находится в PostgreSQL. Secrets и wallets хранятся вне репозитория.
 
 ## 31. Implementation Phases
 
@@ -586,9 +621,9 @@ Model evaluations separate from deterministic pass/fail: probability calibration
 
 ## 33. Concrete Tasks / Tickets
 
-[tasks/todo.md](todo.md) содержит 51 небольшой ticket с ID, целью, контекстом, предполагаемыми files/components, acceptance criteria, tests и dependencies. Ticket описывает будущую работу: эти пути ещё не реализованы. Никакого «implement entire trading system» в одной задаче. Scope расширять только после измерения предыдущего этапа.
+[Backlog](todo.md) содержит задачи с ID, целью, файлами, acceptance, тестами и зависимостями. [Переход к Go services](service-migration.md) задаёт ближайшие срезы для durable research, packaging, paper и execution.
 
-Первое действие: P0-01 eligibility/access dossier. Первый coding ticket: P1-01 pinned local baseline. P0 tasks с quote/data evidence можно делать независимо от AI baseline; исполнение и signer — позже, не prerequisite для исторического исследования.
+S1 и S2 покрывают проверку wire и durable цикл от создания задания до синтетического результата. Следующий срез S3 запускает Python worker поверх этой очереди с offline TradingAgents graph, реальным учётом usage и provenance. P0-01 и разрешённые quote/data feasibility checks можно вести параллельно.
 
 ## 34. Estimated complexity for every phase
 
@@ -645,11 +680,11 @@ Model evaluations separate from deterministic pass/fail: probability calibration
 
 ## 37. Final recommendation: START / DO NOT START / START WITH CONDITIONS
 
-**START WITH CONDITIONS.** Форкаем TradingAgents v0.6.0 на указанном SHA для AI research; подключаем Nautilus для evaluator и maintained SDK/generated clients для execution; собственными делаем PIT archive adapters, TradeIntent/portfolio contract, SQL event ledger, cost-aware router, deterministic limits, independent verifier и reconciliation. Не форкаем FinAgent/FinMem/ATLAS runtime как основу.
+Начинаем с research и развиваем его до forward paper. Используем чистый pinned TradingAgents и Nautilus, Go control + PostgreSQL с immutable archive, отдельные Python adapters и поддерживаемые SDK. Собственные компоненты отвечают за PIT inputs, wire contracts, ledger, cost-aware routing, deterministic limits, independent verifier и reconciliation.
 
-На первом этапе: **Python + PostgreSQL + immutable files, paper-only**. Далее Go executor; одна Solana сеть, USDC и legally approved secondary xStocks path как candidate. xChange/Ondo — условные adapters после access/minimum/cost proof. Cold treasury+bounded trading float+isolated signer; bot не пополняет float и не администрирует ключи. Если token route хуже broker baseline, выбрать broker и сохранить AI/data/evaluation архитектуру.
+Одна сеть Solana, USDC и допущенный secondary xStocks path остаются кандидатами. xChange/Ondo зависят от доступа, minimum size и измеренных затрат. Брокер остаётся полноценным вариантом. В onchain пилоте cold treasury и управление ключами принадлежат владельцу, а изолированный signer ограничен trading float.
 
-$1 000: research OPEX ориентировочно $35–100/month, full operation $100–400+ по неподтверждённым пока vendor budgets; это тяжёлый cost hurdle, а не обещание окупаемости. Quotes, country/account permissions, data contract, model compatibility/cost и prospective alpha остаются UNKNOWN. Начинать с **P0-01**, затем **P1-01**. **DO NOT START autonomous live** до access, cost, evidence и security gates. Цель считается достигнутой только при net risk-adjusted alpha после execution, chain, LLM, data и infrastructure относительно корректного benchmark; работающий бот и положительный номинальный P&L сами по себе недостаточны.
+При капитале $1 000 заранее проверяем экономику относительно эталона с тем же капиталом и расходами. Автономный live возможен после условий доступа, измеренной экономики, prospective evidence, security gates и активации owner policy. P8 завершает проект решением о масштабе, упрощении или остановке на основании net risk-adjusted результата.
 
 
 

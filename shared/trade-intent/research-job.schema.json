@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Research job HTTP protocol 0.1",
+  "$ref": "#/$defs/JobRequest",
+  "$defs": {
+    "UUID": {
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$"
+    },
+    "Identifier": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "JobRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["job_schema_version", "job_id", "portfolio", "requested_symbols", "data_manifest", "policy_version", "max_llm_calls"],
+      "properties": {
+        "job_schema_version": {"const": "0.1"},
+        "job_id": {"$ref": "#/$defs/UUID"},
+        "portfolio": {"$ref": "portfolio.schema.json"},
+        "requested_symbols": {
+          "type": "array", "minItems": 1, "maxItems": 100, "uniqueItems": true,
+          "items": {"type": "string", "pattern": "^[A-Z][A-Z0-9.\\-]{0,15}$"}
+        },
+        "data_manifest": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["ref", "sha256"],
+          "properties": {
+            "ref": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]{0,511}$"},
+            "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+          }
+        },
+        "policy_version": {"$ref": "#/$defs/Identifier"},
+        "max_llm_calls": {"type": "integer", "minimum": 1, "maximum": 64}
+      }
+    },
+    "ClaimRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["worker_id", "claim_id"],
+      "properties": {
+        "worker_id": {"$ref": "#/$defs/Identifier"},
+        "claim_id": {"$ref": "#/$defs/UUID"}
+      }
+    },
+    "HeartbeatRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["worker_id", "lease_token"],
+      "properties": {
+        "worker_id": {"$ref": "#/$defs/Identifier"},
+        "lease_token": {"$ref": "#/$defs/UUID"}
+      }
+    },
+    "Lease": {
+      "type": "object",
+      "required": ["job_id", "status", "worker_id", "claim_id", "lease_token", "attempt", "lease_expires_at", "attempt_deadline"],
+      "properties": {
+        "job_id": {"$ref": "#/$defs/UUID"},
+        "status": {"const": "leased"},
+        "worker_id": {"$ref": "#/$defs/Identifier"},
+        "claim_id": {"$ref": "#/$defs/UUID"},
+        "lease_token": {"$ref": "#/$defs/UUID"},
+        "attempt": {"type": "integer", "minimum": 1, "maximum": 3},
+        "lease_expires_at": {"type": "string", "format": "date-time"},
+        "attempt_deadline": {"type": "string", "format": "date-time"}
+      }
+    },
+    "ClaimResponse": {
+      "allOf": [{"$ref": "#/$defs/Lease"}],
+      "properties": {"request": {"$ref": "#/$defs/JobRequest"}},
+      "required": ["request"],
+      "unevaluatedProperties": false
+    },
+    "HeartbeatResponse": {
+      "allOf": [{"$ref": "#/$defs/Lease"}],
+      "unevaluatedProperties": false
+    }
+  }
+}

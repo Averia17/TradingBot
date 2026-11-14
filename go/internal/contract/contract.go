@@ -10,11 +10,15 @@ import (
 	"io"
 	"math/big"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/santhosh-tekuri/jsonschema/v6"
 )
+
+// BatchVersion identifies the supported research result contract.
+const BatchVersion = "0.1"
 
 //go:embed schema.json
 var batchSchema []byte
@@ -94,29 +98,34 @@ var portfolioValidator = compile(portfolioSchema)
 func Decode(data []byte, validator *jsonschema.Schema, out any) error {
 	d := json.NewDecoder(bytes.NewReader(data))
 	d.UseNumber()
-	if err := walk(d); err != nil {
+	if err := walk(d, validator != nil); err != nil {
 		return err
 	}
 	if _, err := d.Token(); err != io.EOF {
 		return errors.New("trailing JSON")
 	}
-	if validator != nil {
-		value, err := jsonschema.UnmarshalJSON(bytes.NewReader(data))
-		if err != nil {
-			return err
-		}
-		if err = validator.Validate(value); err != nil {
-			return errors.New("schema violation")
-		}
-	}
 	d = json.NewDecoder(bytes.NewReader(data))
 	d.DisallowUnknownFields()
-	return d.Decode(out)
+	if err := d.Decode(out); err != nil || validator == nil {
+		return err
+	}
+	value, err := jsonschema.UnmarshalJSON(bytes.NewReader(data))
+	if err != nil {
+		return err
+	}
+	if err := validator.Validate(value); err != nil {
+		return errors.New("schema violation")
+	}
+	return nil
 }
-func walk(d *json.Decoder) error {
+
+func walk(d *json.Decoder, schemaValidation bool) error {
 	tok, err := d.Token()
 	if err != nil {
 		return err
+	}
+	if number, ok := tok.(json.Number); ok && schemaValidation {
+		return checkSchemaNumber(number.String())
 	}
 	delim, ok := tok.(json.Delim)
 	if !ok {
@@ -138,12 +147,29 @@ func walk(d *json.Decoder) error {
 			}
 			keys[key] = true
 		}
-		if err := walk(d); err != nil {
+		if err := walk(d, schemaValidation); err != nil {
 			return err
 		}
 	}
 	_, err = d.Token()
 	return err
+}
+
+func checkSchemaNumber(number string) error {
+	// Bound exact rational conversion inside the schema validator. These
+	// limits cover serialized float64 estimates and integer fields.
+	const maxLength = 64
+	const maxExponent = 400
+	if len(number) > maxLength {
+		return errors.New("numeric literal exceeds wire range")
+	}
+	if i := strings.IndexAny(number, "eE"); i >= 0 {
+		exponent, err := strconv.Atoi(number[i+1:])
+		if err != nil || exponent < -maxExponent || exponent > maxExponent {
+			return errors.New("numeric literal exceeds wire range")
+		}
+	}
+	return nil
 }
 
 func Amount(s string) (*big.Rat, error) {
@@ -161,7 +187,7 @@ func ParseBatch(data []byte, now time.Time, maxAge time.Duration) (Batch, error)
 	if err := Decode(data, batchValidator, &b); err != nil {
 		return b, err
 	}
-	if b.Version != "0.1" || b.Mode != "research" {
+	if b.Version != BatchVersion || b.Mode != "research" {
 		return b, errors.New("unsupported protocol")
 	}
 	if b.AsOf.After(b.Created) || b.Created.After(now) || !b.Expires.After(now) || !b.Expires.After(b.Created) || now.Sub(b.AsOf) > maxAge {
@@ -169,11 +195,12 @@ func ParseBatch(data []byte, now time.Time, maxAge time.Duration) (Batch, error)
 	}
 	symbols, ids := map[string]bool{}, map[string]bool{}
 	for _, i := range b.Intents {
-		if symbols[i.Symbol] || ids[i.ID] {
+		decisionID := strings.ToLower(i.ID)
+		if symbols[i.Symbol] || ids[decisionID] {
 			return b, errors.New("duplicate decision")
 		}
 		symbols[i.Symbol] = true
-		ids[i.ID] = true
+		ids[decisionID] = true
 		amount, err := Amount(i.Notional)
 		if err != nil {
 			return b, err
@@ -229,10 +256,10 @@ func ParsePortfolio(data []byte) (Portfolio, error) {
 	return p, nil
 }
 
-// CheckAllocation is an exact research precheck against a control-owned snapshot.
+// CheckAllocation is an exact research precheck against a validated snapshot.
 // It does not reserve cash and cannot authorize paper or live orders.
 func CheckAllocation(b Batch, p Portfolio, symbols []string) error {
-	if b.SnapshotID != p.ID || !b.AsOf.Equal(p.AsOf) {
+	if !strings.EqualFold(b.SnapshotID, p.ID) || !b.AsOf.Equal(p.AsOf) {
 		return errors.New("snapshot mismatch")
 	}
 	requested := map[string]bool{}

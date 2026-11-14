@@ -25,8 +25,11 @@ benchmark после комиссий, spread/slippage, chain fees, LLM, дан�
 Сейчас работает Python research M1: TradingAgents adapter, typed portfolio
 arbitration, JSON contracts, call budget, offline demo и native Nautilus probe.
 `DecisionBatch` версии `0.1` допускает только `execution_mode="research"`.
-Подписание, live execution, PostgreSQL ledger/jobs, Go services и Compose
-deployment ещё не реализованы. [Отчёт M1](docs/implementation-m1.md) и
+Go control проверяет research batch без сохранения и с настроенной PostgreSQL
+принимает, читает и выдаёт research jobs по lease. Поддерживается durable
+публикация синтетического результата. Python worker, economic ledger, подписание,
+live execution и Compose deployment входят в следующие срезы.
+[Отчёт M1](docs/implementation-m1.md) и
 [проверка обновлений](docs/upstream-updates-verification.md) содержат evidence.
 
 Документы с целевой архитектурой не являются свидетельством её реализации.
@@ -89,9 +92,8 @@ balances, readiness зависимостей или результат плат�
 - Raw token amounts — integer strings с chain/mint/decimals и версией registry.
   Восемь decimal places текущего equity contract не являются правилом для
   любых токенов. Ticker не заменяет identity конкретного held instrument/mint.
-- Schema export для межсервисной границы должен описывать **serialized** payload.
-  Текущий M1 schema создан в validation mode и допускает numeric inputs;
-  перед Go boundary нужен serialization schema и общие Python/Go fixtures.
+- Schema export для межсервисной границы описывает **serialized** payload.
+  Поддерживать общие Python/Go schemas и fixtures в `shared/trade-intent/`.
 - Unknown fields, невалидные amounts, неизвестная schema, stale snapshot,
   expired intent и отсутствующие evidence приводят к отказу. Ошибка не должна
   превращаться в BUY, обход checks или поддельный успешный HOLD.
@@ -129,7 +131,7 @@ drain либо истекают по lease; повторный attempt прох�
 ## Структура и разработка
 
 Текущие Python files: `src/tradingbot/`, `tests/`, `shared/trade-intent/`.
-Будущий Go module: `go/go.mod`, executable в `go/cmd/`, domain/adapters в
+Go module: `go/go.mod`, executable в `go/cmd/`, domain/adapters в
 `go/internal/`. Service packaging — `services/`; deployment — `deploy/`.
 Эти будущие каталоги добавляются вместе с работающим проверяемым срезом.
 

@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 from tradingbot.cli import main
 
@@ -14,6 +15,19 @@ def test_offline_demo_writes_json_schema_evidence_and_research_only_intents(tmp_
     assert metadata["source_mode"] == "synthetic_fixture"
     assert metadata["llm_calls"] == 0
     assert (output / "reports.json").exists()
+
+
+def test_demo_matches_the_shared_synthetic_result_fixture(tmp_path):
+    output = tmp_path / "demo"
+    assert main(["demo", "--output", str(output)]) == 0
+
+    shared = Path(__file__).resolve().parents[1] / "shared" / "trade-intent"
+    fixture = json.loads((shared / "valid-result-request.json").read_text(encoding="utf-8"))
+    batch = json.loads((output / "intents.json").read_text(encoding="utf-8"))
+    assert fixture["batch"] == json.loads((shared / "valid-batch.json").read_text(encoding="utf-8"))
+    assert fixture["batch"]["evidence_hashes"] == batch["evidence_hashes"]
+    assert fixture["reports"] == json.loads((output / "reports.json").read_text(encoding="utf-8"))
+    assert fixture["metadata"] == json.loads((output / "metadata.json").read_text(encoding="utf-8"))
 
 
 def test_completed_run_is_not_overwritten(tmp_path):

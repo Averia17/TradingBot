@@ -6,14 +6,36 @@ from typing import Annotated, Literal, Self
 from uuid import UUID
 
 from pydantic import (
-    BaseModel, ConfigDict, Field, PlainSerializer, WithJsonSchema,
-    field_validator, model_validator,
+    BaseModel,
+    ConfigDict,
+    Field,
+    PlainSerializer,
+    WithJsonSchema,
+    field_validator,
+    model_validator,
 )
 
 DECIMAL_PATTERN = r"^(?:0|[1-9][0-9]{0,11})(?:\.[0-9]{1,8})?$"
+
+
+def _serialize_decimal(value: Decimal) -> str:
+    if value.is_zero():
+        exponent = value.as_tuple().exponent
+        if -8 <= exponent < 0:
+            return format(value.copy_abs(), "f")
+        return "0"
+
+    amount = format(value, "f")
+    _, _, fraction = amount.partition(".")
+    # Validation bounds significant fractional digits. Only surplus zeroes can extend the scale.
+    if len(fraction) > 8:
+        return amount.rstrip("0").rstrip(".")
+    return amount
+
+
 DecimalWire = Annotated[
     Decimal,
-    PlainSerializer(lambda value: format(value, "f"), return_type=str),
+    PlainSerializer(_serialize_decimal, return_type=str),
     WithJsonSchema({"type": "string", "pattern": DECIMAL_PATTERN}, mode="serialization"),
 ]
 Money = Annotated[DecimalWire, Field(ge=0, max_digits=20, decimal_places=8)]
@@ -22,7 +44,12 @@ NonEmpty = Annotated[str, Field(min_length=1)]
 
 
 class Contract(BaseModel):
-    model_config = ConfigDict(extra="forbid", allow_inf_nan=False, frozen=True)
+    model_config = ConfigDict(
+        extra="forbid",
+        allow_inf_nan=False,
+        frozen=True,
+        json_schema_serialization_defaults_required=True,
+    )
 
 
 class Position(Contract):

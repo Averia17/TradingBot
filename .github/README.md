@@ -8,11 +8,12 @@
 
 Local GitHub remote уже настроен на 05.10.2026; публикация/выполнение hosted Actions и server branch protection здесь не проверены. Scheduled workflow должен находиться на default branch с включёнными Actions. Правила защиты веток задаются в GitHub отдельно: оба статуса `Quality` должны быть обязательными перед merge. Наличие YAML не подтверждает, что эти правила включены. Проект пока не настраивает статический type checker или отдельный vulnerability scanner; `uv pip check` проверяет согласованность зависимостей и не заменяет аудит уязвимостей.
 
-Новый Go CI добавляется вместе с реальным `go/go.mod`, согласно [AGENTS.md](../AGENTS.md) и [service migration](../tasks/service-migration.md). Существующие workflows сейчас проверяют только реализованный Python контур.
+`Go Quality (ubuntu-latest)` в `quality.yml` проверяет форматирование, зависимости, `vet`, тесты, гонки данных и сборку Go-модуля. Версия Go берётся из `go/go.mod`. Тесты читают общий JSON fixture от Python producer. Race gate использует отдельную PostgreSQL 17 только для тестов durable jobs. Этапы реализации описаны в [service migration](../tasks/service-migration.md).
 
 Внешние Actions зафиксированы по commit. Источники проверены 2026-10-04:
 
 - [actions/checkout v7.0.1](https://github.com/actions/checkout/releases/tag/v7.0.1)
+- [actions/setup-go v7.0.0](https://github.com/actions/setup-go/releases/tag/v7.0.0)
 - [astral-sh/setup-uv v10.2.0](https://github.com/astral-sh/setup-uv/releases/tag/v10.2.0)
 - [actions/upload-artifact v7.0.1](https://github.com/actions/upload-artifact/releases/tag/v7.0.1)
 

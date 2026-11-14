@@ -31,6 +31,17 @@ def export():
     })
     for name, value in (("valid-batch", batch), ("valid-portfolio", book)):
         (target / f"{name}.json").write_text(value.model_dump_json(indent=2) + "\n", encoding="utf-8")
+    completion = {
+        "result_schema_version": "0.1",
+        "worker_id": "fixture-worker",
+        "lease_token": str(UUID(int=32)),
+        "batch": batch.model_dump(mode="json"),
+        "reports": reports,
+        "metadata": {"source_mode": "synthetic_fixture", "llm_calls": 0, "alpha_measured": False},
+    }
+    (target / "valid-result-request.json").write_text(
+        json.dumps(completion, indent=2) + "\n", encoding="utf-8"
+    )
 
 
 if __name__ == "__main__":

@@ -187,6 +187,8 @@
     }
   },
   "required": [
+    "schema_version",
+    "execution_mode",
     "run_id",
     "portfolio_snapshot_id",
     "as_of",

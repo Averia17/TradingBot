@@ -1,20 +1,21 @@
 # Архитектура TradingBot: Go services и Python adapters
 
 **Решение принято 05.10.2026.** Это целевая архитектура и порядок перехода.
-Текущий runtime остаётся Python research M1; Go services, PostgreSQL jobs,
-межсервисный HTTP и deployment ещё предстоит реализовать.
+Доступны Python research CLI, локальная stateless-валидация и research queue
+в Go control с durable create/read, claim, heartbeat и сохранением синтетического
+результата. Python worker и deployment входят в следующие срезы.
 Правила для разработчиков: [AGENTS.md](../AGENTS.md).
 
 ## Ответственность компонентов
 
 | Компонент | Язык | Ответственность | Runtime статус |
 |---|---|---|---|
-| Control/account | Go | API, scheduler, jobs/leases/outbox, snapshots, ledger, reservations, deterministic risk, costs, reconciliation | Следующий срез |
+| Control/account | Go | API, scheduler, jobs/leases/outbox, snapshots, ledger, reservations, deterministic risk, costs, reconciliation | Health, capabilities, stateless validation, PostgreSQL jobs, leases и результаты demo |
 | Research worker | Python | TradingAgents graph, provider SDK/callbacks, portfolio arbitration, evidence, usage; выдаёт research batch | Сейчас CLI и library; service entry point впереди |
 | Evaluation worker | Python | Nautilus replay/backtest/paper evaluation, execution-cost models, benchmarks | Сейчас synthetic native probe |
 | Execution worker | Go | Allowed venue quotes/build/submit/status; без ключа и права менять policy | Будущий модуль control, затем отдельный process |
 | Independent verifier/signer | Go | Decode transaction, owner limits/allowlists, approval exact hash, signing | Отдельный future live host/identity |
-| PostgreSQL | SQL | Durable state/jobs/events и constraints; economic writes только через control | Не развёрнут |
+| PostgreSQL | SQL | Durable state/jobs/events и constraints; economic writes только через control | Локальные migrations для research snapshots/jobs/outbox, production deployment впереди |
 
 Go — основной язык собственного backend. Python сохраняем для библиотек, которые
 уже предоставляют graph, structured inference и evaluation engine. Обычные внешние
@@ -77,10 +78,17 @@ Research сохраняет решения без блокировки реал�
 lease/attempt/heartbeat, результат публикуется отдельно. Открытый HTTP-запрос
 на всё время анализа не является механизмом очереди.
 
-Go выдаёт portfolio snapshot, snapshot version/hash, requested symbols,
-policy/config version и call/spend budget. Worker возвращает batch и provenance:
-job/attempt, run ID, evidence hashes, actual usage и версии service/upstream/model.
-Формат job envelope будет утверждён при реализации; существующий research DTO
+Job envelope `0.1` для create/read содержит immutable research portfolio,
+ссылку и хеш data manifest, requested symbols, policy version и call budget.
+Control возвращает durable ACK после commit snapshot, job и creation outbox.
+PostgreSQL выдаёт и продлевает один действующий lease на job по своему времени.
+Попытку идентифицируют worker ID, claim ID, номер и уникальный token.
+Повтор того же claim в пределах lease возвращает уже выданную попытку.
+Сейчас completion принимает batch, отчёты и метаданные `synthetic_fixture`.
+Control сравнивает batch с сохранённым snapshot и universe, пересчитывает
+evidence hashes из текста и проверяет lease перед записью. Результат, статус
+и outbox commit атомарно. S3 добавляет actual usage и provenance моделей и upstream
+для Python worker. Существующий research DTO
 содержит `run_id`, `portfolio_snapshot_id`, `as_of`, `created_at`, `expires_at`,
 `evidence_hashes`, `intents` и `schema_version="0.1"`.
 
@@ -94,12 +102,14 @@ job/attempt, run ID, evidence hashes, actual usage и версии service/upstr
 | Authority | Result endpoint не принимает новые balances, owner policy, credentials или signing instructions |
 | Availability | Durable ACK после transaction commit; UNKNOWN execution удерживает reservation |
 
-Текущие Python JSON amounts уже сериализуются строками. Экспортированная M1 schema
-пока описывает validation inputs и допускает JSON numbers: перед Go transport
-её нужно экспортировать в serialization mode и проверить boundary fixtures.
-Одна schema не заменяет проверки диапазонов, precision и financial consistency.
-Текущий `research` DTO не использовать для live order: live protocol и state
-machine добавляются отдельным принятым изменением.
+Research DTO описан [общими serialization schemas](../shared/trade-intent/).
+Python сериализует amounts десятичными строками. Go проверяет схему,
+freshness и согласованность распределения с переданным portfolio и universe.
+И диагностика, и локальное создание job получают research portfolio от
+вызывающей стороны. Сохранённая запись фиксирует этот ввод. Control проверяет
+сохранённые хеши перед выдачей и проверяет attempt и snapshot при записи результата.
+Доступность содержимого data manifest проверяется при интеграции с архивом.
+Право на paper/live execution задаётся отдельными протоколами.
 
 ## Данные и полномочия
 

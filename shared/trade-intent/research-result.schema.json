@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Research job result HTTP protocol 0.1",
+  "$ref": "#/$defs/CompleteRequest",
+  "$defs": {
+    "Reports": {
+      "type": "object",
+      "minProperties": 1,
+      "maxProperties": 100,
+      "propertyNames": {"pattern": "^[A-Z][A-Z0-9.\\-]{0,15}$"},
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["final_trade_decision"],
+        "properties": {
+          "market_report": {"$ref": "#/$defs/ReportText"},
+          "fundamentals_report": {"$ref": "#/$defs/ReportText"},
+          "news_report": {"$ref": "#/$defs/ReportText"},
+          "sentiment_report": {"$ref": "#/$defs/ReportText"},
+          "trader_investment_plan": {"$ref": "#/$defs/ReportText"},
+          "final_trade_decision": {"$ref": "#/$defs/ReportText"}
+        }
+      }
+    },
+    "ReportText": {"type": "string", "pattern": "\\S"},
+    "SyntheticMetadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_mode", "llm_calls", "alpha_measured"],
+      "properties": {
+        "source_mode": {"const": "synthetic_fixture"},
+        "llm_calls": {
+          "type": "integer",
+          "const": 0,
+          "description": "The HTTP endpoint requires the JSON integer literal 0."
+        },
+        "alpha_measured": {"const": false}
+      }
+    },
+    "Result": {
+      "type": "object",
+      "required": ["result_schema_version", "batch", "reports", "metadata"],
+      "properties": {
+        "result_schema_version": {"const": "0.1"},
+        "batch": {"$ref": "schema.json"},
+        "reports": {"$ref": "#/$defs/Reports"},
+        "metadata": {"$ref": "#/$defs/SyntheticMetadata"}
+      }
+    },
+    "CompleteRequest": {
+      "description": "The endpoint also validates the lease, bound job snapshot, requested symbols and report hashes.",
+      "allOf": [{"$ref": "#/$defs/Result"}],
+      "required": ["worker_id", "lease_token"],
+      "properties": {
+        "worker_id": {"$ref": "research-job.schema.json#/$defs/Identifier"},
+        "lease_token": {"$ref": "research-job.schema.json#/$defs/UUID"}
+      },
+      "unevaluatedProperties": false
+    },
+    "CompleteResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["job_id", "status", "attempt", "completed_at", "result"],
+      "properties": {
+        "job_id": {"$ref": "research-job.schema.json#/$defs/UUID"},
+        "status": {"const": "completed"},
+        "attempt": {"type": "integer", "minimum": 1, "maximum": 3},
+        "completed_at": {"type": "string", "format": "date-time"},
+        "result": {
+          "allOf": [{"$ref": "#/$defs/Result"}],
+          "unevaluatedProperties": false
+        }
+      }
+    }
+  }
+}

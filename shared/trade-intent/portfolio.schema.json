@@ -90,7 +90,12 @@
   "required": [
     "snapshot_id",
     "as_of",
-    "cash_usd"
+    "currency",
+    "cash_asset",
+    "cash_usd",
+    "reserved_cash_usd",
+    "max_position_pct",
+    "positions"
   ],
   "title": "PortfolioSnapshot",
   "type": "object"
