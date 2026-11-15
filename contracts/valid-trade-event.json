@@ -1,0 +1,12 @@
+{
+  "version": "1.0",
+  "id": "paper:example:fill-1",
+  "mode": "paper",
+  "account_id": "paper-example",
+  "instrument_id": "equity:XNAS:NVDA",
+  "side": "BUY",
+  "quantity": "0.000000000000000001",
+  "price": "139.2500",
+  "currency": "USD",
+  "filled_at": "2026-11-15T09:00:00.123456789Z"
+}

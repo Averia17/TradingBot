@@ -1,0 +1,139 @@
+name: tradingbot-notifications
+
+x-kafka-environment: &kafka-environment
+  TRADINGBOT_KAFKA_BROKERS: kafka:9092
+  TRADINGBOT_TRADE_TOPIC: ${TRADINGBOT_TRADE_TOPIC:-tradingbot.trade.filled.fixture.v1}
+
+x-build: &build
+  args:
+    GO_IMAGE: ${TRADINGBOT_GO_BUILD_IMAGE:-golang:1.26.5-bookworm@sha256:53eeac89074db483fdf0ab3be1df32bf6e47562263d2d0d6baa7f26acb4957dd}
+
+services:
+  postgres:
+    image: postgres:17-alpine@sha256:d3244e8ce3f165ee3c93d9c4a4b1d0fe48b3a89e2287b717fdcbbde92d405065
+    environment:
+      POSTGRES_DB: notifications
+      POSTGRES_USER: notifications
+      POSTGRES_HOST_AUTH_METHOD: trust
+    healthcheck:
+      test: [CMD, pg_isready, -h, 127.0.0.1, -U, notifications, -d, notifications]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+    networks: [outbox]
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  kafka:
+    image: confluentinc/cp-kafka:7.4.10@sha256:88c430304d033c4a1f5bb48798461f7aebbf0a492a8116e13cc0a53516eb1749
+    environment:
+      CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+      KAFKA_NODE_ID: '1'
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: '1'
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: '1'
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: '1'
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: '0'
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'false'
+      KAFKA_HEAP_OPTS: -Xms128m -Xmx512m
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+    healthcheck:
+      test: [CMD, kafka-broker-api-versions, --bootstrap-server, kafka:9092]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    networks: [events]
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+
+  kafka-init:
+    image: confluentinc/cp-kafka:7.4.10@sha256:88c430304d033c4a1f5bb48798461f7aebbf0a492a8116e13cc0a53516eb1749
+    environment: *kafka-environment
+    entrypoint: [/bin/sh, -ec]
+    command:
+      - |
+        exec kafka-topics --bootstrap-server "$$TRADINGBOT_KAFKA_BROKERS" \
+          --create --if-not-exists --topic "$$TRADINGBOT_TRADE_TOPIC" \
+          --partitions 1 --replication-factor 1
+    depends_on:
+      kafka:
+        condition: service_healthy
+    networks: [events]
+
+  trade-events:
+    profiles: [test]
+    image: tradingbot-trade-events:local
+    build:
+      <<: *build
+      context: ../../services/trade-events
+    environment:
+      <<: *kafka-environment
+      TRADINGBOT_DATABASE_URL: postgresql://notifications@postgres:5432/notifications?sslmode=disable
+      TRADINGBOT_TEST_EXCHANGE_ADDR: :8080
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+    ports:
+      - '127.0.0.1:${TRADINGBOT_SIMULATOR_PORT:-18082}:8080'
+    healthcheck:
+      test: [CMD, wget, -q, -T, '2', -O, /dev/null, 'http://127.0.0.1:8080/healthz']
+      interval: 3s
+      timeout: 3s
+      retries: 10
+    networks: [outbox, events]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+
+  notifications:
+    image: tradingbot-notifications:local
+    build:
+      <<: *build
+      context: ../../services/notifications
+    entrypoint: [/bin/sh, -ec]
+    command:
+      - |
+        export TRADINGBOT_TELEGRAM_BOT_TOKEN="$$(cat /run/secrets/telegram_bot_token)"
+        export TRADINGBOT_TELEGRAM_CHAT_ID="$$(cat /run/secrets/telegram_chat_id)"
+        exec /usr/local/bin/notifications
+    environment:
+      <<: *kafka-environment
+      TRADINGBOT_NOTIFICATION_GROUP: ${TRADINGBOT_NOTIFICATION_GROUP:-tradingbot-fixture-telegram-v1}
+    secrets:
+      - source: telegram_bot_token
+        uid: '65532'
+        gid: '65532'
+        mode: 0400
+      - source: telegram_chat_id
+        uid: '65532'
+        gid: '65532'
+        mode: 0400
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+    networks: [events]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+
+secrets:
+  telegram_bot_token:
+    environment: TRADINGBOT_TELEGRAM_BOT_TOKEN
+  telegram_chat_id:
+    environment: TRADINGBOT_TELEGRAM_CHAT_ID
+
+networks:
+  outbox:
+    internal: true
+  events: {}
+
+volumes:
+  postgres-data: {}
+  kafka-data: {}

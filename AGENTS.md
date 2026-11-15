@@ -3,8 +3,8 @@
 Эти правила относятся к нашему коду. Явные инструкции владельца в текущей
 задаче имеют приоритет. Перед изменениями прочитать этот файл, нужный код и
 [архитектуру](docs/architecture.md). Для контекста использовать
-[основной план](tasks/plan.md), [backlog](tasks/todo.md) и
-[модель угроз](TradingBot-threat-model.md).
+[основной план](docs/planning/plan.md), [backlog](docs/planning/todo.md) и
+[модель угроз](docs/threat-model.md).
 
 ## Цель продукта
 
@@ -27,10 +27,11 @@ arbitration, JSON contracts, call budget, offline demo и native Nautilus probe.
 `DecisionBatch` версии `0.1` допускает только `execution_mode="research"`.
 Go control проверяет research batch без сохранения и с настроенной PostgreSQL
 принимает, читает и выдаёт research jobs по lease. Поддерживается durable
-публикация синтетического результата. Python worker, economic ledger, подписание,
-live execution и Compose deployment входят в следующие срезы.
-[Отчёт M1](docs/implementation-m1.md) и
-[проверка обновлений](docs/upstream-updates-verification.md) содержат evidence.
+публикация синтетического результата. Отдельный Compose-проект уведомлений
+принимает тестовые сообщения об исполнении через HTTP и доставляет их в Telegram
+через pgqueue и Kafka. Python worker, economic ledger, подписание, live execution
+и развёртывание торгового контура входят в следующие срезы.
+[Результаты M1 и upstream-проверок](docs/verification.md) содержат evidence.
 
 Документы с целевой архитектурой не являются свидетельством её реализации.
 Не объявлять job принятым до durable записи и не возвращать фиктивные fills,
@@ -53,11 +54,12 @@ balances, readiness зависимостей или результат плат�
   при упаковке Nautilus. Executor сначала модуль Go, самостоятельный процесс
   при выделении его полномочий. Signer — отдельный host/identity на live этапе.
 - Не выделять каждого аналитика TradingAgents в микросервис. Один monorepo,
-  независимые executable/image версии, PostgreSQL для jobs/ledger; без Kafka,
-  Redis, Kubernetes и service mesh до обоснованной потребности.
+  независимые executable/image версии, PostgreSQL для jobs/ledger. Kafka используется
+  для уведомлений о fills по [ADR-002](docs/decisions/002-trade-notifications.md).
+  Redis, Kubernetes и service mesh добавлять только при обоснованной потребности.
 
 Решение и причины: [ADR-001](docs/decisions/001-go-services-python-adapters.md).
-Порядок реализации: [service migration](tasks/service-migration.md).
+Порядок реализации: [service migration](docs/planning/service-migration.md).
 
 ## Поток решения
 
@@ -93,7 +95,7 @@ balances, readiness зависимостей или результат плат�
   Восемь decimal places текущего equity contract не являются правилом для
   любых токенов. Ticker не заменяет identity конкретного held instrument/mint.
 - Schema export для межсервисной границы описывает **serialized** payload.
-  Поддерживать общие Python/Go schemas и fixtures в `shared/trade-intent/`.
+  Поддерживать совместимые JSON-схемы и fixtures в `contracts/`.
 - Unknown fields, невалидные amounts, неизвестная schema, stale snapshot,
   expired intent и отсутствующие evidence приводят к отказу. Ошибка не должна
   превращаться в BUY, обход checks или поддельный успешный HOLD.
@@ -112,12 +114,13 @@ balances, readiness зависимостей или результат плат�
 
 ## Upstream обновления
 
-`vendor/trading-agents` и `vendor/nautilus-trader` — чистые независимые checkout.
+`services/research/vendor/` хранит чистые независимые checkout TradingAgents и Nautilus.
 Наши изменения только снаружи. Не патчить vendor, не форкать runtime ради обычных
 расширений, не запускать `git pull` или installer при старте сервиса.
-Версии/SHA брать из `upstream.lock.json` и package locks, а не из текста этого файла.
+Версии/SHA брать из `services/research/upstream.lock.json` и package locks.
 
-Локально использовать `scripts/bootstrap.ps1` и `scripts/update-upstream.ps1`.
+Локально использовать `services/research/scripts/bootstrap.ps1` и
+`services/research/scripts/update-upstream.ps1`.
 Updater работает в остановленном development/build окружении. В deployment
 заменяется отдельный immutable Python artifact после contract tests с текущим
 Go consumer; его версия, upstream SHA и lock hash входят в release manifest.
@@ -130,10 +133,14 @@ drain либо истекают по lease; повторный attempt прох�
 
 ## Структура и разработка
 
-Текущие Python files: `src/tradingbot/`, `tests/`, `shared/trade-intent/`.
-Go module: `go/go.mod`, executable в `go/cmd/`, domain/adapters в
-`go/internal/`. Service packaging — `services/`; deployment — `deploy/`.
-Эти будущие каталоги добавляются вместе с работающим проверяемым срезом.
+- `services/research/` содержит Python-пакет `tradingbot`, тесты, locks и updater.
+- `services/control/` владеет Go control API и хранением research jobs.
+- `services/trade-events/` владеет тестовым exchange endpoint и pgqueue outbox.
+- `services/notifications/` владеет Kafka consumer и отправкой в Telegram.
+
+Каждый сервис хранит свой код, зависимости и тесты в собственном каталоге.
+Граница между сервисами проходит через версионированные форматы обмена.
+`contracts/` содержит JSON-схемы и fixtures. Compose находится в `deploy/`.
 
 Перед изменением проверять `git status` и не сбрасывать чужую работу. Не делать
 commit/push/reset/merge только потому, что этого требует общий шаблон skill;
@@ -162,6 +169,8 @@ Retry только для операций с доказанной idempotency; 
 snapshot, decision, quote и transaction IDs; метрики отражают latency/cost/failure.
 
 При изменении contract обновлять schema, producer/consumer fixtures и docs.
+Экспорт Python обновляет `contracts/`. Go control проверяет вход по встроенным
+JSON-схемам. Их нужно обновлять вместе с опубликованным контрактом.
 Breaking change — новая версия и migration plan. Архитектурное решение — ADR.
 Обновлять current-state/backlog после реализации, сохраняя исторические evidence.
 Не переписывать timestamps, плохие результаты или расходы ради красивого backtest.
@@ -171,24 +180,25 @@ Breaking change — новая версия и migration plan. Архитект�
 Текущий Python контур из корня:
 
 ```powershell
-uv run --frozen --extra evaluation pytest
-uv run --frozen --extra evaluation ruff check src tests scripts
-uv build --no-sources
-uv run --no-project --python 3.12 python scripts/upstream.py verify
+uv --directory services/research run --frozen --extra evaluation pytest
+uv --directory services/research run --frozen --extra evaluation ruff check tradingbot tests scripts
+uv --directory services/research build --no-sources
+uv --directory services/research run --no-project --python 3.12 python scripts/upstream.py verify
 ```
 
-Когда добавлен реальный `go/go.mod`, из корня:
+Go-проверки из корня на примере `services/control`.
 
 ```powershell
-gofmt -l go
-go -C go mod verify
-go -C go vet -mod=readonly ./...
-go -C go test -mod=readonly ./...
-go -C go build -mod=readonly ./...
+gofmt -l services/control services/trade-events services/notifications
+go -C services/control mod verify
+go -C services/control vet -mod=readonly ./...
+go -C services/control test -mod=readonly ./...
+go -C services/control build -mod=readonly ./...
 ```
 
+Дополнительные Go-модули проверять теми же командами, задав их каталог в `-C`.
 `gofmt -l` должен вернуть пустой список. Для concurrent/stateful кода добавить
-race tests в Linux CI с CGO/C toolchain: `go -C go test -mod=readonly -race ./...`.
+race tests в Linux CI с CGO и C toolchain через `go test -mod=readonly -race ./...`.
 Go gates подключаются к CI вместе с module. Для docs-only изменений проверять
 ссылки/актуальность, не создавать бессмысленные tests и не гонять runtime suite
 без влияющего на поведение изменения. После зелёных проверок повторять их

@@ -19,6 +19,9 @@ jobs:
     name: Discover one stable release and commit
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: services/research
     outputs:
       ref: ${{ steps.candidate.outputs.ref }}
       commit: ${{ steps.candidate.outputs.commit }}
@@ -29,7 +32,7 @@ jobs:
           persist-credentials: false
 
       - name: Install uv and Python
-        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           version: "0.11.32"
           python-version: "3.12"
@@ -68,6 +71,9 @@ jobs:
     needs: discover-release
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: services/research
     strategy:
       fail-fast: false
       matrix:
@@ -79,7 +85,7 @@ jobs:
           persist-credentials: false
 
       - name: Install uv and Python
-        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           version: "0.11.32"
           python-version: "3.12"
@@ -100,28 +106,28 @@ jobs:
 
       - name: Run the candidate's isolated upstream test suite
         if: runner.os == 'Linux'
-        working-directory: vendor/trading-agents
+        working-directory: services/research/vendor/trading-agents
         run: uv run --project ../.. --frozen --extra evaluation pytest -c pyproject.toml tests --junitxml=../../runtime/verification/upstream.xml
 
       - name: Save verified candidate locks for review
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: verified-upstream-candidate-${{ matrix.os }}
           path: |
-            upstream.lock.json
-            uv.lock
-            pyproject.toml
-            runtime/upstream-updates/*.json
+            services/research/upstream.lock.json
+            services/research/uv.lock
+            services/research/pyproject.toml
+            services/research/runtime/upstream-updates/*.json
           retention-days: 30
           if-no-files-found: error
 
       - name: Save verification reports
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: upstream-compatibility-${{ matrix.os }}
           path: |
-            runtime/verification/*.xml
-            runtime/upstream-updates/*.json
+            services/research/runtime/verification/*.xml
+            services/research/runtime/upstream-updates/*.json
           retention-days: 30
           if-no-files-found: warn

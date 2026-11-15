@@ -3,7 +3,7 @@
 ## Status
 
 Accepted, 2026-10-05. Архитектурное решение принято; service runtime ещё не построен.
-Ранее описанные в `tasks/plan.md` Go execution и Python research сохраняются;
+Ранее описанные в [плане](../planning/plan.md) Go execution и Python research сохраняются;
 это решение уточняет Go как основной язык нового backend и clean upstream policy.
 
 ## Context
@@ -51,4 +51,4 @@ manifests. Go financial/state logic нужно проверять независ
 
 Миграция проходит работающими срезами, сохраняя CLI и research-only режим до
 следующих gates. Описание и очередность:
-[architecture](../architecture.md), [service migration](../../tasks/service-migration.md).
+[architecture](../architecture.md), [service migration](../planning/service-migration.md).

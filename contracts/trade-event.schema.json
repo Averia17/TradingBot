@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "TradingBot committed fill notification 1.0",
+  "description": "An event for one committed fill. The UTF-8 JSON message is limited to 4096 bytes and duplicate keys are forbidden.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "id", "mode", "account_id", "instrument_id", "side", "quantity", "price", "currency", "filled_at"],
+  "properties": {
+    "version": {"const": "1.0"},
+    "id": {
+      "$ref": "#/$defs/Identifier",
+      "description": "Stable fill ID unique across modes and accounts. Each separately recorded partial fill has a distinct ID."
+    },
+    "mode": {"enum": ["paper", "live"]},
+    "source": {
+      "const": "exchange_fixture",
+      "description": "Optional simulated-exchange marker restricted to paper events on the fixture topic."
+    },
+    "account_id": {"$ref": "#/$defs/Identifier"},
+    "instrument_id": {
+      "$ref": "#/$defs/Identifier",
+      "description": "Canonical instrument identity, including any venue or registry namespace needed to distinguish it."
+    },
+    "side": {"enum": ["BUY", "SELL"]},
+    "quantity": {"$ref": "#/$defs/PositiveDecimal"},
+    "price": {
+      "$ref": "#/$defs/PositiveDecimal",
+      "description": "Execution price per unit in the specified currency."
+    },
+    "currency": {
+      "type": "string",
+      "pattern": "^[A-Z][A-Z0-9]{1,11}$",
+      "description": "Currency or quote asset display code."
+    },
+    "filled_at": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[1-9][0-9]{3}-[0-9]{2}-[0-9]{2}T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](\\.[0-9]{1,9})?Z$",
+      "description": "UTC RFC 3339 timestamp with at most nine fractional digits."
+    }
+  },
+  "if": {"required": ["source"]},
+  "then": {"properties": {"mode": {"const": "paper"}}},
+  "$defs": {
+    "Identifier": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,127}$"
+    },
+    "PositiveDecimal": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]{0,37})(\\.[0-9]{1,18})?$",
+      "not": {"pattern": "^0(\\.0+)?$"},
+      "description": "Positive exact decimal with up to 38 whole and 18 fractional digits."
+    }
+  }
+}

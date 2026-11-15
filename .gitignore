@@ -1,6 +1,6 @@
+/.cache/
 .venv/
 vendor/
-research/*/
 __pycache__/
 *.py[cod]
 *.egg-info/

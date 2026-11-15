@@ -1,17 +1,18 @@
 # Чистые upstream и наши адаптеры
 
 Решение: upstream репозитории клонируются без наших изменений. Наш проект хранит
-контракты, политики, адаптеры и тесты отдельно. `vendor/` исключён из нашего Git;
-публичные URL, release tag и точный commit записаны в `upstream.lock.json`.
+контракты, политики, адаптеры и тесты отдельно. `services/research/vendor/`
+исключён из нашего Git. Публичные URL, release tag и точный commit записаны в
+`services/research/upstream.lock.json`.
 Bootstrap воспроизводит эти checkout на другой машине. Fork для этого не нужен.
 
 ```text
-TradingBot/                         наш Git
-  src/tradingbot/adapters/          интерфейсы внешних компонентов
+services/research/                  Python research service
+  tradingbot/adapters/              интерфейсы внешних компонентов
     tradingagents.py               imports/config/context/graph/report boundary
-  src/tradingbot/contracts.py       наш стабильный JSON contract и проверки
-  src/tradingbot/research.py        общий portfolio arbitration
-  src/tradingbot/evaluation.py      отдельная граница Nautilus engine
+  tradingbot/contracts.py           наш стабильный JSON contract и проверки
+  tradingbot/research.py            общий portfolio arbitration
+  tradingbot/evaluation.py          отдельная граница Nautilus engine
   tests/                           offline contract/integration/update tests
   scripts/upstream.py               clone / verify / check / tested update
   upstream.lock.json               проверенные upstream tag + SHA
@@ -29,9 +30,11 @@ wheel с точной версией. Обновление reference без со
 
 ## Обновление
 
-Из корня проекта, PowerShell:
+В PowerShell перейдите в `services/research` из корня проекта.
 
 ```powershell
+Set-Location services/research
+
 # Воспроизвести проверенные исходники и окружение
 .\scripts\bootstrap.ps1
 
@@ -48,7 +51,7 @@ wheel с точной версией. Обновление reference без со
 .\scripts\update-upstream.ps1 -Repository nautilus-trader
 ```
 
-Кроссплатформенные эквиваленты:
+Кроссплатформенные эквиваленты также запускаются из `services/research`.
 
 ```text
 uv run --no-project --python 3.12 python scripts/upstream.py bootstrap
@@ -118,23 +121,21 @@ Offline green не доказывает provider availability, качество 
 проверенные candidate lock-файлы. CI не изменяет ветки и не разворачивает бота.
 Локальное продвижение выполняется командой updater выше.
 
-На 05.10.2026 local remote `origin` уже настроен на GitHub. Наличие remote не
-подтверждает публикацию workflows и их выполнение: hosted Actions и required
-checks/branch protection здесь не проверены. Для планового запуска workflows
-должны находиться на default branch с включёнными Actions. Плановый запуск GitHub
-может задержаться; это не обещание немедленной проверки каждого commit.
-Подробнее: `.github/README.md`.
+История ежедневных проверок доступна в [GitHub Actions](https://github.com/Averia17/TradingBot/actions/workflows/upstream-compatibility.yml).
+GitHub запускает расписание для default branch с включёнными Actions.
+Состав проверок описан в [инструкции CI](../.github/README.md).
 
 Целевая service architecture и отдельные runtime artifacts описаны в
 [architecture](architecture.md). Текущий updater обслуживает dev/build checkout;
 переход к независимым research/evaluation locks и deployment описан в
-[service migration](../tasks/service-migration.md).
+[service migration](planning/service-migration.md).
 
-Полный upstream suite запускается в Linux CI. На Windows upstream v0.6.0
-содержит тест, который ошибочно предполагает, что системный TEMP всегда вне
-домашнего каталога. Его больше не патчим и не пропускаем ради зелёного результата;
-на Windows проверяем наш adapter suite. Исторический patch сохранён в
-`patches/trading-agents/windows-test-isolation.patch`, но не применяется.
+Полный upstream suite запускается в Linux CI, а наш adapter suite — на Linux
+и Windows. В TradingAgents v0.7.1 upstream исправил предположение теста,
+что системный TEMP всегда вне домашнего каталога.
+Исторический patch для v0.6.0 сохранён в
+[архиве патчей первого M1](../services/research/patches/).
+Bootstrap и updater работают с чистыми checkout.
 Прежняя локальная ветка `bot/integration` также сохранена отдельно.
 
 При первоначальном M1 `clone --branch v0.6.0` выбирал одноимённую upstream

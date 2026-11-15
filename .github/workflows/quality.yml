@@ -21,6 +21,9 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
+    defaults:
+      run:
+        working-directory: services/research
     steps:
       - name: Check out our code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -28,7 +31,7 @@ jobs:
           persist-credentials: false
 
       - name: Install uv and Python
-        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           version: "0.11.32"
           python-version: "3.12"
@@ -44,16 +47,16 @@ jobs:
         run: uv pip check
 
       - name: Lint our code
-        run: uv run --frozen --extra evaluation ruff check src tests scripts
+        run: uv run --frozen --extra evaluation ruff check tradingbot tests scripts
 
       - name: Test our contracts and adapters without network access
         run: uv run --frozen --extra evaluation pytest --junitxml=runtime/verification/ours.xml
 
-      # Upstream's default suite excludes its external-service integration marker.
-      # Linux also avoids its Windows-only assumption that TEMP is outside HOME.
+      # The upstream suite excludes the external-service integration marker.
+      # Our adapter tests above run on both platforms.
       - name: Run upstream's isolated test suite
         if: runner.os == 'Linux'
-        working-directory: vendor/trading-agents
+        working-directory: services/research/vendor/trading-agents
         run: uv run --project ../.. --frozen --extra evaluation pytest -c pyproject.toml tests --junitxml=../../runtime/verification/upstream.xml
 
       - name: Build our distribution
@@ -61,10 +64,10 @@ jobs:
 
       - name: Save verification reports
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: quality-${{ matrix.os }}
-          path: runtime/verification/*.xml
+          path: services/research/runtime/verification/*.xml
           retention-days: 14
           if-no-files-found: warn
 
@@ -72,6 +75,8 @@ jobs:
     name: Go Quality (ubuntu-latest)
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    env:
+      GO_MODULES: services/control services/trade-events services/notifications
     services:
       postgres:
         image: postgres:17-alpine@sha256:d3244e8ce3f165ee3c93d9c4a4b1d0fe48b3a89e2287b717fdcbbde92d405065
@@ -94,32 +99,50 @@ jobs:
       - name: Install Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version-file: go/go.mod
-          cache-dependency-path: go/go.sum
+          go-version-file: services/control/go.mod
+          cache-dependency-path: |
+            services/control/go.sum
+            services/trade-events/go.sum
+            services/notifications/go.sum
 
       - name: Check Go formatting
         shell: bash
         run: |
-          unformatted=$(gofmt -l go)
+          unformatted=$(gofmt -l services/control services/trade-events services/notifications)
           if [[ -n "$unformatted" ]]; then
             printf 'Files requiring gofmt:\n%s\n' "$unformatted"
             exit 1
           fi
 
       - name: Verify Go modules
-        run: go -C go mod verify
+        run: |
+          for module in $GO_MODULES; do
+            go -C "$module" mod verify
+          done
 
       - name: Vet Go code
-        run: go -C go vet -mod=readonly ./...
+        run: |
+          for module in $GO_MODULES; do
+            go -C "$module" vet -mod=readonly ./...
+          done
 
       - name: Test Go packages
-        run: go -C go test -mod=readonly ./...
+        run: |
+          for module in $GO_MODULES; do
+            go -C "$module" test -mod=readonly ./...
+          done
 
       - name: Check Go packages for races
         env:
           CGO_ENABLED: "1"
           TRADINGBOT_TEST_DATABASE_URL: postgresql://postgres@127.0.0.1:${{ job.services.postgres.ports['5432'] }}/tradingbot?sslmode=disable
-        run: go -C go test -mod=readonly -race ./...
+        run: |
+          for module in $GO_MODULES; do
+            go -C "$module" test -mod=readonly -race ./...
+          done
 
       - name: Build Go packages
-        run: go -C go build -mod=readonly ./...
+        run: |
+          for module in $GO_MODULES; do
+            go -C "$module" build -mod=readonly ./...
+          done

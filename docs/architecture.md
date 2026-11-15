@@ -10,11 +10,13 @@
 
 | Компонент | Язык | Ответственность | Runtime статус |
 |---|---|---|---|
-| Control/account | Go | API, scheduler, jobs/leases/outbox, snapshots, ledger, reservations, deterministic risk, costs, reconciliation | Health, capabilities, stateless validation, PostgreSQL jobs, leases и результаты demo |
-| Research worker | Python | TradingAgents graph, provider SDK/callbacks, portfolio arbitration, evidence, usage; выдаёт research batch | Сейчас CLI и library; service entry point впереди |
+| Control/account | Go | API, scheduler, jobs/leases/outbox, snapshots, ledger, reservations, deterministic risk, costs, reconciliation | `services/control/`: health, capabilities, stateless validation, PostgreSQL jobs, leases и результаты demo |
+| Research worker | Python | TradingAgents graph, provider SDK/callbacks, portfolio arbitration, evidence, usage; выдаёт research batch | `services/research/`: CLI и library, worker entry point впереди |
 | Evaluation worker | Python | Nautilus replay/backtest/paper evaluation, execution-cost models, benchmarks | Сейчас synthetic native probe |
 | Execution worker | Go | Allowed venue quotes/build/submit/status; без ключа и права менять policy | Будущий модуль control, затем отдельный process |
 | Independent verifier/signer | Go | Decode transaction, owner limits/allowlists, approval exact hash, signing | Отдельный future live host/identity |
+| Trade events | Go | Принимает тестовые fills и публикует события через pgqueue и Kafka | `services/trade-events/`, независимый образ в Compose-профиле `test` |
+| Notifications | Go | Читает события из Kafka, отправляет в личный Telegram | `services/notifications/`, независимый образ |
 | PostgreSQL | SQL | Durable state/jobs/events и constraints; economic writes только через control | Локальные migrations для research snapshots/jobs/outbox, production deployment впереди |
 
 Go — основной язык собственного backend. Python сохраняем для библиотек, которые
@@ -102,7 +104,7 @@ evidence hashes из текста и проверяет lease перед зап�
 | Authority | Result endpoint не принимает новые balances, owner policy, credentials или signing instructions |
 | Availability | Durable ACK после transaction commit; UNKNOWN execution удерживает reservation |
 
-Research DTO описан [общими serialization schemas](../shared/trade-intent/).
+Research DTO описан [общими JSON Schema и fixtures](../contracts/).
 Python сериализует amounts десятичными строками. Go проверяет схему,
 freshness и согласованность распределения с переданным portfolio и universe.
 И диагностика, и локальное создание job получают research portfolio от
@@ -118,8 +120,12 @@ reservations и account serialization. Job creation и outbox фиксируют
 worker не держит SQL transaction во время provider calls. Research работает
 через control contract без прямых write credentials к balances/reservations.
 Evaluation может иметь собственную область хранения результатов, с ограниченной
-ролью; она не меняет реальный ledger. PostgreSQL queue достаточна для начального
-объёма, отдельный broker в этой вехе не нужен.
+ролью; она не меняет реальный ledger. Research jobs используют PostgreSQL.
+Kafka используется для событий об исполненных сделках по [ADR-002](decisions/002-trade-notifications.md).
+`trade-events` владеет outbox и соединением с PostgreSQL. `notifications`
+имеет доступ к Kafka и Telegram. Сервисы собираются из отдельных Go-модулей,
+обмениваются событиями по версионированному JSON-контракту и разворачиваются
+через [Compose](../deploy/notifications/compose.yaml).
 
 Большие evidence/data objects хранятся как immutable files/object archive;
 в SQL — hashes, timestamps, versions и ссылки. Outputs и memory lessons не
@@ -136,7 +142,7 @@ trust boundary. Kubernetes/service mesh не требуются текущим s
 ## Независимые обновления
 
 TradingAgents — библиотека внутри нашего research service. Репозиторий остаётся
-clean checkout, адаптер находится в `src/tradingbot/adapters/tradingagents.py`.
+clean checkout, адаптер находится в `services/research/tradingbot/adapters/tradingagents.py`.
 Service artifact фиксирует exact source SHA, Python lock hash и contract version.
 Go consumer знает наш protocol; имена upstream Python functions для него закрыты.
 
@@ -162,4 +168,4 @@ migration и совместного rollout, без ручного merge с чу
 Рабочий updater применяется к остановленному dev/build checkout. В запущенном
 сервисе не выполняются `git pull`, `uv sync` или замена `.venv`.
 [Текущая процедура](upstream-updates.md) и
-[план перехода](../tasks/service-migration.md) задают разные этапы.
+[план перехода](planning/service-migration.md) задают разные этапы.
