@@ -55,6 +55,32 @@
         "lease_token": {"$ref": "#/$defs/UUID"}
       }
     },
+    "AuthorizeCallRequest": {
+      "description": "Request one durable call permit before invoking the model. Retry the same call ID and lease after an uncertain response.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["worker_id", "lease_token", "call_id"],
+      "properties": {
+        "worker_id": {"$ref": "#/$defs/Identifier"},
+        "lease_token": {"$ref": "#/$defs/UUID"},
+        "call_id": {"$ref": "#/$defs/UUID"}
+      }
+    },
+    "AuthorizeCallResponse": {
+      "description": "One committed permit for the active attempt. An identical retry on the same active lease returns the original receipt.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["job_id", "call_id", "attempt", "remaining_llm_calls"],
+      "properties": {
+        "job_id": {"$ref": "#/$defs/UUID"},
+        "call_id": {"$ref": "#/$defs/UUID"},
+        "attempt": {"type": "integer", "minimum": 1, "maximum": 3},
+        "remaining_llm_calls": {
+          "type": "integer", "minimum": 0, "maximum": 63,
+          "description": "Job budget remaining immediately after this grant. Later grants may reduce the current balance."
+        }
+      }
+    },
     "Lease": {
       "type": "object",
       "required": ["job_id", "status", "worker_id", "claim_id", "lease_token", "attempt", "lease_expires_at", "attempt_deadline"],

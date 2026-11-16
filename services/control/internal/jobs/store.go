@@ -30,6 +30,9 @@ var researchLeasesMigration string
 //go:embed 003_research_results.sql
 var researchResultsMigration string
 
+//go:embed 004_research_call_budget.sql
+var researchCallBudgetMigration string
+
 type Store struct {
 	pool *pgxpool.Pool
 }
@@ -111,7 +114,7 @@ func (s *Store) migrate(ctx context.Context) error {
 	if err := tx.QueryRow(ctx, `SELECT coalesce(max(version), 0) FROM research_schema_migrations`).Scan(&version); err != nil {
 		return fmt.Errorf("read research schema version: %w", err)
 	}
-	migrations := []string{researchJobsMigration, researchLeasesMigration, researchResultsMigration}
+	migrations := []string{researchJobsMigration, researchLeasesMigration, researchResultsMigration, researchCallBudgetMigration}
 	if version < 0 || version > len(migrations) {
 		return fmt.Errorf("unsupported research database schema version %d", version)
 	}
@@ -137,13 +140,18 @@ func rollback(tx pgx.Tx) {
 }
 
 func (s *Store) Get(ctx context.Context, id string) (Job, error) {
-	row := s.pool.QueryRow(ctx, `SELECT id::text, request, status, created_at FROM research_jobs WHERE id = $1`, id)
+	row := s.pool.QueryRow(ctx, `SELECT id::text, request, status, created_at, request_sha256 FROM research_jobs WHERE id = $1`, id)
 	var job Job
-	if err := row.Scan(&job.ID, &job.Request, &job.Status, &job.CreatedAt); err != nil {
+	var digest []byte
+	if err := row.Scan(&job.ID, &job.Request, &job.Status, &job.CreatedAt, &digest); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return Job{}, ErrNotFound
 		}
 		return Job{}, fmt.Errorf("read research job: %w", err)
+	}
+	expected := sha256.Sum256(job.Request)
+	if !bytes.Equal(expected[:], digest) {
+		return Job{}, errors.New("persisted research job does not match its hash")
 	}
 	job.CreatedAt = job.CreatedAt.UTC()
 	return job, nil

@@ -80,7 +80,7 @@ func TestHealthAndActualCapabilities(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer capabilities.Body.Close()
-	assertResponse(t, capabilities, http.StatusOK, `{"durable_jobs":false,"execution":false,"ledger":false,"research_batch_schema_version":"0.1","research_job_leases":false,"research_job_results":false,"research_validation":true}`)
+	assertResponse(t, capabilities, http.StatusOK, `{"durable_jobs":false,"execution":false,"ledger":false,"research_batch_schema_version":"0.1","research_job_call_budget":false,"research_job_leases":false,"research_job_results":false,"research_validation":true}`)
 }
 
 func TestValidatesPythonResearchFixture(t *testing.T) {

@@ -248,9 +248,11 @@ func TestClaimRefusesCorruptStoredInputs(t *testing.T) {
 				errors.Is(err, ErrNoJob) || errors.Is(err, ErrLeaseConflict) || lease.Token != "" {
 				t.Fatalf("corrupt claim = %+v, %v", lease, err)
 			}
-			got, err := store.Get(ctx, input.ID)
-			if err != nil || got.Status != "queued" {
-				t.Fatalf("corrupt job mutated = %s, %v", got.Status, err)
+			// The public read rejects a corrupt request, so inspect the stored status directly.
+			var status string
+			err := inspection.QueryRow(ctx, `SELECT status FROM research_jobs WHERE id = $1`, input.ID).Scan(&status)
+			if err != nil || status != "queued" {
+				t.Fatalf("corrupt job mutated = %s, %v", status, err)
 			}
 		})
 	}

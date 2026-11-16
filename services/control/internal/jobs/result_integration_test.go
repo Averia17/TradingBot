@@ -164,6 +164,39 @@ func TestCompletionRechecksBatchExpiryAfterVerification(t *testing.T) {
 	}
 }
 
+func TestCompletionBindsExpectedAttemptAcrossReplay(t *testing.T) {
+	ctx, dsn, db := testDatabase(t)
+	store := openTestStore(t, ctx, dsn)
+	input := queueJob(t, ctx, store, 1, time.Now())
+	lease, err := store.Claim(ctx, "worker", testIdentity(616), testSnapshotWindow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := attemptResult(lease, "attempt-bound result")
+	request.ExpectedAttempt = lease.Attempt + 1
+	if _, created, err := store.Complete(ctx, request, func(Job, time.Time) error {
+		return errors.New("mismatched attempt reached validation")
+	}); !errors.Is(err, ErrLeaseConflict) || created {
+		t.Fatalf("completion for a mismatched attempt = %t, %v", created, err)
+	}
+	assertCompletionRows(t, ctx, db, input.ID, 0)
+
+	request.ExpectedAttempt = lease.Attempt
+	receipt, created, err := store.Complete(ctx, request, func(Job, time.Time) error { return nil })
+	if err != nil || !created || receipt.Attempt != lease.Attempt {
+		t.Fatalf("matching completion = %+v, %t, %v", receipt, created, err)
+	}
+	replay, created, err := store.Complete(ctx, request, nil)
+	if err != nil || created || !replay.CompletedAt.Equal(receipt.CompletedAt) {
+		t.Fatalf("matching replay = %+v, %t, %v", replay, created, err)
+	}
+	request.ExpectedAttempt++
+	if _, created, err := store.Complete(ctx, request, nil); !errors.Is(err, ErrLeaseConflict) || created {
+		t.Fatalf("replay for a mismatched attempt = %t, %v", created, err)
+	}
+	assertCompletionRows(t, ctx, db, input.ID, 1)
+}
+
 func TestConcurrentCompletionsCommitOneReceiptAndPreserveAuthority(t *testing.T) {
 	ctx, dsn, db := testDatabase(t)
 	store := openTestStore(t, ctx, dsn)

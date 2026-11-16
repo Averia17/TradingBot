@@ -14,9 +14,17 @@ import (
 )
 
 func TestResearchResultWireContract(t *testing.T) {
+	for _, name := range []string{"valid-result-request.json", "valid-offline-result-request.json"} {
+		t.Run(name, func(t *testing.T) {
+			checkResearchResultWireContract(t, fixture(t, name))
+		})
+	}
+}
+
+func checkResearchResultWireContract(t *testing.T, request []byte) {
+	t.Helper()
 	const schemaFile = "research-result.schema.json"
 	compiler := wireSchemaCompiler(t, schemaFile, "research-job.schema.json", "portfolio.schema.json", "schema.json")
-	request := fixture(t, "valid-result-request.json")
 	value, err := jsonschema.UnmarshalJSON(bytes.NewReader(request))
 	if err != nil {
 		t.Fatal(err)

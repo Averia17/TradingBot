@@ -3,7 +3,12 @@
 **Решение принято 05.10.2026.** Это целевая архитектура и порядок перехода.
 Доступны Python research CLI, локальная stateless-валидация и research queue
 в Go control с durable create/read, claim, heartbeat и сохранением синтетического
-результата. Python worker и deployment входят в следующие срезы.
+результата. Go fixture worker выполняет транспортный цикл задания. Python worker
+запускает настоящий граф TradingAgents с локальными тестовыми моделями и получает
+разрешение из общего бюджета задания перед каждым вызовом. Локальный Compose
+упаковывает Go control, PostgreSQL и worker. Nautilus запускается в отдельно
+закреплённом evaluation окружении. Go paper ledger ведёт виртуальные счета и
+полные симулированные исполнения через локальный API.
 Правила для разработчиков: [AGENTS.md](../AGENTS.md).
 
 ## Ответственность компонентов
@@ -11,8 +16,10 @@
 | Компонент | Язык | Ответственность | Runtime статус |
 |---|---|---|---|
 | Control/account | Go | API, scheduler, jobs/leases/outbox, snapshots, ledger, reservations, deterministic risk, costs, reconciliation | `services/control/`: health, capabilities, stateless validation, PostgreSQL jobs, leases и результаты demo |
-| Research worker | Python | TradingAgents graph, provider SDK/callbacks, portfolio arbitration, evidence, usage; выдаёт research batch | `services/research/`: CLI и library, worker entry point впереди |
-| Evaluation worker | Python | Nautilus replay/backtest/paper evaluation, execution-cost models, benchmarks | Сейчас synthetic native probe |
+| Fixture worker | Go | Claim, heartbeat и публикация синтетического результата по выданному снимку | `services/control/cmd/research-fixture-worker`, отдельная офлайн-команда |
+| Research worker | Python | TradingAgents graph, provider SDK/callbacks, portfolio arbitration, evidence, usage; выдаёт research batch | `tradingbot worker` забирает job, продлевает lease и публикует результат офлайн-графа |
+| Evaluation worker | Python | Nautilus replay/backtest/paper evaluation, execution-cost models, benchmarks | `services/evaluation` с собственным lock; native probe и синтетический хронологический replay |
+| Paper ledger | Go | Виртуальные деньги, позиции, резервы и журнал исполнений | `services/control/internal/ledger` с PostgreSQL, версиями состояния и полными paper fills |
 | Execution worker | Go | Allowed venue quotes/build/submit/status; без ключа и права менять policy | Будущий модуль control, затем отдельный process |
 | Independent verifier/signer | Go | Decode transaction, owner limits/allowlists, approval exact hash, signing | Отдельный future live host/identity |
 | Trade events | Go | Принимает тестовые fills и публикует события через pgqueue и Kafka | `services/trade-events/`, независимый образ в Compose-профиле `test` |
@@ -86,13 +93,28 @@ Control возвращает durable ACK после commit snapshot, job и crea
 PostgreSQL выдаёт и продлевает один действующий lease на job по своему времени.
 Попытку идентифицируют worker ID, claim ID, номер и уникальный token.
 Повтор того же claim в пределах lease возвращает уже выданную попытку.
-Сейчас completion принимает batch, отчёты и метаданные `synthetic_fixture`.
-Control сравнивает batch с сохранённым snapshot и universe, пересчитывает
+Completion принимает метаданные `synthetic_fixture` в контракте `0.1` и
+`tradingagents_offline` в `0.2`. В `0.2` Go связывает результат с попыткой,
+исходным манифестом, политикой и лимитом вызовов из сохранённой job. Версии,
+SHA upstream, хеш конфигурации и учёт вызовов публикует Python worker.
+Go fixture worker публикует без обращения к моделям, используя только выданный
+snapshot и universe. При потере ответа он повторяет тот же claim ID или payload
+completion. Control сравнивает batch с сохранённым snapshot и universe, пересчитывает
 evidence hashes из текста и проверяет lease перед записью. Результат, статус
-и outbox commit атомарно. S3 добавляет actual usage и provenance моделей и upstream
-для Python worker. Существующий research DTO
+и outbox commit атомарно. Для тестовых моделей USD billing неизвестен,
+проверка содержимого архива впереди. Research DTO
 содержит `run_id`, `portfolio_snapshot_id`, `as_of`, `created_at`, `expires_at`,
 `evidence_hashes`, `intents` и `schema_version="0.1"`.
+
+Для каждого модельного вызова Go проверяет действующий lease и резервирует один
+слот из `max_llm_calls` в PostgreSQL. Новый вызов допускается после подтверждения
+записи. `call_id` делает повтор запроса идемпотентным. Потерянная квитанция,
+прерывание модели и истечение lease сохраняют расход слота. Новая попытка
+вычитает все разрешения задания. Go проверяет число разрешений попытки и число
+вызовов в результате `0.2` под той же блокировкой задания. Миграция считает
+неучтённый расход прежних активных попыток неизвестным и блокирует новые
+разрешения по таким заданиям. Ранее записанные результаты доступны и допускают
+идемпотентное чтение через прежний протокол.
 
 | Инвариант границы | Требование |
 |---|---|

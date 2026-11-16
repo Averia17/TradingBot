@@ -20,7 +20,12 @@ const (
 )
 
 func NewHandler(maxResearchAge time.Duration, now func() time.Time, store jobStore) http.Handler {
+	return NewHandlerWithPaper(maxResearchAge, now, store, nil)
+}
+
+func NewHandlerWithPaper(maxResearchAge time.Duration, now func() time.Time, store jobStore, paper paperAccountStore) http.Handler {
 	mux := http.NewServeMux()
+	paperOrders, hasPaperOrders := paper.(paperOrderStore)
 	slots := make(chan struct{}, concurrentWrites)
 	bounded := func(busyCode string, handle http.HandlerFunc) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
@@ -38,11 +43,17 @@ func NewHandler(maxResearchAge time.Duration, now func() time.Time, store jobSto
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
 	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, r *http.Request) {
+		ctx, cancel := context.WithTimeout(r.Context(), time.Second)
+		defer cancel()
 		if store != nil {
-			ctx, cancel := context.WithTimeout(r.Context(), time.Second)
-			defer cancel()
 			if err := store.Ping(ctx); err != nil {
 				writeError(w, http.StatusServiceUnavailable, "storage_unavailable")
+				return
+			}
+		}
+		if paper != nil {
+			if err := paper.Ping(ctx); err != nil {
+				writeError(w, http.StatusServiceUnavailable, "paper_storage_unavailable")
 				return
 			}
 		}
@@ -54,23 +65,45 @@ func NewHandler(maxResearchAge time.Duration, now func() time.Time, store jobSto
 			"research_validation":           true,
 			"durable_jobs":                  store != nil,
 			"research_job_leases":           store != nil,
+			"research_job_call_budget":      store != nil,
 			"research_job_results":          store != nil,
 			"ledger":                        false,
 			"execution":                     false,
 		}
 		if store != nil {
 			response["research_job_schema_version"] = jobSchemaVersion
-			response["research_result_schema_version"] = resultSchemaVersion
-			response["research_result_source_modes"] = []string{syntheticSourceMode}
+			response["research_result_schema_version"] = syntheticResultVersion
+			response["research_result_schema_versions"] = []string{syntheticResultVersion, offlineResultVersion}
+			response["research_result_source_modes"] = []string{syntheticSourceMode, offlineSourceMode}
+		}
+		if paper != nil {
+			response["paper_accounts"] = true
+		}
+		if hasPaperOrders {
+			response["paper_orders"] = true
 		}
 		writeJSON(w, http.StatusOK, response)
 	})
+	if paper != nil {
+		accounts := paperHTTP{store: paper}
+		mux.HandleFunc("POST /v1/paper/accounts", bounded("paper_api_busy", accounts.create))
+		mux.HandleFunc("GET /v1/paper/accounts/{id}", bounded("paper_api_busy", accounts.get))
+	}
+	if hasPaperOrders {
+		orders := paperOrderHTTP{store: paperOrders, now: now}
+		mux.HandleFunc("POST /v1/paper/accounts/{id}/orders", bounded("paper_api_busy", orders.reserve))
+		mux.HandleFunc("GET /v1/paper/accounts/{id}/orders/{order}", bounded("paper_api_busy", orders.get))
+		mux.HandleFunc("POST /v1/paper/accounts/{id}/orders/{order}/resolve", bounded("paper_api_busy", orders.resolve))
+		mux.HandleFunc("GET /v1/paper/accounts/{id}/events", bounded("paper_api_busy", orders.events))
+		mux.HandleFunc("GET /v1/paper/accounts/{id}/outcomes", bounded("paper_api_busy", orders.outcomes))
+	}
 	if store != nil {
 		h := jobHTTP{store: store, now: now, maxResearchAge: maxResearchAge}
 		mux.HandleFunc("POST /v1/research/jobs", bounded("job_api_busy", h.create))
 		mux.HandleFunc("GET /v1/research/jobs/{id}", h.get)
 		mux.HandleFunc("POST /v1/research/jobs/claim", bounded("job_api_busy", h.claim))
 		mux.HandleFunc("POST /v1/research/jobs/{id}/heartbeat", bounded("job_api_busy", h.heartbeat))
+		mux.HandleFunc("POST /v1/research/jobs/{id}/authorize-call", bounded("job_api_busy", h.authorizeCall))
 		mux.HandleFunc("POST /v1/research/jobs/{id}/complete", bounded("job_api_busy", h.complete))
 		mux.HandleFunc("GET /v1/research/jobs/{id}/result", h.getResult)
 	}

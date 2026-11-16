@@ -1,0 +1,170 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Virtual paper account HTTP contract 0.1",
+  "$ref": "#/$defs/Account",
+  "$defs": {
+    "AccountID": {"type": "string", "pattern": "^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$"},
+    "USD": {"type": "string", "pattern": "^(?:0|[1-9][0-9]{0,29})(?:\\.[0-9]{1,8})?$"},
+    "RawQuantity": {"type": "string", "pattern": "^(?:0|[1-9][0-9]*)$"},
+    "Instrument": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["instrument_id", "registry_version", "decimals"],
+      "properties": {
+        "instrument_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9:._-]{0,127}$"},
+        "registry_version": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9:._-]{0,127}$"},
+        "decimals": {"type": "integer", "minimum": 0, "maximum": 18}
+      }
+    },
+    "CreateAccount": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["account_id", "initial_cash_usd"],
+      "properties": {
+        "account_id": {"$ref": "#/$defs/AccountID"},
+        "initial_cash_usd": {"$ref": "#/$defs/USD"}
+      }
+    },
+    "Position": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["instrument_id", "registry_version", "decimals", "quantity_raw", "reserved_quantity_raw"],
+      "properties": {
+        "instrument_id": {"type": "string", "minLength": 1},
+        "registry_version": {"type": "string", "minLength": 1},
+        "decimals": {"type": "integer", "minimum": 0, "maximum": 18},
+        "quantity_raw": {"$ref": "#/$defs/RawQuantity"},
+        "reserved_quantity_raw": {"$ref": "#/$defs/RawQuantity"}
+      }
+    },
+    "ReservationFields": {
+      "type": "object",
+      "required": ["account_id", "order_id", "decision_id", "quote_id", "snapshot_version", "instrument", "side", "quantity_raw", "gross_usd", "max_fee_usd", "expires_at"],
+      "properties": {
+        "account_id": {"$ref": "#/$defs/AccountID"},
+        "order_id": {"$ref": "#/$defs/AccountID"},
+        "decision_id": {"$ref": "#/$defs/AccountID"},
+        "quote_id": {"$ref": "#/$defs/AccountID"},
+        "snapshot_version": {"type": "integer", "minimum": 1},
+        "instrument": {"$ref": "#/$defs/Instrument"},
+        "side": {"enum": ["BUY", "SELL"]},
+        "quantity_raw": {"type": "string", "pattern": "^[1-9][0-9]{0,37}$"},
+        "gross_usd": {"$ref": "#/$defs/USD"},
+        "max_fee_usd": {"$ref": "#/$defs/USD"},
+        "expires_at": {"type": "string", "format": "date-time"}
+      }
+    },
+    "Reserve": {
+      "$ref": "#/$defs/ReservationFields",
+      "unevaluatedProperties": false
+    },
+    "Resolve": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["account_id", "order_id", "event_id", "outcome"],
+      "properties": {
+        "account_id": {"$ref": "#/$defs/AccountID"},
+        "order_id": {"$ref": "#/$defs/AccountID"},
+        "event_id": {"$ref": "#/$defs/AccountID"},
+        "outcome": {"enum": ["unknown", "cancelled", "filled"]},
+        "gross_usd": {"$ref": "#/$defs/USD"},
+        "fee_usd": {"$ref": "#/$defs/USD"},
+        "observed_at": {"type": "string", "format": "date-time"}
+      },
+      "if": {"properties": {"outcome": {"const": "filled"}}},
+      "then": {"required": ["gross_usd", "fee_usd", "observed_at"]},
+      "else": {"not": {"anyOf": [{"required": ["gross_usd"]}, {"required": ["fee_usd"]}, {"required": ["observed_at"]}]}}
+    },
+    "Fill": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["event_id", "gross_usd", "fee_usd", "observed_at"],
+      "properties": {
+        "event_id": {"$ref": "#/$defs/AccountID"},
+        "gross_usd": {"$ref": "#/$defs/USD"},
+        "fee_usd": {"$ref": "#/$defs/USD"},
+        "observed_at": {"type": "string", "format": "date-time"}
+      }
+    },
+    "Order": {
+      "$ref": "#/$defs/ReservationFields",
+      "required": ["status", "account_version", "created_at"],
+      "properties": {
+        "status": {"enum": ["reserved", "unknown", "cancelled", "filled"]},
+        "account_version": {"type": "integer", "minimum": 1},
+        "created_at": {"type": "string", "format": "date-time"},
+        "fill": {"$ref": "#/$defs/Fill"}
+      },
+      "unevaluatedProperties": false
+    },
+    "SignedUSD": {"type": "string", "pattern": "^-?(?:0|[1-9][0-9]*)(?:\\.[0-9]{1,8})?$"},
+    "LotFields": {
+      "type": "object",
+      "required": ["buy_fill_event_id", "buy_decision_id", "quantity_raw", "cost_basis_usd"],
+      "properties": {
+        "buy_fill_event_id": {"$ref": "#/$defs/AccountID"},
+        "buy_decision_id": {"$ref": "#/$defs/AccountID"},
+        "quantity_raw": {"$ref": "#/$defs/RawQuantity"},
+        "cost_basis_usd": {"$ref": "#/$defs/SignedUSD"}
+      }
+    },
+    "OpenLot": {
+      "$ref": "#/$defs/LotFields",
+      "required": ["instrument", "observed_at", "available_at"],
+      "properties": {
+        "instrument": {"$ref": "#/$defs/Instrument"},
+        "observed_at": {"type": "string", "format": "date-time"},
+        "available_at": {"type": "string", "format": "date-time"}
+      },
+      "unevaluatedProperties": false
+    },
+    "Outcome": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fill_event_id", "decision_id", "instrument", "quantity_raw", "gross_usd", "fee_usd", "cost_basis_usd", "net_pnl_usd", "observed_at", "available_at", "lots"],
+      "properties": {
+        "fill_event_id": {"$ref": "#/$defs/AccountID"},
+        "decision_id": {"$ref": "#/$defs/AccountID"},
+        "instrument": {"$ref": "#/$defs/Instrument"},
+        "quantity_raw": {"$ref": "#/$defs/RawQuantity"},
+        "gross_usd": {"$ref": "#/$defs/USD"},
+        "fee_usd": {"$ref": "#/$defs/USD"},
+        "cost_basis_usd": {"$ref": "#/$defs/SignedUSD"},
+        "net_pnl_usd": {"$ref": "#/$defs/SignedUSD"},
+        "observed_at": {"type": "string", "format": "date-time"},
+        "available_at": {"type": "string", "format": "date-time"},
+        "lots": {"type": "array", "items": {"$ref": "#/$defs/LotFields", "unevaluatedProperties": false}}
+      }
+    },
+    "OutcomeSnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["account_id", "account_version", "as_of", "source_mode", "accounting_method", "cash_usd", "recorded_fees_usd", "realized_net_pnl_usd", "realized", "open_lots"],
+      "properties": {
+        "account_id": {"$ref": "#/$defs/AccountID"},
+        "account_version": {"type": "integer", "minimum": 1},
+        "as_of": {"type": "string", "format": "date-time"},
+        "source_mode": {"const": "paper_simulated_ledger"},
+        "accounting_method": {"const": "fifo_usd_scale8_v1"},
+        "cash_usd": {"$ref": "#/$defs/SignedUSD"},
+        "recorded_fees_usd": {"$ref": "#/$defs/SignedUSD"},
+        "realized_net_pnl_usd": {"$ref": "#/$defs/SignedUSD"},
+        "realized": {"type": "array", "items": {"$ref": "#/$defs/Outcome"}},
+        "open_lots": {"type": "array", "items": {"$ref": "#/$defs/OpenLot"}}
+      }
+    },
+    "Account": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["account_id", "version", "cash_usd", "reserved_cash_usd", "positions", "created_at"],
+      "properties": {
+        "account_id": {"$ref": "#/$defs/AccountID"},
+        "version": {"type": "integer", "minimum": 1},
+        "cash_usd": {"$ref": "#/$defs/USD"},
+        "reserved_cash_usd": {"$ref": "#/$defs/USD"},
+        "positions": {"type": "array", "items": {"$ref": "#/$defs/Position"}},
+        "created_at": {"type": "string", "format": "date-time"}
+      }
+    }
+  }
+}

@@ -109,6 +109,11 @@ jobs:
         working-directory: services/research/vendor/trading-agents
         run: uv run --project ../.. --frozen --extra evaluation pytest -c pyproject.toml tests --junitxml=../../runtime/verification/upstream.xml
 
+      - name: Test the Linux candidate container against Go Control
+        if: runner.os == 'Linux'
+        working-directory: .
+        run: python3 deploy/research/smoke.py
+
       - name: Save verified candidate locks for review
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

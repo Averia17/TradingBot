@@ -33,6 +33,7 @@ type jobStore interface {
 	Ping(context.Context) error
 	Claim(context.Context, string, string, time.Duration) (jobs.Lease, error)
 	Heartbeat(context.Context, string, string, string) (jobs.Lease, error)
+	AuthorizeCall(context.Context, string, string, string, string) (jobs.CallPermit, bool, error)
 	Complete(context.Context, jobs.CompleteJob, func(jobs.Job, time.Time) error) (jobs.Result, bool, error)
 	GetResult(context.Context, string) (jobs.Result, error)
 }

@@ -6,5 +6,10 @@
   "heartbeat": {
     "worker_id": "offline-worker-01",
     "lease_token": "00000000-0000-4000-8000-000000000012"
+  },
+  "authorize_call": {
+    "worker_id": "offline-worker-01",
+    "lease_token": "00000000-0000-4000-8000-000000000012",
+    "call_id": "00000000-0000-4000-8000-000000000013"
   }
 }

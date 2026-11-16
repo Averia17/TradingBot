@@ -84,3 +84,16 @@ def test_doctor_identifies_an_incompatible_upstream_without_sensitive_config(mon
     monkeypatch.setattr(tradingagents, "check_compatibility", incompatible)
     assert main(["doctor"]) == 2
     assert "propagate/portfolio changed" in capsys.readouterr().err
+
+
+def test_worker_cli_passes_explicit_archive_root(monkeypatch, tmp_path):
+    from tradingbot import worker
+
+    calls = []
+
+    def run_worker(*args, **kwargs):
+        calls.append(kwargs["archive_root"])
+
+    monkeypatch.setattr(worker, "run_worker", run_worker)
+    assert main(["worker", "--archive-root", str(tmp_path)]) == 0
+    assert calls == [tmp_path]

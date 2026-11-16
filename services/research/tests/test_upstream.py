@@ -63,6 +63,24 @@ def test_bootstrap_is_clean_detached_exact_and_repeatable(project):
     assert git(root / "vendor/trading-agents", "branch", "--show-current") == ""
 
 
+def test_bootstrap_can_fetch_only_the_research_distribution(project, monkeypatch):
+    original, remote = project
+    root = original.parent / "research-only"
+    root.mkdir()
+    manifest = json.loads((original / "upstream.lock.json").read_text(encoding="utf-8"))
+    manifest["repositories"].append(
+        manifest["repositories"][0]
+        | {"name": "nautilus-trader", "distribution": "nautilus_trader"}
+    )
+    (root / "upstream.lock.json").write_text(json.dumps(manifest), encoding="utf-8")
+    monkeypatch.setitem(upstream.EXPECTED_URLS, "nautilus-trader", remote.as_uri())
+
+    bootstrap(root, distribution="tradingagents")
+
+    assert verify(root, distribution="tradingagents") == manifest["repositories"][:1]
+    assert not (root / "vendor/nautilus-trader").exists()
+
+
 def test_bootstrap_fetches_tag_when_release_branch_has_the_same_name(tmp_path, monkeypatch):
     remote = tmp_path / "remote"
     remote.mkdir()

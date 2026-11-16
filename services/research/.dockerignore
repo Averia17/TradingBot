@@ -1,0 +1,8 @@
+**
+!pyproject.toml
+!uv.lock
+!upstream.lock.json
+!tradingbot/
+!tradingbot/**
+tradingbot/**/__pycache__/
+tradingbot/**/*.py[cod]

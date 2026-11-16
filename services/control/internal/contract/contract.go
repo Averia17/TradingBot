@@ -26,6 +26,9 @@ var batchSchema []byte
 //go:embed portfolio.schema.json
 var portfolioSchema []byte
 
+//go:embed paper-account.schema.json
+var paperSchema []byte
+
 var decimalPattern = regexp.MustCompile(`^(?:0|[1-9][0-9]{0,11})(?:\.[0-9]{1,8})?$`)
 
 type Horizon struct {
@@ -73,7 +76,7 @@ type Portfolio struct {
 	Positions   []Position `json:"positions"`
 }
 
-func compile(data []byte) *jsonschema.Schema {
+func compile(data []byte, reference string) *jsonschema.Schema {
 	v, err := jsonschema.UnmarshalJSON(bytes.NewReader(data))
 	if err != nil {
 		panic(err)
@@ -83,15 +86,19 @@ func compile(data []byte) *jsonschema.Schema {
 	if err = c.AddResource("https://tradingbot.local/schema", v); err != nil {
 		panic(err)
 	}
-	s, err := c.Compile("https://tradingbot.local/schema")
+	s, err := c.Compile("https://tradingbot.local/schema" + reference)
 	if err != nil {
 		panic(err)
 	}
 	return s
 }
 
-var batchValidator = compile(batchSchema)
-var portfolioValidator = compile(portfolioSchema)
+var batchValidator = compile(batchSchema, "")
+var portfolioValidator = compile(portfolioSchema, "")
+
+var PaperAccountCreate = compile(paperSchema, "#/$defs/CreateAccount")
+var PaperReserve = compile(paperSchema, "#/$defs/Reserve")
+var PaperResolve = compile(paperSchema, "#/$defs/Resolve")
 
 // Decode rejects duplicate keys, trailing values and unknown fields. Numbers
 // remain json.Number during schema validation; monetary fields must be strings.

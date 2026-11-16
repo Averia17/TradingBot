@@ -15,27 +15,16 @@ import (
 	"tradingbot/control/internal/jobs"
 )
 
-const (
-	resultSchemaVersion = "0.1"
-	syntheticSourceMode = "synthetic_fixture"
-)
-
 var (
 	errInvalidResult    = errors.New("invalid research result")
 	errInvalidStoredJob = errors.New("invalid immutable research job")
 )
 
-type resultMetadata struct {
-	SourceMode    string `json:"source_mode"`
-	LLMCalls      int    `json:"llm_calls"`
-	AlphaMeasured bool   `json:"alpha_measured"`
-}
-
 type resultDocument struct {
 	SchemaVersion string                       `json:"result_schema_version"`
 	Batch         json.RawMessage              `json:"batch"`
 	Reports       map[string]map[string]string `json:"reports"`
-	Metadata      resultMetadata               `json:"metadata"`
+	Metadata      any                          `json:"metadata"`
 	ExpiresAt     time.Time                    `json:"-"`
 }
 
@@ -70,9 +59,14 @@ func (h jobHTTP) complete(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), jobStoreTimeout)
 	defer cancel()
-	result, created, err := h.store.Complete(ctx, jobs.CompleteJob{
+	input := jobs.CompleteJob{
 		JobID: jobID, WorkerID: workerID, Token: strings.ToLower(token), Payload: payload, ExpiresAt: document.ExpiresAt,
-	}, func(job jobs.Job, dbNow time.Time) error {
+	}
+	if metadata, ok := document.Metadata.(offlineResultMetadata); ok {
+		input.ExpectedAttempt = metadata.Provenance.Attempt
+		input.ExpectedLLMCalls = metadata.LLMCalls
+	}
+	result, created, err := h.store.Complete(ctx, input, func(job jobs.Job, dbNow time.Time) error {
 		return document.validate(job, dbNow, h.maxResearchAge)
 	})
 	switch {
@@ -82,7 +76,7 @@ func (h jobHTTP) complete(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "lease_conflict")
 	case errors.Is(err, jobs.ErrConflict):
 		writeError(w, http.StatusConflict, "result_conflict")
-	case errors.Is(err, errInvalidResult), errors.Is(err, jobs.ErrResultExpired):
+	case errors.Is(err, errInvalidResult), errors.Is(err, jobs.ErrResultExpired), errors.Is(err, jobs.ErrCallPermitMismatch):
 		writeError(w, http.StatusUnprocessableEntity, "invalid_result")
 	case err != nil:
 		writeError(w, http.StatusServiceUnavailable, "storage_unavailable")
@@ -117,12 +111,13 @@ func (h jobHTTP) getResult(w http.ResponseWriter, r *http.Request) {
 
 func parseResultDocument(fields map[string]json.RawMessage) (resultDocument, error) {
 	var document resultDocument
-	var metadata map[string]json.RawMessage
-	if json.Unmarshal(fields["result_schema_version"], &document.SchemaVersion) != nil || document.SchemaVersion != resultSchemaVersion ||
-		json.Unmarshal(fields["metadata"], &metadata) != nil || !hasExactKeys(metadata, "source_mode", "llm_calls", "alpha_measured") ||
-		json.Unmarshal(metadata["source_mode"], &document.Metadata.SourceMode) != nil || document.Metadata.SourceMode != syntheticSourceMode ||
-		string(bytes.TrimSpace(metadata["llm_calls"])) != "0" || string(bytes.TrimSpace(metadata["alpha_measured"])) != "false" {
+	if json.Unmarshal(fields["result_schema_version"], &document.SchemaVersion) != nil {
 		return resultDocument{}, errInvalidResult
+	}
+	var err error
+	document.Metadata, err = parseResultMetadata(document.SchemaVersion, fields["metadata"])
+	if err != nil {
+		return resultDocument{}, err
 	}
 	if json.Unmarshal(fields["reports"], &document.Reports) != nil || len(document.Reports) == 0 || len(document.Reports) > 100 {
 		return resultDocument{}, errInvalidResult
@@ -152,7 +147,6 @@ func parseResultDocument(fields map[string]json.RawMessage) (resultDocument, err
 	}
 	// Read the receipt deadline from the exact batch verified against the job.
 	expiry, _ := batch["expires_at"].(string)
-	var err error
 	document.ExpiresAt, err = time.Parse(time.RFC3339Nano, expiry)
 	if err != nil || document.ExpiresAt.IsZero() {
 		return resultDocument{}, errInvalidResult
@@ -166,6 +160,13 @@ func (d resultDocument) validate(job jobs.Job, dbNow time.Time, maxAge time.Dura
 	if err := contract.Decode(job.Request, nil, &request); err != nil || request.ID != job.ID || request.Version != jobSchemaVersion ||
 		contract.CheckSymbols(request.RequestedSymbols) != nil {
 		return errInvalidStoredJob
+	}
+	if metadata, ok := d.Metadata.(offlineResultMetadata); ok {
+		provenance := metadata.Provenance
+		if provenance.JobID != job.ID || provenance.PolicyVersion != request.PolicyVersion ||
+			provenance.DataManifest != request.DataManifest || metadata.LLMCalls > request.MaxLLMCalls {
+			return errInvalidResult
+		}
 	}
 	portfolio, err := contract.ParsePortfolio(request.Portfolio)
 	if err != nil {

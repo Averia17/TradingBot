@@ -175,6 +175,7 @@ func TestResultTransportMapsStoreErrorsWithoutLeakingTokens(t *testing.T) {
 		{"stale lease", http.MethodPost, completePath, jobs.ErrLeaseConflict, 409, `{"error":"lease_conflict"}`},
 		{"changed result", http.MethodPost, completePath, jobs.ErrConflict, 409, `{"error":"result_conflict"}`},
 		{"expired at receipt", http.MethodPost, completePath, jobs.ErrResultExpired, 422, `{"error":"invalid_result"}`},
+		{"usage contradicts recorded permits", http.MethodPost, completePath, jobs.ErrCallPermitMismatch, 422, `{"error":"invalid_result"}`},
 		{"failed write", http.MethodPost, completePath, errors.New(leaseToken), 503, `{"error":"storage_unavailable"}`},
 		{"unavailable result", http.MethodGet, resultPath, jobs.ErrNotFound, 404, `{"error":"result_not_found"}`},
 		{"failed read", http.MethodGet, resultPath, errors.New(leaseToken), 503, `{"error":"storage_unavailable"}`},

@@ -25,8 +25,8 @@ Research и текущая диагностика Nautilus находятся в
 - **Goal:** выбрать разрешённые research и execution paths.
 - **Context:** EU retail не равен direct qualified issuer client; конкретная страна UNKNOWN.
 - **Files/components:** `docs/eligibility.md`, `docs/provider-access.csv`.
-- **Acceptance:** country/category/account/API/asset/redemption conditions, terms date/hash и доказательство по xStocks distributor/xChange/Ondo/broker; unresolved явно CLOSED для live; Belarus appendix отдельно.
-- **Tests:** каждая разрешённая capability подтверждена account-specific evidence; documentation-only не помечена approved.
+- **Acceptance:** для страны резидентства и категории владельца зафиксированы дата и версия условий, доступ к Jupiter API и вторичному рынку Solana xStocks, допуск к конкретным сериям, ввод и вывод фиата/USDC и требования выбранных провайдеров. Отдельно отмечены права на прямой mint/redeem у эмитента, альтернативные xChange/Ondo/брокер и ограничения каждого пути. Пробелы остаются `UNKNOWN` и блокируют затронутый live-маршрут. Сценарий Беларуси хранится отдельно.
+- **Tests:** каждая разрешённая операция имеет evidence для конкретного аккаунта или владельца. Успешная публичная котировка подтверждает только доступ к источнику котировки.
 - **Dependencies:** нет; окончательный live результат требует конкретной страны и onboarding.
 
 ### [ ] P0-02 — Pin upstream and license manifest
@@ -43,8 +43,8 @@ Research и текущая диагностика Nautilus находятся в
 - **Goal:** выбрать допустимые источники data/news/actions.
 - **Context:** бесплатный demo feed не доказанный production PIT dataset.
 - **Files/components:** `docs/data-contracts.md`, `services/research/tests/fixtures/data_samples/`.
-- **Acceptance:** sample timestamps/revisions/coverage/retention rights; real quotes vendors либо UNKNOWN budget; SEC/FRED access policy.
-- **Tests:** sample различает event/availability/ingestion; historic amendments и news corrections представлены.
+- **Acceptance:** по ценам/объёмам underlying, календарю, отчётности, новостям и корпоративным действиям есть перечень источников, права использования и хранения, покрытие, время доступности каждой версии записи, правила свежести и бюджет или `UNKNOWN`. Для новостей сохраняются исходная публикация, первое наблюдение и исправления. Для отчётности сохраняются фактическое время публикации и последующие поправки.
+- **Tests:** sample различает `event_time`, `available_at`, `ingested_at` и ревизию. Запись из будущего, недоступная ревизия или просроченный обязательный источник блокируют использование в анализе.
 - **Dependencies:** нет.
 
 ### [ ] P0-04 — Asset registry evidence
@@ -52,8 +52,8 @@ Research и текущая диагностика Nautilus находятся в
 - **Goal:** избежать ticker/mint/ratio путаницы.
 - **Context:** wrapper legal terms и Scaled UI различны.
 - **Files/components:** `data/manifests/assets.json`, `docs/assets.md`.
-- **Acceptance:** все 8 underlyings с issuer/chain/mint/decimals/ratio/terms source; unavailable instrument явно отсутствует, не guessed address.
-- **Tests:** duplicate identity/counterfeit mint/ratio unit checks; registry date/version.
+- **Acceptance:** начать с NVDA и TSLA. Для NVDAx/TSLAx и settlement USDC сверить официально опубликованный Solana mint и on-chain mint account, включая token program, `decimals` и extensions. Для xStocks записать issuer, коэффициент raw→UI→акция с временем действия, применимые условия/ограничения, источники и версию записи. Остальные кандидаты включаются только после такой же сверки. Допуск BUY/SELL хранится отдельно от идентичности токена.
+- **Tests:** совпадающие тикеры с разными mint, подменённый program, неизвестное extension и изменение multiplier. Воспроизведение размера сделки использует registry version на момент решения.
 - **Dependencies:** P0-01; public evidence можно собрать заранее.
 
 ### [ ] P0-05 — Quote-study protocol
@@ -61,17 +61,17 @@ Research и текущая диагностика Nautilus находятся в
 - **Goal:** получить сравнимые cost observations.
 - **Context:** ни одна U-cell main plan пока не quote evidence.
 - **Files/components:** `experiments/quote-study/protocol.md`, `contracts/quote-observation.json`.
-- **Acceptance:** 8×5 sizes, buy/sell/session matrix, pilot sizes, soft/hard distinction, TTL/reference/fees fields, provider load limits и >=20 business days schedule.
-- **Tests:** synthetic observation не проходит как executable; missing/ref-stale labels корректны.
-- **Dependencies:** P0-01, P0-04.
+- **Acceptance:** протокол задаёт пары USDC→допущенный xStock и обратно для того же mint, сетку размеров с учётом минимального ордера и лимита пилота, матрицу regular/extended/off-hours, формат timestamp/ref/bid/ask/input/output/min-output/TTL/fees, режим котировки и лимиты запросов. Первый срез — NVDAx/TSLAx, расширение — до восьми допущенных активов и пяти размеров. Учитываются неуспешные ответы и отказы. Период наблюдений — не менее 20 торговых дней.
+- **Tests:** различаются synthetic/indicative/используемая котировка, её расчётный output и подтверждённый fill. Пропуски, неизвестные компоненты расходов и устаревший reference явно маркируются.
+- **Dependencies:** P0-01, P0-04 для сбора. Схему наблюдения и сетку размеров можно подготовить заранее.
 
 ### [ ] P0-06 — Register economics and decision gates
 
 - **Goal:** зафиксировать criterion до просмотра результатов.
 - **Context:** success = net risk-adjusted excess, не число сделок.
 - **Files/components:** `experiments/protocol.md`, `docs/budgets.md`.
-- **Acceptance:** primary benchmark/base currency, cost buckets, loss/spend caps, CI/power approach, change policy, go/hold/stop owner decisions.
-- **Tests:** пример $1k cashflow/budget воспроизводим; benchmark investability явно отмечена.
+- **Acceptance:** до просмотра результатов зафиксированы базовая валюта, доступный основной benchmark с total return, пассивный и детерминированный контроль, NAV на весь выделенный капитал, статьи переменных и регулярных затрат, допустимая просадка, метод оценки неопределённости и правила `go/hold/stop`. Для входа зафиксированы версия сценарной модели, минимальный запас над двусторонними затратами и fallback при отсутствии калибровки. Владелец отдельно утверждает финансовые параметры для real mode в P7-01.
+- **Tests:** воспроизводятся условная сделка $400 с +5% и заданными расходами $0.60 + $0.50, зеркальное движение −5% при тех же расходах и годовой итог $1 000 + $180 − $20 − $30. Для сравнения показываются номинальное превышение и отдельная оценка с поправкой на риск. Доступность QQQ или заменяющего инструмента проверена отдельно.
 - **Dependencies:** P0-03, P0-05.
 
 ## Phase 1 — Local baseline
@@ -90,8 +90,8 @@ Research и текущая диагностика Nautilus находятся в
 - **Goal:** заменить ambiguous sizing/action outputs.
 - **Context:** upstream typed PM не готовый executable order.
 - **Files/components:** `contracts/`, `services/research/tradingbot/contracts.py`, `services/control/internal/contract/`, fixtures. Held-wrapper identity расширяется отдельным контрактом перед paper/live.
-- **Acceptance:** five actions, target/delta/units, horizon/expiry/evidence/scenarios; no NaN/negative/inconsistent amount; fallback free text rejected.
-- **Tests:** invalid action, probability sums, inconsistent units, stale snapshot, SELL without instrument.
+- **Acceptance:** пять действий, target/delta/units, горизонт, expiry, триггер пересмотра, условия опровержения тезиса и ссылки на источники. Для риск-увеличивающих предложений — диапазон сценариев и ожидаемых изменений с явным источником оценки и статусом калибровки. Обработка плохих данных, истёкшего снимка и неизвестного бюджета завершается структурированной причиной отказа.
+- **Tests:** неизвестное действие, свободный текст, NaN, несовместимые единицы, stale snapshot, ссылки на отсутствующее evidence, invalid probabilities при их наличии и SELL без идентифицированной позиции.
 - **Dependencies:** P1-01. Для research проверяем на fixtures и публичных данных registry. Для работы с реальными held instruments требуется P0-04 и проверка конкретного account path.
 
 ### [ ] P1-03 — Immutable snapshot tool boundary
@@ -117,9 +117,11 @@ Research и текущая диагностика Nautilus находятся в
 - **Goal:** несколько symbol proposals учитывают один cash ledger.
 - **Context:** static single-ticker portfolio input не portfolio optimizer.
 - **Files/components:** `services/research/tradingbot/allocation.py`, `services/research/tradingbot/agents_adapter.py`.
-- **Acceptance:** marked exposure/pending/reserved balances передаются PM; one target batch; basis separated from forward utility; unsupported output abstains.
-- **Tests:** five proposals cannot each consume same cash; reduce/hold semantics; entry-price anchoring counterexample.
-- **Dependencies:** P1-02, P1-03.
+- **Acceptance:** один portfolio allocator видит доступный cash, резервы, held positions и pending orders. Оценка ожидаемого изменения отделена от basis и проверяется против ожидаемых затрат входа/выхода и буфера модели. Размер ограничивается политикой, свободным cash, ликвидностью и концентрацией по инструменту/сектору/эмитенту. Сценарии и стоимость сохраняются вместе с причиной BUY/ADD или осознанного пропуска.
+- **Tests:** видимый upside при отрицательном net edge, некалиброванная уверенность, пять предложений к одному cash, одновременные BUY и ожидаемая выручка SELL, конфликт по концентрации, `REDUCE`/`HOLD` и пример с привязкой к цене входа.
+- **Dependencies:** P1-02, P1-03 и правила входа из P0-06. На раннем офлайн-этапе
+  ставки берутся из fixtures и помечаются как сценарные. Для измеренной оценки
+  затрат требуется P3-04.
 
 ### [ ] P1-06 — Baseline replay and variance report
 
@@ -134,6 +136,7 @@ Research и текущая диагностика Nautilus находятся в
 
 ### [ ] P2-01 — PostgreSQL event ledger and migrations
 
+- **Текущий прогресс:** Go paper ledger хранит виртуальные счета, полные fills, резервы и журнал. Проверены перезапуск, восстановление копии и точные суммы через HTTP.
 - **Goal:** authoritative cash/intent/event identifiers.
 - **Context:** mutable Markdown не accounting ledger.
 - **Files/components:** `services/control/internal/ledger/`, PostgreSQL ledger migrations, `contracts/events.json`.
@@ -161,6 +164,7 @@ Research и текущая диагностика Nautilus находятся в
 
 ### [ ] P2-04 — Nautilus compatibility spike
 
+- **Текущий прогресс:** изолированный pinned Nautilus runtime выполняет синтетический multi-asset replay и cash benchmark. Корпоративные действия и token multipliers остаются открыты.
 - **Goal:** подтвердить reuse engine до большого adapter.
 - **Context:** token multiplier/actions не доказаны engine defaults.
 - **Files/components:** `services/evaluation/engine.py`, `services/research/tests/fixtures/actions/`, `docs/adr/evaluator.md`.
@@ -202,8 +206,12 @@ Research и текущая диагностика Nautilus находятся в
 - **Goal:** собирать permitted quotes без подписи.
 - **Context:** current Swap v2/issuer schemas нужно version pin.
 - **Files/components:** `services/control/internal/venues/quote/`, generated API clients, recorded fixtures.
-- **Acceptance:** one approved venue first; quote kind/TTL/fee/net output/limit/cash unit; other adapters only after own access evidence.
-- **Tests:** current schema contract, stale/soft/hard/minimum/429/partial-response fixtures.
+- **Acceptance:** первый кандидат — Jupiter для Solana USDC↔допущенные xStocks.
+  Сбор включается после P0-01. Зафиксированы версия API и ответы, raw amounts,
+  route/время/expiry/fee/ref/net output и отказы. Клиент использует методы
+  получения котировок и работает без доступа к signer или signed transactions.
+  Каждый дополнительный источник требует собственного подтверждения доступа.
+- **Tests:** актуальная записанная схема, неверный mint/side/amount, stale, soft vs гарантии конкретного режима, minimum, `429`, неполный ответ и отсутствие подписи/submit в клиенте котировок.
 - **Dependencies:** P0-01, P0-04, P0-05.
 
 ### [ ] P3-02 — Execute quote-study collection
@@ -211,8 +219,8 @@ Research и текущая диагностика Nautilus находятся в
 - **Goal:** заполнить U matrix measured observations.
 - **Context:** public schedule не actual spread/size impact.
 - **Files/components:** `experiments/quote-study/`, quote SQL table, collection job.
-- **Acceptance:** coverage/rejection по8×5×session за >=20 business days; pilot sizes; no unsupported cells invented; rate/reservation policy obeyed.
-- **Tests:** clock/reference alignment, duplicates, outage/rejection retention, dataset manifest hash.
+- **Acceptance:** покрытие и доля отказов по активу/размеру/стороне/сессии согласно P0-05, latency и all-in bps p50/p95/p99 вместе с числом наблюдений. Отдельно фиксируются `no_quote`, `expired`, `below_minimum`, `not_permitted` там, где применимо. Соблюдены лимиты запросов и правила получения hard quotes провайдера.
+- **Tests:** clock/reference alignment, duplicates, outage/rejection retention, dataset manifest hash, отдельный отчёт о малочисленных и непокрытых ячейках.
 - **Dependencies:** P3-01.
 
 ### [ ] P3-03 — Share-equivalent routing comparison
@@ -247,8 +255,8 @@ Research и текущая диагностика Nautilus находятся в
 - **Goal:** выбрать cheapest viable path либо stop.
 - **Context:** $1k fixed-cost hurdle велик.
 - **Files/components:** `experiments/economics/report.md`, `cashflow.csv`.
-- **Acceptance:** five notionals/eight targets, actual unknown coverage, one full fiat cycle, OPEX scenarios, broker limitations/PRIIPs, capital capacity unknown.
-- **Tests:** cashflow math, rates units/bps, compare same underlying/session/currency; no invented expected alpha.
+- **Acceptance:** сравнить основной DeFi-маршрут с доступным брокером на сопоставимом underlying, времени и валюте. Включить buy/sell, FX/on-/off-ramp, расходы решений без исполнения и неудачных отправок, наблюдаемые LLM/data/infra расходы, резерв SOL/ATA и простой cold capital. Брокер служит измеримым сравнением и требует отдельного решения при смене DeFi-сценария. Пробелы в ценах, доступе и capacity явно указаны.
+- **Tests:** cashflow math, rates units/bps, переменные расходы входят ровно один раз, ATA rent и возврат учтены раздельно, расходы периода сохраняются при нуле исполнений.
 - **Dependencies:** P3-04, P3-05, P2-06.
 
 ## Phase 4 — Memory/agent evaluation
@@ -276,8 +284,13 @@ Research и текущая диагностика Nautilus находятся в
 - **Goal:** полезный auditably sourced context.
 - **Context:** reflection может усилить luck/anchoring.
 - **Files/components:** `services/research/tradingbot/memory/retrieval.py`, `reflection.py`.
-- **Acceptance:** source IDs/PIT filters/context cap; ticker/sector/regime retrieval; lesson confidence/decay, no factual ledger rewrite.
-- **Tests:** poisoned lesson doesn't become command, future lesson excluded, context budget, entry-price anchoring examples.
+- **Acceptance:** уроки ссылаются на сверенные фактические или явно помеченные
+  симулированные исходы и становятся доступны после `available_at`. Извлечение
+  учитывает тикер, сектор, режим и лимит контекста. Неуспешные решения и расходы
+  сохраняются вместе с удачными. Память не изменяет неизменяемые события,
+  конфигурацию стратегии или подписанную политику.
+- **Tests:** будущий вывод и запись с неверным источником исключаются,
+  инъекция из памяти не получает полномочий, лимит контекста действует.
 - **Dependencies:** P4-02, P1-04.
 
 ### [ ] P4-04 — Agent/memory paired ablations
@@ -314,8 +327,12 @@ Research и текущая диагностика Nautilus находятся в
 - **Goal:** автономные holds/adds/reductions по horizon/event.
 - **Context:** без forced daily exit и basis anchoring.
 - **Files/components:** `services/research/tradingbot/positions.py`, `review.py`.
-- **Acceptance:** thesis state отдельно order state; next_review/invalidation; global portfolio version; pending orders visible.
-- **Tests:** review event once; partial opening; improved forward thesis despite loss; holding after unchanged catalyst.
+- **Acceptance:** thesis state отдельно от order state. `next_review_at`, expiry
+  и триггеры (отчёт, значимое изменение цены/новости, ухудшение ликвидности,
+  риск политики) планируют повторную оценку. Она использует текущий снимок,
+  принятые резервы, измеренные затраты выхода и остаток позиции по held mint.
+- **Tests:** review event once; partial opening; improved forward thesis despite
+  loss; holding after unchanged catalyst; остаток и резервы при отклонении SELL.
 - **Dependencies:** P1-05, P5-01.
 
 ### [ ] P5-03 — Deterministic risk and reservations
@@ -323,8 +340,8 @@ Research и текущая диагностика Nautilus находятся в
 - **Goal:** account limits перед simulated execution.
 - **Context:** AI decides signal, kernel only safety.
 - **Files/components:** `services/control/internal/risk/`, SQL reservation transactions, `config/risk.yaml`.
-- **Acceptance:** caps/modes/units/freshness/eligibility/fees/global balances; no action inversion; cash and token reservation.
-- **Tests:** concurrent buys, excessive correlated exposure, stale version, reduce-only/unknown balance, no leverage.
+- **Acceptance:** один Go writer проверяет snapshot/registry version, account mode, exact units, eligibility, открытые резервы, лимиты позиции/совокупной экспозиции, turnover, fee, данные и quote TTL. BUY резервирует имеющийся USDC, SELL — exact held mint, обычные действия проходят по одной policy. При неизвестном статусе сохраняется резерв и действует явно заданное ограничение на новые операции.
+- **Tests:** одновременные BUY, stale version, превышение коррелированной экспозиции/fee cap, неизвестный баланс, рассогласование с лимитом инструмента или quote expiry, повтор события, no leverage.
 - **Dependencies:** P2-01, P1-02, P3-03.
 
 ### [ ] P5-04 — Forward paper venue and ledger reconciliation
@@ -332,7 +349,7 @@ Research и текущая диагностика Nautilus находятся в
 - **Goal:** prospective feasible fills, not rating-only results.
 - **Context:** quotes recorded after decision completion.
 - **Files/components:** `services/control/internal/venues/paper/`, `services/evaluation/forward.py`.
-- **Acceptance:** real-time observed quote/latency/rejection, NAV including idle capital and OPEX, benchmark same clock; run begins after freeze.
+- **Acceptance:** отдельный paper account. Симулятор принимает только свежую наблюдаемую котировку после решения, явно помечает simulated fill и сохраняет reject/timeout. Ledger сравнивает расчётный и реализованный в симуляции output, публикует NAV включая idle capital и OPEX и синхронный benchmark. Forward run начинается после freeze.
 - **Notifications:** интегрировать отдельный сервис уведомлений с подтверждёнными paper fills, сохранив транзакционную запись outbox, стабильный ID исполнения и отсутствие события после rollback.
 - **Tests:** no stale/soft-as-guaranteed fill; outage retained; amount conservation, next-fill timestamp.
 - **Dependencies:** P5-02, P5-03, P3-04.
@@ -362,8 +379,8 @@ Research и текущая диагностика Nautilus находятся в
 - **Goal:** minimal execution path без universal router.
 - **Context:** start with one approved chain/venue and real versioned docs.
 - **Files/components:** `services/control/internal/venues/jupiter/` либо иной approved adapter, `services/control/cmd/executor/`.
-- **Acceptance:** quote→transaction→status semantics, signed payload hash, TTL/blockhash, no blind retry; capability table.
-- **Tests:** API recorded contract, expired quote, unknown submission status, minimum/fee error.
+- **Acceptance:** один разрешённый путь Jupiter order/execute с проверенными request ID, сроком котировки и blockhash validity, связь `intent_id` → quote/order → message hash → подпись → статус. Хеш связывает артефакты и policy, подписывается точное сериализованное сообщение Solana. Контракт записывает нужные signer slots и семантику внешней отправки. Новый message после timeout возможен после сверки и отдельного решения Go.
+- **Tests:** API recorded contract, expired quote, unknown submission status, minimum/fee error, неверная или неполная подпись, изменённое сообщение, отказ reserve до submit.
 - **Dependencies:** P3-01, P5-03, G0/G3 access.
 
 ### [ ] P6-02 — Independent transaction decoder/policy verifier
@@ -407,8 +424,8 @@ Research и текущая диагностика Nautilus находятся в
 - **Goal:** funds outside bot remain outside compromise radius.
 - **Context:** raw-key full compromise can drain float.
 - **Files/components:** `docs/runbooks/wallet.md`, `docs/runbooks/incident.md`.
-- **Acceptance:** owner-only funding/withdrawal, float/gas cap, independent killswitch, KMS/IAM outage and pending-tx recovery; non-exportable key limitations explicit.
-- **Tests:** tabletop plus sandbox restore, no bot auto-refill, independent shutdown, balance/ledger restored.
+- **Acceptance:** пополнение и вывод выполняет владелец по проверенным адресам. Cold treasury отделена от торгового кошелька и недоступна signer. Документированы допустимый on-/off-ramp, ручной перевод USDC и SOL под gas/ATA, лимиты total/float/gas, остановка новых подписей вне application host, сверка pending-транзакций и план возврата остатка. Для non-exportable key описаны восстановление IAM/доступа к ключу и аварийные действия при его недоступности.
+- **Tests:** tabletop и sandbox restore, bot не может инициировать refill/вывод, остановка и статус уже отправленной транзакции проверены отдельно, восстановленные chain balances согласуются с ledger.
 - **Dependencies:** P6-04, P6-05.
 
 ### [ ] P6-07 — Adversarial review and gate report
@@ -436,7 +453,7 @@ Research и текущая диагностика Nautilus находятся в
 - **Goal:** owner-controlled first mainnet validation.
 - **Context:** planned cap/minimum must agree; no human approval per ordinary trade afterward.
 - **Files/components:** `docs/gates/G7-start.md`, `config/live-envelope.yaml`, owner wallet action outside code.
-- **Acceptance:** G5/G6 passed, precise total/float/order/loss caps, measured available small size; owner mode activation and funding recorded, no seed in repo/chat.
+- **Acceptance:** основные gates доступа/стоимости/paper/безопасности пройдены. Владелец подписывает версию политики с total/float/SOL gas reserve, лимитами позиции/ордера/оборота/убытка/просадки, минимальным доступным размером, max fee/slippage, допустимой сессией и условиями stop/resume. `research`/`paper` используют отдельные credentials и не могут активировать `live`. Первое пополнение и активация явно подтверждены владельцем с audit evidence без секретов.
 - **Tests:** allowed payload/exit checked, killswitch responsive, pre/post balances match.
 - **Dependencies:** P5-06 passing gate, P6-07; P6-08 only for that chosen route.
 
@@ -445,14 +462,14 @@ Research и текущая диагностика Nautilus находятся в
 - **Goal:** проверить real path и return-to-cold ability.
 - **Context:** testnet не подтверждает mainnet issuer liquidity.
 - **Files/components:** `experiments/live-canary/report.md`, live order/fee ledger.
-- **Acceptance:** confirmed/finalized fill, actual net output/fee/multiplier, controlled permitted exit, no unknown residual funds; stop on mismatch.
+- **Acceptance:** ограниченный round trip USDC→один допущенный xStock→USDC с проверенным exact mint, отдельной котировкой на выход, независимой finality сверкой и фактическими delta balances/fees. Восстановление сверяет разрешённый перевод остатка в cold treasury. Несовпадение или неопределённое исполнение останавливает новые операции до разбирательства.
 - **Tests:** independent RPC and owner wallet balances, actual bps vs quote, no duplicate economic effect.
 - **Dependencies:** P7-01.
 
 ### [ ] P7-03 — Bounded $1k total-capital pilot operation
 
 - **Goal:** autonomous operation внутри small float envelope.
-- **Context:** max $250–500 float, idle capital benchmark included.
+- **Context:** $1 000 общий капитал и $250–500 float — предварительные сценарии. Фактические размеры определяются в P7-01 по доступным котировкам и потере, которую владелец готов принять. NAV включает idle capital в cold treasury.
 - **Files/components:** `experiments/live-pilot/`, operational config and reports.
 - **Acceptance:** frozen strategy, actual costs/OPEX, incidents/rejections retained, no auto-refill/scale, daily marks plus thesis reviews.
 - **Tests:** cap/reduce-only/freeze events; reconciliation and spend monitors; replay from audit bundle.
@@ -492,7 +509,11 @@ Research и текущая диагностика Nautilus находятся в
 - **Goal:** выполнить objective-oriented итог, не спасать исходную гипотезу.
 - **Context:** no net alpha → strategy not successful.
 - **Files/components:** `docs/gates/G8.md`, archived run manifest, owner next-cap config при GO.
-- **Acceptance:** explicit decision and evidence; positive adequate net/risk/capacity case only allows bounded scale; otherwise freeze/return funds/simplify broker or deterministic baseline.
+- **Acceptance:** решение и подтверждающие данные явные. Увеличение лимитов
+  требует достаточных положительных результатов с учётом всех затрат, риска
+  и capacity. Иначе варианты включают продолжение paper, остановку и возврат
+  остатка или упрощение стратегии. Смена DeFi на брокера оформляется отдельным
+  решением владельца.
 - **Tests:** terminal run immutable; returns/recovery reconciled; next config can't silently change previous evidence.
 - **Dependencies:** P8-02.
 

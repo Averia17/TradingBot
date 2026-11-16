@@ -15,6 +15,7 @@ import (
 
 	"tradingbot/control/internal/control"
 	"tradingbot/control/internal/jobs"
+	"tradingbot/control/internal/ledger"
 )
 
 func main() {
@@ -43,7 +44,14 @@ func run(ctx context.Context, address string, maxResearchAge time.Duration, dsn 
 			return errors.New("research job storage startup failed; check database configuration and connectivity")
 		}
 		defer store.Close()
-		handler = control.NewHandler(maxResearchAge, time.Now, store)
+		paperStartup, stopPaperStartup := context.WithTimeout(ctx, 10*time.Second)
+		paper, err := ledger.Open(paperStartup, dsn)
+		stopPaperStartup()
+		if err != nil {
+			return errors.New("paper storage startup failed; check database configuration and connectivity")
+		}
+		defer paper.Close()
+		handler = control.NewHandlerWithPaper(maxResearchAge, time.Now, store, paper)
 	}
 	listener, err := (&net.ListenConfig{}).Listen(ctx, "tcp", address)
 	if err != nil {

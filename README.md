@@ -96,15 +96,137 @@ lease задание может получить новую попытку с н
 [примеры запросов](contracts/valid-lease-requests.json).
 
 `POST /v1/research/jobs/{id}/complete` принимает `result_schema_version: "0.1"`,
-`worker_id`, `lease_token`, `batch`, `reports` и `metadata`. Текущая версия
-принимает офлайн-результат из `tradingbot demo` с `source_mode="synthetic_fixture"`.
+`worker_id`, `lease_token`, `batch`, `reports` и `metadata`. Версия `0.1`
+принимает `synthetic_fixture`. Версия `0.2` принимает результат графа TradingAgents
+с тестовыми моделями, наблюдаемыми вызовами и происхождением результата.
 Control проверяет batch по сохранённым portfolio и universe, а хеши evidence
 по тексту отчётов. Запись результата, статус `completed` и событие outbox
 фиксируются одной транзакцией. Первый запрос возвращает `201`. Повтор той же
 попытки с тем же содержимым возвращает прежний результат с `200`, в том числе
 после истечения lease. `GET /v1/research/jobs/{id}/result` читает результат.
-Запуск Python worker и результаты реальных provider runs добавляются в S3.
 [JSON Schema результата](contracts/research-result.schema.json).
+
+### Офлайн worker для research jobs
+
+Для отдельного локального Go control с тестовыми заданиями и настроенной
+PostgreSQL запустите в другом терминале:
+
+```powershell
+go -C services/control run ./cmd/research-fixture-worker --control-url http://127.0.0.1:8080
+```
+
+Worker опрашивает тестовую очередь, продлевает lease, строит синтетический
+`HOLD` для каждого символа из сохранённого снимка и возвращает `synthetic_fixture`
+с нулём LLM-вызовов. Он обращается к Go control по HTTP. Настройки базы нужны только
+control. Сохранённый результат доступен через `GET /v1/research/jobs/{id}/result`.
+При потере ответа worker повторяет claim с тем же ID и отправляет прежний payload
+completion. Если lease утрачен, новая публикация отменяется. `Ctrl+C`
+останавливает worker.
+
+Для проверки ошибок транспорта и идемпотентности используйте отдельную тестовую
+PostgreSQL и `TRADINGBOT_TEST_DATABASE_URL`, затем выполните Go-тесты control.
+
+### Офлайн worker с графом TradingAgents
+
+Для локальной тестовой очереди запустите worker из окружения с чистым pinned
+checkout TradingAgents и установленными зависимостями research:
+
+```powershell
+uv --directory services/research run --frozen tradingbot worker --control-url http://127.0.0.1:8080
+```
+
+Worker использует модель `scripted-offline-v1`. В результате видны число
+вызовов внутри графа, наблюдаемые токены, число вызовов без usage, версия и SHA
+upstream, хеш конфигурации, манифест и номер попытки. Внешние модели и источники
+данных не вызываются. На тестовой очереди запускайте один из двух воркеров
+в зависимости от требуемого вида результата.
+
+До каждого вызова Python отправляет `POST /v1/research/jobs/{id}/authorize-call`
+с `worker_id`, `lease_token` и UUID `call_id`. Control проверяет действующую
+аренду, записывает разрешение в PostgreSQL и возвращает `201`. Если ответ
+потерян, повтор с тем же ID и действующей арендой возвращает `200` и прежнюю
+квитанцию. В ней есть `remaining_llm_calls` на момент выдачи разрешения.
+`422 budget_exhausted` останавливает модель до вызова. Израсходованный слот
+остаётся списанным даже при сбое между записью разрешения и вызовом модели.
+Успешный результат `0.2` должен содержать число вызовов, равное числу
+разрешений текущей попытки. Общий лимит действует на все попытки задания.
+USD billing и подтверждение полноты и прав на рыночные данные входят в следующие срезы.
+
+Для сквозного прогона укажите `TRADINGBOT_E2E_DATABASE_URL` отдельной пустой
+PostgreSQL и запустите `pytest tests/test_worker_postgres.py` из окружения
+research. Тест собирает Go control и запускает worker отдельным процессом.
+
+В режиме `tradingbot worker --archive-root <путь>` worker сверяет SHA-256
+`data_manifest` с локальным файлом, выбирает только доступные к `as_of`
+ревизии и передаёт ограниченный источниками контекст в TradingAgents. Хеш
+выбранного снимка входит в отчёт. Пример формата есть в
+[синтетическом архиве](services/research/examples/pit-archive.json).
+
+## Локальный офлайн-контур в Docker Compose
+
+Go control, PostgreSQL и Python worker запускаются из корня репозитория.
+Control доступен на `127.0.0.1:18080`. PostgreSQL доступна только control по
+отдельной внутренней сети. Research работает в сети без внешнего доступа, а
+профиль `evaluation` запускает Nautilus без сетевого интерфейса Docker.
+
+```powershell
+docker compose -f deploy/research/compose.yaml up -d --build --wait
+docker compose -f deploy/research/compose.yaml --profile evaluation run --rm --build evaluation
+```
+
+Для отдельной проверки сборки, совместимости, замены и отката worker запустите
+`python deploy/research/smoke.py` с Python 3.12 и Docker. Скрипт создаёт временный
+Compose-проект, отправляет тестовые задания, проверяет отклонение неподдерживаемой
+версии результата и удаляет только свои контейнеры и БД. Он выводит ID образов,
+версии протоколов, SHA TradingAgents и хеши lock-файлов. Для постоянного локального
+проекта используйте `docker compose -f deploy/research/compose.yaml down` без
+удаления тома PostgreSQL.
+
+При обновлении сначала остановите старый `research`. Активная попытка с
+неподтверждённым результатом восстанавливается через истечение lease, а ранее
+выданные разрешения на вызовы учитываются. Установите `TRADINGBOT_RESEARCH_IMAGE`
+на проверенный тег или digest и выполните `up -d --no-deps --no-build --force-recreate research`
+для того же Compose-файла. Для отката используйте идентификатор прежнего образа.
+Control, оценка и том БД при этом остаются на месте.
+
+### Виртуальный paper-счёт
+
+Control с PostgreSQL может создать виртуальный счёт через `POST /v1/paper/accounts`
+с `account_id` и `initial_cash_usd` в виде строки. Чтение счёта доступно через
+`GET /v1/paper/accounts/{id}`. Резервируйте полную BUY или SELL заявку через
+`POST /v1/paper/accounts/{id}/orders`. Она связана с версией счёта, инструментом,
+ID решения и котировки, предельной комиссией и сроком. `POST .../orders/{order}/resolve`
+пишет только виртуальный исход `filled`, `unknown` или `cancelled`. Неопределённый
+исход сохраняет резерв до сверки. Для журнала используйте
+`GET /v1/paper/accounts/{id}/events?after_version=0&limit=25`.
+`GET /v1/paper/accounts/{id}/outcomes?as_of=<UTC>` восстанавливает FIFO-результаты
+с учётом fees и себестоимости ещё открытых лотов по доступной на тот момент
+версии журнала. Для `as_of` передавайте RFC3339, например `2026-11-16T17:00:00Z`.
+[JSON Schema](contracts/paper-account.schema.json).
+
+Этот API принимает тестовые данные для локального исполнения. Проверки денег и
+количеств выполняет PostgreSQL. Команда `go -C services/control run ./cmd/paper-replay
+--intent <intent.json> --quote <quote.json>` применяет к ledger локальную тестовую
+котировку, которую intent привязывает по SHA-256. Нужна `TRADINGBOT_DATABASE_URL`
+для Control DB с созданным paper account. Повторы используют устойчивые ID.
+Политика концентрации и частичные исполнения дорабатываются в S5.
+[Формат входа и результата](contracts/paper-replay.schema.json).
+
+Для создания заданий по готовому расписанию запустите `go -C services/control run
+./cmd/research-scheduler --once --config <schedule.json> --archive-root <путь>`.
+Планировщик проверяет хеш архива и вычисляет ID из расписания и времени события.
+Повтор того же запуска возвращает существующее задание. Для собственного прогона
+укажите актуальные `scheduled_at` и `portfolio.as_of` и вычислите SHA-256 текущих
+байтов архива. Формат показан в [примере расписания](contracts/valid-research-schedule.json).
+
+Независимый Nautilus replay читает подготовленные тестовые котировки и заявки.
+Денежные дивиденды учитываются по времени права и выплаты. `benchmarks` на том же
+горизонте сравнивает cash, buy-and-hold и равную начальную аллокацию.
+
+```powershell
+uv --directory services/evaluation run --frozen tradingbot-evaluation replay examples/quote-replay.json
+uv --directory services/evaluation run --frozen tradingbot-evaluation benchmarks examples/quote-replay.json --start-at 2026-10-02T13:30:10Z --buy-and-hold-symbol TSLA
+```
 
 ## Уведомления о сделках
 

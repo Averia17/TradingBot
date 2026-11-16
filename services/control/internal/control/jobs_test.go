@@ -26,6 +26,7 @@ type stubJobStore struct {
 	ping      func(context.Context) error
 	claim     func(context.Context, string, string, time.Duration) (jobs.Lease, error)
 	heartbeat func(context.Context, string, string, string) (jobs.Lease, error)
+	authorize func(context.Context, string, string, string, string) (jobs.CallPermit, bool, error)
 	complete  func(context.Context, jobs.CompleteJob, func(jobs.Job, time.Time) error) (jobs.Result, bool, error)
 	getResult func(context.Context, string) (jobs.Result, error)
 }
@@ -48,6 +49,10 @@ func (s stubJobStore) Claim(ctx context.Context, workerID, claimID string, maxAg
 
 func (s stubJobStore) Heartbeat(ctx context.Context, jobID, workerID, token string) (jobs.Lease, error) {
 	return s.heartbeat(ctx, jobID, workerID, token)
+}
+
+func (s stubJobStore) AuthorizeCall(ctx context.Context, jobID, workerID, token, callID string) (jobs.CallPermit, bool, error) {
+	return s.authorize(ctx, jobID, workerID, token, callID)
 }
 
 func (s stubJobStore) Complete(ctx context.Context, input jobs.CompleteJob, verify func(jobs.Job, time.Time) error) (jobs.Result, bool, error) {

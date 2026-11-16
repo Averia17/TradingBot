@@ -1,0 +1,72 @@
+name: tradingbot-research
+
+services:
+  postgres:
+    image: postgres:17-alpine@sha256:d3244e8ce3f165ee3c93d9c4a4b1d0fe48b3a89e2287b717fdcbbde92d405065
+    environment:
+      POSTGRES_DB: tradingbot
+      POSTGRES_USER: research_control
+      POSTGRES_HOST_AUTH_METHOD: trust
+    healthcheck:
+      test: [CMD, pg_isready, -h, 127.0.0.1, -U, research_control, -d, tradingbot]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+    networks: [storage]
+    volumes:
+      - research-data:/var/lib/postgresql/data
+
+  control:
+    image: ${TRADINGBOT_CONTROL_IMAGE:-tradingbot-control:local}
+    build:
+      context: ../../services/control
+      args:
+        GO_IMAGE: ${TRADINGBOT_GO_BUILD_IMAGE:-golang:1.26.5-bookworm@sha256:53eeac89074db483fdf0ab3be1df32bf6e47562263d2d0d6baa7f26acb4957dd}
+    command: [--listen, 0.0.0.0:8080]
+    environment:
+      TRADINGBOT_DATABASE_URL: postgresql://research_control@postgres:5432/tradingbot?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, http://127.0.0.1:8080/readyz]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+    ports:
+      - '127.0.0.1:${TRADINGBOT_CONTROL_PORT:-18080}:8080'
+    networks: [storage, workers, local-api]
+    read_only: true
+
+  research:
+    image: ${TRADINGBOT_RESEARCH_IMAGE:-tradingbot-research:local}
+    build:
+      context: ../../services/research
+    command: [worker, --control-url, 'http://control:8080']
+    depends_on:
+      control:
+        condition: service_healthy
+    networks: [workers]
+    read_only: true
+    tmpfs:
+      - /tmp
+
+  evaluation:
+    profiles: [evaluation]
+    image: ${TRADINGBOT_EVALUATION_IMAGE:-tradingbot-evaluation:local}
+    build:
+      context: ../../services/evaluation
+    network_mode: none
+    read_only: true
+    tmpfs:
+      - /tmp
+
+volumes:
+  research-data:
+
+networks:
+  storage:
+    internal: true
+  workers:
+    internal: true
+  local-api:

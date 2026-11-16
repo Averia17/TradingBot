@@ -15,11 +15,13 @@ import (
 var ErrResultExpired = errors.New("research result expired before its receipt")
 
 type CompleteJob struct {
-	JobID     string
-	WorkerID  string
-	Token     string
-	Payload   json.RawMessage
-	ExpiresAt time.Time
+	JobID            string
+	WorkerID         string
+	Token            string
+	Payload          json.RawMessage
+	ExpiresAt        time.Time
+	ExpectedAttempt  int // Zero for protocols with no attempt number in the result.
+	ExpectedLLMCalls int // Number of permits the submitting attempt consumed.
 }
 
 type Result struct {
@@ -57,11 +59,20 @@ func (s *Store) Complete(ctx context.Context, input CompleteJob, verify func(job
 	if err != nil {
 		return Result{}, false, err
 	}
-	if lease.WorkerID != input.WorkerID || lease.Token != input.Token {
+	if lease.WorkerID != input.WorkerID || lease.Token != input.Token ||
+		(input.ExpectedAttempt != 0 && lease.Attempt != input.ExpectedAttempt) {
 		return Result{}, false, ErrLeaseConflict
 	}
 	if verify == nil {
 		return Result{}, false, errors.New("research completion requires local contract validation")
+	}
+	var permits int
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM research_call_permits WHERE job_id = $1 AND attempt = $2`,
+		jobID, lease.Attempt).Scan(&permits); err != nil {
+		return Result{}, false, fmt.Errorf("read research attempt call permits: %w", err)
+	}
+	if permits != input.ExpectedLLMCalls {
+		return Result{}, false, ErrCallPermitMismatch
 	}
 	job, _, err := claimInputs(ctx, tx, jobID)
 	if err != nil {
@@ -152,6 +163,9 @@ func replayCompletion(ctx context.Context, tx pgx.Tx, id string, input CompleteJ
 	}
 	if !bytes.Equal(result.Payload, input.Payload) {
 		return Result{}, ErrConflict
+	}
+	if input.ExpectedAttempt != 0 && result.Attempt != input.ExpectedAttempt {
+		return Result{}, ErrLeaseConflict
 	}
 	return result, nil
 }

@@ -101,11 +101,21 @@ def _verify_repo(root: Path, repo: dict) -> None:
         raise UpstreamError(f"HEAD differs from approved lock: {repo['name']}; no reset performed")
 
 
-def verify(root: Path) -> list[dict]:
-    manifest = _manifest(root)
-    for repo in manifest["repositories"]:
+def _repositories(root: Path, distribution: str | None) -> list[dict]:
+    repositories = [
+        repo for repo in _manifest(root)["repositories"]
+        if distribution is None or SUPPORTED[repo["name"]] == distribution
+    ]
+    if distribution is not None and not repositories:
+        raise UpstreamError(f"Unknown upstream distribution: {distribution}")
+    return repositories
+
+
+def verify(root: Path, *, distribution: str | None = None) -> list[dict]:
+    repositories = _repositories(root, distribution)
+    for repo in repositories:
         _verify_repo(root, repo)
-    return manifest["repositories"]
+    return repositories
 
 
 @contextlib.contextmanager
@@ -125,10 +135,9 @@ def _exclusive(root: Path):
         path.unlink()
 
 
-def bootstrap(root: Path) -> None:
+def bootstrap(root: Path, *, distribution: str | None = None) -> None:
     with _exclusive(root):
-        manifest = _manifest(root)
-        for repo in manifest["repositories"]:
+        for repo in _repositories(root, distribution):
             checkout = _checkout(root, repo)
             if not checkout.exists():
                 checkout.parent.mkdir(parents=True, exist_ok=True)

@@ -68,8 +68,9 @@ func TestLeaseCapabilityRequiresConfiguredStorage(t *testing.T) {
 	defer capabilities.Body.Close()
 	var value struct {
 		Enabled bool `json:"research_job_leases"`
+		Budget  bool `json:"research_job_call_budget"`
 	}
-	if err := json.NewDecoder(capabilities.Body).Decode(&value); err != nil || capabilities.StatusCode != http.StatusOK || !value.Enabled {
+	if err := json.NewDecoder(capabilities.Body).Decode(&value); err != nil || capabilities.StatusCode != http.StatusOK || !value.Enabled || !value.Budget {
 		t.Fatalf("configured storage capability missing: status %d, value %+v, error %v", capabilities.StatusCode, value, err)
 	}
 	unconfigured := NewHandler(time.Hour, time.Now, nil)
@@ -77,6 +78,42 @@ func TestLeaseCapabilityRequiresConfiguredStorage(t *testing.T) {
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusNotFound {
 		t.Fatalf("got %d, want missing lease route in diagnostics mode", response.StatusCode)
+	}
+}
+
+func TestCallPermitTransportMapsDurableReceiptsAndErrors(t *testing.T) {
+	const callID = "00000000-0000-4000-8000-abcdef000013"
+	const receipt = `{"job_id":"` + jobID + `","call_id":"` + callID + `","attempt":2,"remaining_llm_calls":0}`
+	for _, test := range []struct {
+		name    string
+		created bool
+		err     error
+		status  int
+		want    string
+	}{
+		{"new commit", true, nil, http.StatusCreated, receipt},
+		{"identical replay", false, nil, http.StatusOK, receipt},
+		{"missing job", false, jobs.ErrNotFound, http.StatusNotFound, `{"error":"job_not_found"}`},
+		{"lease lost", false, jobs.ErrLeaseConflict, http.StatusConflict, `{"error":"lease_conflict"}`},
+		{"call belongs to other attempt", false, jobs.ErrConflict, http.StatusConflict, `{"error":"call_conflict"}`},
+		{"job exhausted", false, jobs.ErrBudgetExhausted, http.StatusUnprocessableEntity, `{"error":"budget_exhausted"}`},
+		{"storage failed", false, errors.New(leaseToken), http.StatusServiceUnavailable, `{"error":"storage_unavailable"}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store := stubJobStore{authorize: func(ctx context.Context, id, worker, token, call string) (jobs.CallPermit, bool, error) {
+				if _, ok := ctx.Deadline(); !ok || id != jobID || worker != workerID || token != leaseToken || call != callID {
+					t.Fatal("call permit requires deadline and canonical IDs")
+				}
+				return jobs.CallPermit{JobID: id, CallID: call, Attempt: 2, Remaining: 0}, test.created, test.err
+			}}
+			body := []byte(`{"worker_id":"` + workerID + `","lease_token":"` + strings.ToUpper(leaseToken) + `","call_id":"` + strings.ToUpper(callID) + `"}`)
+			response := callJobAPI(NewHandler(time.Hour, time.Now, store), http.MethodPost, jobsPath+"/"+strings.ToUpper(jobID)+"/authorize-call", body)
+			defer response.Body.Close()
+			assertResponse(t, response, test.status, test.want)
+			if response.Header.Get("Cache-Control") != "no-store" {
+				t.Fatal("permit responses may not be cached")
+			}
+		})
 	}
 }
 
@@ -141,5 +178,21 @@ func TestInvalidLeaseInputDoesNotReachStorage(t *testing.T) {
 				t.Fatalf("got %d, want 400", response.StatusCode)
 			}
 		})
+	}
+}
+
+func TestInvalidCallPermitInputDoesNotReachStorage(t *testing.T) {
+	handler := NewHandler(time.Hour, time.Now, stubJobStore{})
+	path := jobsPath + "/" + jobID + "/authorize-call"
+	for _, body := range []string{
+		`{"worker_id":"` + workerID + `","lease_token":"` + leaseToken + `"}`,
+		`{"worker_id":"` + workerID + `","lease_token":"` + leaseToken + `","call_id":null}`,
+		`{"worker_id":"` + workerID + `","lease_token":"` + leaseToken + `","call_id":"` + claimID + `","call_id":"` + jobID + `"}`,
+		`{"worker_id":"` + workerID + `","lease_token":"` + leaseToken + `","call_id":"` + claimID + `","extra":"reject"}`,
+		`{"worker_id":"bad/worker","lease_token":"` + leaseToken + `","call_id":"` + claimID + `"}`,
+	} {
+		response := callJobAPI(handler, http.MethodPost, path, []byte(body))
+		assertResponse(t, response, http.StatusBadRequest, `{"error":"invalid_request"}`)
+		response.Body.Close()
 	}
 }

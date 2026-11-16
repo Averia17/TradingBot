@@ -1,0 +1,7 @@
+*
+!pyproject.toml
+!uv.lock
+!tradingbot_evaluation/
+!tradingbot_evaluation/**
+**/__pycache__
+**/*.pyc

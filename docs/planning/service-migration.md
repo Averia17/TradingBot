@@ -64,20 +64,23 @@ rollback без частичных строк, concurrent create и отказ s
 до и после expiry. Race gate в CI использует отдельную тестовую PostgreSQL.
 P5-01 добавляет расписание и thesis triggers поверх этой очереди.
 
-## [ ] S3 — Python research worker поверх существующего adapter
+## [x] S3 — Python research worker поверх существующего adapter
 
 **Depends:** S2. **Scope:** thin service/worker entry point без переписывания graph;
 job consume/heartbeat/result protocol, call cap, usage/provenance и cancellation.
 
-- **S3a · Worker loop.** Python клиент вызывает существующие claim, heartbeat и
-  completion. Проверить тот же claim ID после сетевого сбоя, остановку при потере
-  lease и запуск Go + Python на PostgreSQL с demo adapter.
-- **S3b · TradingAgents graph.** Подключить текущий adapter с offline scripted
-  models. Контракт результата передаёт источник, usage, версии и config hash.
-  Ошибки provider, schema и budget видны как неуспешная попытка.
-- **S3c · Retry budget.** Ограничить общий расход между попытками. Если worker
-  завершился без usage, следующий attempt получает только гарантированно
-  доступный остаток. Проверить cancellation во время graph и перед публикацией.
+- [x] **S3a · Worker loop.** Go fixture worker использует действующий HTTP-контракт.
+  Он строит синтетический результат по выданному снимку. Задачи и проверки
+  описаны ниже.
+- [x] **S3b · TradingAgents graph.** `tradingbot worker` выполняет настоящий граф
+  через offline scripted models и публикует `0.2` с usage и provenance.
+  Ошибка модели, схемы или лимита останавливает попытку без результата. Worker
+  журналирует причину и идентификатор попытки, Control учитывает истечение lease.
+  [Сквозная проверка](../verification.md#s3b--python-tradingagents-worker).
+- [x] **S3c · Retry budget.** Каждому вызову предшествует durable permit в
+  PostgreSQL. При потере ACK или worker слот остаётся списанным, а следующая
+  попытка получает только остаток. Количество разрешений сверяется при сохранении
+  результата. [Проверка сбоя](../verification.md#s3c--общий-бюджет-вызовов).
 
 **Acceptance:** Go snapshot → real upstream graph с offline models → research
 batch → durable Go result. Python не может писать balances/reservations;
@@ -91,7 +94,30 @@ Credential/API configuration остаётся в worker.
 **Verification:** cross-process integration без сети/платных моделей, failure,
 lease expiry, duplicate and cancellation fixtures; existing M1 suite зелёная.
 
-## [ ] S4 — Независимая упаковка и проверка обновления
+### Задачи S3a
+
+**Статус на 16.11.2026.** Команда `research-fixture-worker` проходит полный
+цикл HTTP и PostgreSQL с синтетическим результатом. S3a реализован на Go
+по запросу владельца. Python остаётся средой для TradingAgents в S3b.
+[Результаты проверки](../verification.md#s3a--go-fixture-worker).
+
+1. **HTTP-клиент Go.** Поддержать `claim`, `heartbeat` и `complete` по
+   схемам и fixtures из `contracts/`. Задать таймауты. При потере ответа на
+   `claim` повторять тот же `claim_id`. При потере ответа на `complete`
+   повторять тот же payload с тем же `lease_token`. Проверить `204` при пустой
+   очереди, `409` при конфликте и повторы после таймаута.
+2. **Запускаемый worker.** Использовать полученные в задании `portfolio` и
+   `requested_symbols` для синтетического результата с нулём LLM-вызовов.
+   Продлевать lease во время обработки, прекращать попытку при потере lease
+   и поддержать остановку процесса. Проверить, что batch связан с полученным
+   снимком и что worker прекращает публикацию при известной потере lease.
+3. **Сквозная проверка.** Запустить Go control и Go fixture worker отдельными
+   процессами с тестовой PostgreSQL. Проверить `create → claim → heartbeat →
+   complete → read`, чтение результата после перезапуска Go, повтор completion
+   после потери ответа и отклонение результата просроченной попытки. Для
+   проверки повторов результат должен сохраниться ровно один раз.
+
+## [x] S4 — Независимая упаковка и проверка обновления
 
 **Depends:** S3. **Scope:** research/evaluation dependency manifests и locks,
 immutable images, Compose application profile, release manifest и contract CI.
@@ -104,6 +130,13 @@ drain/rollback сохраняет jobs/results/ledger. Evaluation использ
 
 **Verification:** Compose smoke, artifact digest/provenance, restart/rollback
 и compatible/incompatible candidate scenarios. Проверка hosted CI отдельно от YAML.
+
+Локальный [Compose smoke](../../deploy/research/smoke.py) проверил отдельные образы,
+метаданные runtime, отклонение неподдерживаемого формата, обработку задач после
+замены и отката worker и сохранение результатов. Контрольный кандидат использует
+отдельный ID образа с тем же содержимым worker. Этот тест проверяет порядок
+замены. Проверка новой версии TradingAgents использует собственную цепочку
+совместимости. Hosted CI для этих изменений ещё не наблюдался.
 
 ## [ ] S5 — Go ledger/risk/reservations + cost-aware paper execution
 
@@ -125,6 +158,20 @@ quote TTL. Ticker из research DTO обозначает underlying. Evaluation 
 
 **Verification:** ledger invariants/precision, concurrent account decisions,
 restart/reconcile, cost accounting и chronological PIT replay tests.
+
+Реализованы автономно проверяемые части S5. Go Control ведёт отдельные виртуальные
+счета с точными суммами, версиями, резервами и журналом. `paper-replay` проверяет
+хеш тестовой котировки и задаёт детерминированный исход. `unknown` держит резерв,
+`cancelled` его освобождает, полное `filled` меняет cash и позицию один раз.
+Отдельный Nautilus runtime выполняет хронологический replay тестовых котировок.
+Поддержаны денежные выплаты и сопоставимые cash, buy-and-hold и equal-weight
+benchmark на синтетическом входе. Go журнал позволяет восстановить FIFO-исходы
+и открытые лоты на заданный `as_of`.
+Планировщик создаёт идемпотентные задания из готовых снимков и расписания.
+Python worker сверяет хеш локального PIT-архива и передаёт доступные ревизии в граф.
+Нужны связка модели с paper-исполнением, политика концентрации, частичные
+исполнения, сплиты и token multipliers, событийные триггеры и проверяемые данные
+для сравнения стратегий. Реальная площадка исключена из текущей работы.
 
 ## [ ] S6 — Отдельный executor и independent signer перед live
 

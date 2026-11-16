@@ -72,6 +72,12 @@ func TestResearchLeaseWireContract(t *testing.T) {
 			}
 			return lease, nil
 		},
+		authorize: func(_ context.Context, id, worker, token, callID string) (jobs.CallPermit, bool, error) {
+			if id != lease.Job.ID || worker != lease.WorkerID || token != lease.Token || callID != "00000000-0000-4000-8000-000000000013" {
+				t.Fatal("wire call authorization differs from accepted store arguments")
+			}
+			return jobs.CallPermit{JobID: id, CallID: callID, Attempt: 1, Remaining: 31}, true, nil
+		},
 	}
 	handler := NewHandler(time.Hour, func() time.Time { return now }, store)
 	for _, endpoint := range []struct {
@@ -79,9 +85,11 @@ func TestResearchLeaseWireContract(t *testing.T) {
 		path    string
 		request string
 		result  string
+		status  int
 	}{
-		{"claim", jobsPath + "/claim", "ClaimRequest", "ClaimResponse"},
-		{"heartbeat", jobsPath + "/" + jobID + "/heartbeat", "HeartbeatRequest", "HeartbeatResponse"},
+		{"claim", jobsPath + "/claim", "ClaimRequest", "ClaimResponse", http.StatusOK},
+		{"heartbeat", jobsPath + "/" + jobID + "/heartbeat", "HeartbeatRequest", "HeartbeatResponse", http.StatusOK},
+		{"authorize_call", jobsPath + "/" + jobID + "/authorize-call", "AuthorizeCallRequest", "AuthorizeCallResponse", http.StatusCreated},
 	} {
 		t.Run(endpoint.fixture, func(t *testing.T) {
 			payload, err := jsonschema.UnmarshalJSON(bytes.NewReader(requests[endpoint.fixture]))
@@ -92,8 +100,8 @@ func TestResearchLeaseWireContract(t *testing.T) {
 
 			response := callJobAPI(handler, http.MethodPost, endpoint.path, requests[endpoint.fixture])
 			defer response.Body.Close()
-			if response.StatusCode != http.StatusOK {
-				t.Fatalf("got HTTP %d, want 200", response.StatusCode)
+			if response.StatusCode != endpoint.status {
+				t.Fatalf("got HTTP %d, want %d", response.StatusCode, endpoint.status)
 			}
 			payload, err = jsonschema.UnmarshalJSON(response.Body)
 			if err != nil {

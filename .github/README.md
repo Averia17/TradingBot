@@ -10,6 +10,12 @@ Workflows используют `contents: read` и работают без кл�
 
 `Go Quality (ubuntu-latest)` в `quality.yml` проверяет форматирование, зависимости, `vet`, тесты, гонки данных и сборку `services/control`, `services/trade-events` и `services/notifications`. Версия Go берётся из `services/control/go.mod`. Race gate использует отдельную PostgreSQL 17 для тестов research jobs и outbox. Тесты Kafka и Telegram используют локальные тестовые реализации. Этапы реализации описаны в [service migration](../docs/planning/service-migration.md).
 
+`Offline research images and compatibility` собирает три образа и проверяет их
+через временный Compose-проект. Smoke проверяет отклонение неподдерживаемой версии
+результата, замену и откат research worker, сохранение заданий и результатов и
+запуск изолированного evaluation. Он выводит ID образов и фактические версии
+runtime. [Проверка Compose](../deploy/research/smoke.py)
+
 Внешние Actions зафиксированы по commit. Источники проверены 2026-11-14.
 
 - [actions/checkout v7.0.1](https://github.com/actions/checkout/releases/tag/v7.0.1)

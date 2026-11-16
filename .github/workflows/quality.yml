@@ -146,3 +146,16 @@ jobs:
           for module in $GO_MODULES; do
             go -C "$module" build -mod=readonly ./...
           done
+
+  research-package:
+    name: Offline research images and compatibility
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Check out our code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Verify offline Compose, compatibility and rollback
+        run: python3 deploy/research/smoke.py
