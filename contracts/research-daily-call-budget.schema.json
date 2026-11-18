@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tradingbot.local/contracts/research-daily-call-budget.schema.json",
+  "title": "Daily research call permit budget report",
+  "description": "Counts durable authorizations across jobs and attempts in one PostgreSQL queue, including authorizations without a model receipt.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "utc_day", "status", "max_calls", "recorded_permits", "remaining_permits"],
+  "properties": {
+    "schema_version": {"const": "0.1"},
+    "utc_day": {"type": "string", "format": "date"},
+    "status": {"enum": ["unconfigured", "missing_limit", "available", "exhausted"]},
+    "max_calls": {"type": ["integer", "null"], "minimum": 0},
+    "recorded_permits": {"type": "integer", "minimum": 0},
+    "remaining_permits": {"type": ["integer", "null"], "minimum": 0}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"status": {"const": "unconfigured"}}},
+      "then": {"properties": {"max_calls": {"const": null}, "remaining_permits": {"const": null}}}
+    },
+    {
+      "if": {"properties": {"status": {"const": "missing_limit"}}},
+      "then": {"properties": {"max_calls": {"const": null}, "remaining_permits": {"const": 0}}}
+    },
+    {
+      "if": {"properties": {"status": {"const": "available"}}},
+      "then": {"properties": {"max_calls": {"type": "integer", "minimum": 1}, "remaining_permits": {"type": "integer", "minimum": 1}}}
+    },
+    {
+      "if": {"properties": {"status": {"const": "exhausted"}}},
+      "then": {"properties": {"max_calls": {"type": "integer"}, "remaining_permits": {"const": 0}}}
+    }
+  ]
+}

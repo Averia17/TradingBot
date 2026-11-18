@@ -162,7 +162,7 @@ func Run(ctx context.Context, store Store, in Intent, rawQuote []byte, now time.
 	if err != nil {
 		return Result{}, fmt.Errorf("reserve paper fixture order: %w", err)
 	}
-	outcome := ledger.ResolutionRequest{AccountID: in.AccountID, OrderID: orderID, EventID: stableID("outcome", []byte(orderID))}
+	outcome := ledger.ResolutionRequest{AccountID: in.AccountID, OrderID: orderID, EventID: OutcomeEventID(orderID)}
 	switch quote.Execution {
 	case "fill", "partial":
 		// A simulated observation cannot precede the quote or the durable
@@ -191,6 +191,11 @@ func Run(ctx context.Context, store Store, in Intent, rawQuote []byte, now time.
 		Version: quote.Version, Source: Source, QuoteSHA256: in.QuoteSHA256, SimulatedExecution: quote.Execution,
 		ReservationRecorded: reserved, OutcomeRecorded: resolved, Order: order,
 	}, nil
+}
+
+// OutcomeEventID identifies the original fixture resolution across retries.
+func OutcomeEventID(orderID string) string {
+	return stableID("outcome", []byte(orderID))
 }
 
 func validate(in Intent, q Quote, now time.Time) (string, error) {

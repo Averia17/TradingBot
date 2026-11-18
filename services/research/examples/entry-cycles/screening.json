@@ -1,0 +1,18 @@
+{
+  "schema_version": "0.1",
+  "data_manifest": {
+    "ref": "services/research/examples/selection/market.json",
+    "sha256": "ffd8118c19c7ee9c8f49b0156d1bf837046fe6acb2bedf701ef14a39da227531"
+  },
+  "candidates": [{"symbol": "TSLA", "allowed": true}],
+  "top_k": 1,
+  "remaining_analysis_slots": 1,
+  "calls_per_symbol": 16,
+  "max_llm_calls": 20,
+  "roc_periods": 2,
+  "max_bar_age_seconds": 60,
+  "max_bar_gap_seconds": 60,
+  "max_catalyst_age_seconds": 1200,
+  "min_bar_turnover_usd": "10000",
+  "max_spread_bps": 25
+}

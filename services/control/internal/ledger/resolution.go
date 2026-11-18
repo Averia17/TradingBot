@@ -36,11 +36,18 @@ func (r ResolutionRequest) isFill() bool {
 // Resolve records an observed paper outcome. A partial fill accounts only for
 // executed units. Unknown retains the remaining reservation until reconciled.
 func (s *Store) Resolve(ctx context.Context, r ResolutionRequest) (Order, bool, error) {
+	return s.resolve(ctx, r, nil)
+}
+
+func (s *Store) resolve(ctx context.Context, r ResolutionRequest, proof *reconciliationProof) (Order, bool, error) {
 	if !r.valid() {
 		return Order{}, false, ErrInvalid
 	}
 	r.ObservedAt = r.ObservedAt.UTC().Truncate(time.Microsecond)
-	payload, err := json.Marshal(r)
+	payload, err := json.Marshal(struct {
+		ResolutionRequest
+		Reconciliation *reconciliationProof `json:"reconciliation,omitempty"`
+	}{r, proof})
 	if err != nil {
 		return Order{}, false, fmt.Errorf("encode paper outcome: %w", err)
 	}
@@ -72,6 +79,11 @@ func (s *Store) Resolve(ctx context.Context, r ResolutionRequest) (Order, bool, 
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return Order{}, false, fmt.Errorf("look up prior paper outcome: %w", err)
+	}
+	if proof != nil {
+		if err := proof.check(ctx, tx, order); err != nil {
+			return Order{}, false, err
+		}
 	}
 	if order.Status == "filled" || order.Status == "cancelled" || (order.Status == "unknown" && r.Outcome == "unknown") {
 		return Order{}, false, ErrConflict

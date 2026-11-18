@@ -1,0 +1,136 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Point-in-time paper thesis outcome 0.1",
+  "$ref": "#/$defs/Request",
+  "$defs": {
+    "UUID": {"type": "string", "pattern": "^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$"},
+    "Timestamp": {"type": "string", "format": "date-time"},
+    "SHA256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "USD": {"type": "string", "pattern": "^(?:0|[1-9][0-9]{0,29})(?:\\.[0-9]{1,8})?$"},
+    "Amount": {"type": "string", "pattern": "^(?:0|[1-9][0-9]*)(?:\\.[0-9]{1,8})?$"},
+    "SignedAmount": {"type": "string", "pattern": "^-?(?:0|[1-9][0-9]*)(?:\\.[0-9]{1,8})?$"},
+    "Quantity": {"type": "string", "pattern": "^(?:0|[1-9][0-9]*)$"},
+    "ID": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9:._-]{0,127}$"},
+    "Instrument": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["instrument_id", "registry_version", "decimals"],
+      "properties": {
+        "instrument_id": {"$ref": "#/$defs/ID"},
+        "registry_version": {"$ref": "#/$defs/ID"},
+        "decimals": {"type": "integer", "minimum": 0, "maximum": 18}
+      }
+    },
+    "ExitObservation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["observation_id", "instrument", "quantity_raw", "gross_usd", "fee_usd", "observed_at", "available_at", "expires_at"],
+      "properties": {
+        "observation_id": {"$ref": "#/$defs/ID"},
+        "instrument": {"$ref": "#/$defs/Instrument"},
+        "quantity_raw": {"type": "string", "pattern": "^[1-9][0-9]{0,37}$"},
+        "gross_usd": {"$ref": "#/$defs/USD"},
+        "fee_usd": {"$ref": "#/$defs/USD"},
+        "observed_at": {"$ref": "#/$defs/Timestamp"},
+        "available_at": {"$ref": "#/$defs/Timestamp"},
+        "expires_at": {"$ref": "#/$defs/Timestamp"}
+      }
+    },
+    "BenchmarkLevel": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["level", "observed_at", "available_at"],
+      "properties": {
+        "level": {"$ref": "#/$defs/USD"},
+        "observed_at": {"$ref": "#/$defs/Timestamp"},
+        "available_at": {"$ref": "#/$defs/Timestamp"}
+      }
+    },
+    "Request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "source_mode", "account_id", "opening_order_id", "as_of", "max_observation_age_seconds", "exit_observations"],
+      "properties": {
+        "schema_version": {"const": "0.1"},
+        "source_mode": {"const": "synthetic_fixture"},
+        "account_id": {"$ref": "#/$defs/UUID"},
+        "opening_order_id": {"$ref": "#/$defs/UUID"},
+        "as_of": {"$ref": "#/$defs/Timestamp"},
+        "max_observation_age_seconds": {"type": "integer", "minimum": 1, "maximum": 86400},
+        "exit_observations": {"type": "array", "maxItems": 4096, "items": {"$ref": "#/$defs/ExitObservation"}},
+        "benchmark": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["series_id", "levels"],
+          "properties": {
+            "series_id": {"$ref": "#/$defs/ID"},
+            "levels": {"type": "array", "maxItems": 4096, "items": {"$ref": "#/$defs/BenchmarkLevel"}}
+          }
+        }
+      }
+    },
+    "OpeningAmounts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["exit_fill_event_ids", "realized_quantity_raw", "realized_net_cash_usd", "realized_cost_basis_usd", "realized_net_pnl_usd", "open_quantity_raw", "open_cost_basis_usd"],
+      "properties": {
+        "exit_fill_event_ids": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/UUID"}},
+        "realized_quantity_raw": {"$ref": "#/$defs/Quantity"},
+        "realized_net_cash_usd": {"$ref": "#/$defs/Amount"},
+        "realized_cost_basis_usd": {"$ref": "#/$defs/Amount"},
+        "realized_net_pnl_usd": {"$ref": "#/$defs/SignedAmount"},
+        "open_quantity_raw": {"$ref": "#/$defs/Quantity"},
+        "open_cost_basis_usd": {"$ref": "#/$defs/Amount"}
+      }
+    },
+    "HorizonOutcome": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["as_of", "account_version", "basis", "estimated_open_net_usd", "net_pnl_usd"],
+      "properties": {
+        "as_of": {"$ref": "#/$defs/Timestamp"},
+        "account_version": {"type": "integer", "minimum": 1},
+        "basis": {"$ref": "#/$defs/OpeningAmounts"},
+        "exit_observation": {"$ref": "#/$defs/ExitObservation"},
+        "estimated_open_net_usd": {"anyOf": [{"$ref": "#/$defs/Amount"}, {"type": "null"}]},
+        "net_pnl_usd": {"anyOf": [{"$ref": "#/$defs/SignedAmount"}, {"type": "null"}]}
+      }
+    },
+    "BenchmarkOutcome": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["series_id", "status", "return_bps"],
+      "properties": {
+        "series_id": {"$ref": "#/$defs/ID"},
+        "status": {"enum": ["complete", "unpriced"]},
+        "start_level": {"$ref": "#/$defs/BenchmarkLevel"},
+        "end_level": {"$ref": "#/$defs/BenchmarkLevel"},
+        "return_bps": {"anyOf": [{"$ref": "#/$defs/SignedAmount"}, {"type": "null"}]}
+      }
+    },
+    "Report": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "status", "input_sha256", "source_mode", "account_id", "account_version", "as_of", "research_job_id", "decision_id", "opening_order_id", "instrument", "actual"],
+      "properties": {
+        "schema_version": {"const": "0.1"},
+        "status": {"enum": ["opening_unfilled", "opening_cancelled", "immature", "settled_at_horizon", "open_marked_at_horizon", "open_unpriced_at_horizon"]},
+        "input_sha256": {"$ref": "#/$defs/SHA256"},
+        "source_mode": {"const": "synthetic_fixture"},
+        "account_id": {"$ref": "#/$defs/UUID"},
+        "account_version": {"type": "integer", "minimum": 1},
+        "as_of": {"$ref": "#/$defs/Timestamp"},
+        "research_job_id": {"$ref": "#/$defs/UUID"},
+        "decision_id": {"$ref": "#/$defs/UUID"},
+        "opening_order_id": {"$ref": "#/$defs/UUID"},
+        "instrument": {"$ref": "#/$defs/Instrument"},
+        "first_fill_event_id": {"$ref": "#/$defs/UUID"},
+        "opened_at": {"$ref": "#/$defs/Timestamp"},
+        "horizon_deadline": {"$ref": "#/$defs/Timestamp"},
+        "actual": {"$ref": "#/$defs/OpeningAmounts"},
+        "horizon": {"$ref": "#/$defs/HorizonOutcome"},
+        "benchmark": {"$ref": "#/$defs/BenchmarkOutcome"}
+      }
+    }
+  }
+}

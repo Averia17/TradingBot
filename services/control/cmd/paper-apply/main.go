@@ -41,7 +41,10 @@ func main() {
 
 func run(ctx context.Context, dsn string, args []string, output io.Writer, clock func() time.Time) error {
 	if len(args) == 0 {
-		return errors.New("use paper-apply snapshot, apply, follow, dispatch, review or schedule-review")
+		return errors.New("use paper-apply snapshot, apply, follow, dispatch, reconcile, review, schedule-entry or schedule-review")
+	}
+	if args[0] == "schedule-entry" {
+		return scheduleEntry(ctx, dsn, args[1:], output)
 	}
 	if args[0] == "schedule-review" {
 		return scheduleReview(ctx, dsn, args[1:], output)
@@ -59,6 +62,8 @@ func run(ctx context.Context, dsn string, args []string, output io.Writer, clock
 		return snapshot(ctx, dsn, args[1:], output, clock().UTC())
 	case "apply":
 		return apply(ctx, dsn, args[1:], output, clock)
+	case "reconcile":
+		return reconcile(ctx, dsn, args[1:], output)
 	case "review":
 		return review(ctx, dsn, args[1:], output, clock().UTC())
 	default:
@@ -82,6 +87,8 @@ func snapshot(ctx context.Context, dsn string, args []string, output io.Writer, 
 	if err != nil {
 		return err
 	}
+	// Keep the snapshot ID stable through the Python research datetime contract.
+	asOf = asOf.Truncate(time.Microsecond)
 	input := paperapply.SnapshotContext{AccountID: *accountID}
 	if err := decodeDocument(*policyPath, contract.PaperRiskPolicy, &input.Policy); err != nil {
 		return fmt.Errorf("read paper policy: %w", err)

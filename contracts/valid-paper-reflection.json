@@ -1,0 +1,14 @@
+{
+  "available_at": "2026-11-18T09:55:01Z",
+  "exit_fee_erased_positive_pre_fee_pnl": true,
+  "lesson_id": "02bcf49913a14aec5316045c625f1795ece7e0aeaa58ebf79e47e089ab10b806",
+  "method": "fifo_sale_exit_fee_v1",
+  "pnl_before_exit_fee_usd": "0.00000002",
+  "realized_outcome": "loss",
+  "recorded_exit_fee_usd": "0.00000003",
+  "schema_version": "0.1",
+  "source_decision_id": "10000000-0000-4000-8000-000000000006",
+  "source_fill_event_id": "10000000-0000-4000-8000-000000000005",
+  "source_record_id": "10000000-0000-4000-8000-000000000001-10000000-0000-4000-8000-000000000005",
+  "source_record_sha256": "22be834eb91ac0baaa2337170d987f54a5cafa268398b5ab58d506a7740efa66"
+}

@@ -183,6 +183,11 @@ func occurrenceID(id string, at time.Time) string {
 	return derivedJobID("tradingbot/research-calendar-v1\n" + id + "\n" + at.Format(time.RFC3339Nano))
 }
 
+// PaperEntryOccurrenceID binds a calendar trigger to its owner account.
+func PaperEntryOccurrenceID(accountID, scheduleID string, at time.Time) string {
+	return derivedJobID("tradingbot/paper-entry-calendar-v1\n" + accountID + "\n" + scheduleID + "\n" + at.UTC().Format(time.RFC3339Nano))
+}
+
 func derivedJobID(key string) string {
 	hash := sha256.Sum256([]byte(key))
 	hash[6] = hash[6]&0x0f | 0x80 // UUID version 8

@@ -1,0 +1,49 @@
+{
+  "records": [
+    {
+      "available_at": "2026-11-17T14:01:00Z",
+      "event_time": "2026-11-17T14:00:00Z",
+      "kind": "listing",
+      "payload": {
+        "effective_at": "2026-11-17T14:30:00Z",
+        "security_id": "equity-17",
+        "status": "listed"
+      },
+      "record_id": "list-old-17",
+      "revision": 1,
+      "symbol": "OLD"
+    },
+    {
+      "available_at": "2026-11-17T15:00:00Z",
+      "event_time": "2026-11-17T15:00:00Z",
+      "kind": "news",
+      "payload": {
+        "headline": "First report"
+      },
+      "record_id": "n1",
+      "revision": 1,
+      "symbol": "OLD"
+    },
+    {
+      "available_at": "2026-11-17T16:00:00Z",
+      "event_time": "2026-11-17T16:00:00Z",
+      "kind": "bar",
+      "payload": {
+        "ask": "101.01",
+        "bid": "101.00",
+        "close": "101.00000009",
+        "currency": "USD",
+        "high": "102.00",
+        "low": "99.00",
+        "open": "100.00000001",
+        "price_basis": "raw",
+        "security_id": "equity-17",
+        "volume": 1234
+      },
+      "record_id": "b1",
+      "revision": 1,
+      "symbol": "OLD"
+    }
+  ],
+  "schema_version": "0.1"
+}

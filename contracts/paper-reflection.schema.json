@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "0.1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "method": {
+      "const": "fifo_sale_exit_fee_v1",
+      "title": "Method",
+      "type": "string"
+    },
+    "lesson_id": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Lesson Id",
+      "type": "string"
+    },
+    "source_record_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9:._-]{0,127}$",
+      "title": "Source Record Id",
+      "type": "string"
+    },
+    "source_record_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Source Record Sha256",
+      "type": "string"
+    },
+    "source_fill_event_id": {
+      "pattern": "^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$",
+      "title": "Source Fill Event Id",
+      "type": "string"
+    },
+    "source_decision_id": {
+      "pattern": "^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$",
+      "title": "Source Decision Id",
+      "type": "string"
+    },
+    "available_at": {
+      "format": "date-time",
+      "title": "Available At",
+      "type": "string"
+    },
+    "realized_outcome": {
+      "enum": [
+        "gain",
+        "break_even",
+        "loss"
+      ],
+      "title": "Realized Outcome",
+      "type": "string"
+    },
+    "pnl_before_exit_fee_usd": {
+      "pattern": "^-?(?:0|[1-9][0-9]{0,59})(?:\\.[0-9]{1,8})?$",
+      "title": "Pnl Before Exit Fee Usd",
+      "type": "string"
+    },
+    "recorded_exit_fee_usd": {
+      "pattern": "^(?:0|[1-9][0-9]{0,29})(?:\\.[0-9]{1,8})?$",
+      "title": "Recorded Exit Fee Usd",
+      "type": "string"
+    },
+    "exit_fee_erased_positive_pre_fee_pnl": {
+      "title": "Exit Fee Erased Positive Pre Fee Pnl",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "schema_version",
+    "method",
+    "lesson_id",
+    "source_record_id",
+    "source_record_sha256",
+    "source_fill_event_id",
+    "source_decision_id",
+    "available_at",
+    "realized_outcome",
+    "pnl_before_exit_fee_usd",
+    "recorded_exit_fee_usd",
+    "exit_fee_erased_positive_pre_fee_pnl"
+  ],
+  "title": "PaperReflection",
+  "type": "object"
+}

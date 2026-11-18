@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Annotated, Literal
 from uuid import UUID
 
-from pydantic import Field, ValidationError
+from pydantic import Field, TypeAdapter, ValidationError
 
 from tradingbot.contracts import Contract, Money, PortfolioSnapshot, Symbol
 from tradingbot.snapshots import (
@@ -21,6 +21,8 @@ from tradingbot.snapshots import (
     ArchiveRecord,
     ArchiveReference,
     Identifier,
+    UniverseEntry,
+    _project_universe,
     _utc,
     decode_pinned_json,
     load_snapshot,
@@ -52,6 +54,21 @@ class SelectionRequest(Contract):
     max_catalyst_age_seconds: Annotated[int, Field(strict=True, ge=1, le=86400 * 30)]
     min_bar_turnover_usd: Money
     max_spread_bps: Annotated[int, Field(strict=True, ge=0, le=10000)]
+
+
+class RosterCandidate(Candidate):
+    security_id: Identifier
+
+
+class RosterSelectionRequest(SelectionRequest):
+    schema_version: Literal["0.2"]
+    universe_provider: Identifier
+    candidates: Annotated[tuple[RosterCandidate, ...], Field(min_length=1, max_length=100)]
+
+
+SELECTION_INPUT = TypeAdapter(
+    Annotated[SelectionRequest | RosterSelectionRequest, Field(discriminator="schema_version")]
+)
 
 
 def _price(value) -> Decimal:
@@ -158,26 +175,93 @@ def _score(
     }
 
 
+def _roster_status(
+    candidate: RosterCandidate,
+    roster: dict[str, UniverseEntry],
+    live: set[str],
+    historical: set[str],
+    records: list[ArchiveRecord],
+    *,
+    already_held: bool,
+) -> str | None:
+    state = roster.get(candidate.security_id)
+    if state is None or state.evidence is None:
+        return "universe_evidence_missing"
+    if state.status == "delisted":
+        return "security_delisted"
+    if state.evidence.symbol != candidate.symbol:
+        return "universe_symbol_mismatch"
+    if len(live) > 1:
+        return "ambiguous_universe_symbol"
+    # The job's portfolio uses ticker and a separate instrument identifier.
+    if already_held and len(historical) > 1:
+        return "ambiguous_held_security"
+    for record in records:
+        if record.kind not in ("bar", "action", "news", "filing"):
+            continue
+        identity = record.payload.get("security_id")
+        if identity == candidate.security_id:
+            continue
+        if identity is not None or record.kind in ("bar", "action") or len(historical) > 1:
+            return "ambiguous_security_history"
+    return None
+
+
 def plan_research(root: Path, request: dict) -> dict:
-    config = SelectionRequest.model_validate(request)
+    config = SELECTION_INPUT.validate_python(request)
     symbols = sorted(candidate.symbol for candidate in config.candidates)
     if len(set(symbols)) != len(symbols):
         raise ValueError("duplicate research candidate symbol")
+    guarded = isinstance(config, RosterSelectionRequest)
     snapshot = load_snapshot(
         root,
         config.data_manifest,
         config.portfolio.as_of,
-        symbols=symbols,
+        symbols=None if guarded else symbols,
         visibility="locally_ingested",
     )
     records: dict[str, list[ArchiveRecord]] = defaultdict(list)
+    historical: dict[str, set[str]] = defaultdict(set)
     for item in snapshot.records:
         if item.symbol is not None:
             records[item.symbol].append(item)
+            if (
+                guarded
+                and item.kind == "listing"
+                and item.provider == config.universe_provider
+                and _utc(item.payload["effective_at"]) <= snapshot.as_of
+            ):
+                historical[item.symbol].add(item.payload["security_id"])
+    roster = {}
+    live: dict[str, set[str]] = defaultdict(set)
+    if guarded:
+        projection = _project_universe(snapshot, config.universe_provider)
+        roster = {entry.security_id: entry for entry in projection.entries}
+        for state in projection.entries:
+            if state.status == "listed" and state.evidence is not None:
+                live[state.evidence.symbol].add(state.security_id)
+
     held = {item.symbol for item in config.portfolio.positions}
     ranked, rejected = [], []
     for candidate in config.candidates:
-        row = _score(config, candidate, records[candidate.symbol], held)
+        symbol = candidate.symbol
+        if isinstance(candidate, RosterCandidate) and candidate.allowed:
+            status = _roster_status(
+                candidate,
+                roster,
+                live[symbol],
+                historical[symbol],
+                records[symbol],
+                already_held=symbol in held,
+            )
+            if status is not None:
+                rejected.append(
+                    {"symbol": symbol, "security_id": candidate.security_id, "status": status}
+                )
+                continue
+        row = _score(config, candidate, records[symbol], held)
+        if isinstance(candidate, RosterCandidate):
+            row["security_id"] = candidate.security_id
         if row["status"] == "ranked":
             ranked.append(row)
         else:
@@ -225,7 +309,7 @@ def main() -> int:
     parser.add_argument("--request", type=Path)
     args = parser.parse_args()
     if args.schema:
-        print(json.dumps(SelectionRequest.model_json_schema(mode="serialization"), indent=2))
+        print(json.dumps(SELECTION_INPUT.json_schema(mode="serialization"), indent=2))
         return 0
     if args.root is None or args.request is None:
         parser.error("--root and --request are required")

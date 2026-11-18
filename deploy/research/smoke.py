@@ -112,6 +112,70 @@ def completed_result(origin, job):
     return receipt
 
 
+def check_research_replay(compose, root, job, receipt):
+    exported = compose(
+        "exec", "-T", "control", "research-replay-export", "--job", job["job_id"], capture=True
+    ).encode("utf-8")
+    as_of = datetime.fromisoformat(job["portfolio"]["as_of"])
+    completed = datetime.fromisoformat(receipt["completed_at"])
+    tape = {
+        "schema_version": "0.1",
+        "source_mode": "synthetic_fixture",
+        "starting_cash_usd": job["portfolio"]["cash_usd"],
+        "commission_bps": 10,
+        "quotes": [
+            {
+                "symbol": "TSLA",
+                "observed_at": timestamp.isoformat(),
+                "available_at": timestamp.isoformat(),
+                "bid_usd": "102.10",
+                "ask_usd": "102.12",
+                "bid_size": 100,
+                "ask_size": 100,
+            }
+            for timestamp in (as_of - timedelta(seconds=1), completed + timedelta(seconds=1))
+        ],
+        "orders": [],
+    }
+    tape_raw = json.dumps(tape).encode()
+    for name, data in (("export.json", exported), ("tape.json", tape_raw)):
+        path = root / name
+        path.write_bytes(data)
+        path.chmod(0o644)
+    report = json.loads(
+        compose(
+            "--profile",
+            "evaluation",
+            "run",
+            "--rm",
+            "--pull",
+            "never",
+            "--volume",
+            f"{root}:/study:ro",
+            "evaluation",
+            "research-replay",
+            "/study/export.json",
+            "/study/tape.json",
+            "--export-sha256",
+            hashlib.sha256(exported).hexdigest(),
+            "--tape-sha256",
+            hashlib.sha256(tape_raw).hexdigest(),
+            "--require-snapshot-continuity",
+            capture=True,
+        )
+    )
+    checked(report["alpha_measured"] is False, "synthetic replay claimed measured alpha")
+    checked(not report["fills"], "offline HOLD produced an execution")
+    checked(
+        report["intent_pipeline_connected"]
+        and report["snapshot_continuity_verified"] is True
+        and [entry["job_id"] for entry in report["research_jobs"]] == [job["job_id"]]
+        and [(entry["decision_id"], entry["status"]) for entry in report["decisions"]]
+        == [(entry["decision_id"], "hold") for entry in receipt["result"]["batch"]["intents"]],
+        "durable research job and decisions did not reach the evaluation report",
+    )
+
+
 def reject_incompatible_result(origin):
     job = enqueue(origin, "incompatible")
     lease = request(
@@ -232,8 +296,14 @@ def main():
         compose("--profile", "paper", "config", "--quiet")
         for binary, arguments in (
             ("paper-apply", ("dispatch", "--help")),
+            ("paper-apply", ("schedule-entry", "--help")),
+            ("paper-check", ("--help",)),
             ("paper-nav", ("--help",)),
             ("paper-quote-pin", ("--help",)),
+            ("paper-thesis-outcome", ("--help",)),
+            ("paper-shadow-outcome", ("--help",)),
+            ("research-replay-export", ("--help",)),
+            ("research-budget", ("--help",)),
         ):
             docker(
                 "run",
@@ -253,6 +323,24 @@ def main():
             "unexpected execution capabilities",
         )
         paper_path, paper_account = check_paper_order(origin)
+        paper_health = json.loads(
+            compose(
+                "exec", "-T", "control", "paper-check", "--account",
+                paper_account["account_id"], "--pipeline", capture=True,
+            )
+        )
+        checked(
+            paper_health["status"] == "ok"
+            and paper_health["pipeline"]["fill_relay"]["pending_fills"] == 1,
+            "paper pipeline check did not report its pending fill",
+        )
+        daily_budget = json.loads(
+            compose("exec", "-T", "control", "research-budget", "show", capture=True)
+        )
+        checked(
+            daily_budget["status"] == "unconfigured" and daily_budget["recorded_permits"] == 0,
+            "fresh PostgreSQL reported an unexpected daily budget",
+        )
         reject_incompatible_result(origin)
         control_id = compose("ps", "-q", "control", capture=True).strip()
         database_id = compose("ps", "-q", "postgres", capture=True).strip()
@@ -312,13 +400,15 @@ def main():
             archive_job = enqueue(origin, "paper-profile", archive_root)
             try:
                 compose("--profile", "paper", "up", "-d", "--no-build", "paper-research")
-                archive_result = completed_result(origin, archive_job)["result"]
+                archive_receipt = completed_result(origin, archive_job)
+                archive_result = archive_receipt["result"]
                 checked(
                     archive_result["metadata"]["provenance"]["data_manifest"]
                     == archive_job["data_manifest"]
                     and "102.12345678" in archive_result["reports"]["TSLA"]["market_report"],
                     "paper archive input did not reach the isolated worker",
                 )
+                check_research_replay(compose, archive_root, archive_job, archive_receipt)
             finally:
                 compose("--profile", "paper", "stop", "paper-research")
         compose("--profile", "evaluation", "run", "--rm", "--pull", "never", "evaluation")

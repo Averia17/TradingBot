@@ -199,6 +199,28 @@ func (d resultDocument) validate(job jobs.Job, dbNow time.Time, maxAge time.Dura
 	return nil
 }
 
+// ValidateArchivedResearchResult reuses admission checks at the durable receipt
+// time. Freshness policy was applied on admission and may have changed since.
+func ValidateArchivedResearchResult(job jobs.Job, result jobs.Result) error {
+	if result.JobID != job.ID || job.Status != "completed" || job.CreatedAt.IsZero() ||
+		result.CompletedAt.Before(job.CreatedAt) || result.Attempt < 1 || result.Attempt > 3 {
+		return errInvalidResult
+	}
+	var fields map[string]json.RawMessage
+	if contract.Decode(result.Payload, nil, &fields) != nil ||
+		!hasExactKeys(fields, "result_schema_version", "batch", "reports", "metadata") {
+		return errInvalidResult
+	}
+	document, err := parseResultDocument(fields)
+	if err != nil {
+		return err
+	}
+	if metadata, ok := document.Metadata.(offlineResultMetadata); ok && metadata.Provenance.Attempt != result.Attempt {
+		return errInvalidResult
+	}
+	return document.validate(job, result.CompletedAt, time.Duration(1<<63-1))
+}
+
 func writeResult(w http.ResponseWriter, status int, result jobs.Result) {
 	writeJSON(w, status, struct {
 		JobID       string          `json:"job_id"`

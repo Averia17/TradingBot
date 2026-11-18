@@ -1,5 +1,64 @@
 {
   "$defs": {
+    "AblationArm": {
+      "additionalProperties": false,
+      "properties": {
+        "research_config_sha256_by_step": {
+          "items": {
+            "pattern": "^[a-f0-9]{64}$",
+            "type": "string"
+          },
+          "maxItems": 32,
+          "minItems": 1,
+          "type": "array"
+        },
+        "variant": {
+          "enum": [
+            "factual_reflection",
+            "full_graph",
+            "no_memory",
+            "single_analyst"
+          ]
+        },
+        "walk": {
+          "$ref": "#/$defs/WalkForwardProvenance"
+        }
+      },
+      "required": [
+        "variant",
+        "walk",
+        "research_config_sha256_by_step"
+      ],
+      "title": "AblationArm",
+      "type": "object"
+    },
+    "AblationProvenance": {
+      "additionalProperties": false,
+      "properties": {
+        "arms": {
+          "additionalProperties": {
+            "$ref": "#/$defs/AblationArm"
+          },
+          "maxProperties": 4,
+          "minProperties": 2,
+          "propertyNames": {
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"
+          },
+          "type": "object"
+        },
+        "method": {
+          "enum": [
+            "synthetic_paired_ablation"
+          ]
+        }
+      },
+      "required": [
+        "method",
+        "arms"
+      ],
+      "title": "AblationProvenance",
+      "type": "object"
+    },
     "DailyNav": {
       "additionalProperties": false,
       "properties": {
@@ -95,6 +154,9 @@
     "EvaluationEvidence": {
       "additionalProperties": false,
       "properties": {
+        "ablation_provenance": {
+          "$ref": "#/$defs/AblationProvenance"
+        },
         "daily_nav": {
           "items": {
             "$ref": "#/$defs/DailyNav"
@@ -130,6 +192,9 @@
             "0.1",
             "0.2"
           ]
+        },
+        "walk_forward_provenance": {
+          "$ref": "#/$defs/WalkForwardProvenance"
         }
       },
       "required": [
@@ -151,6 +216,10 @@
           "enum": [
             "paper_ledger_export"
           ]
+        },
+        "paper_benchmark_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "type": "string"
         },
         "paper_nav_sha256": {
           "pattern": "^[a-f0-9]{64}$",
@@ -205,6 +274,58 @@
         "external_costs_usd"
       ],
       "title": "ReplayProvenance",
+      "type": "object"
+    },
+    "WalkForwardProvenance": {
+      "additionalProperties": false,
+      "properties": {
+        "llm_calls_used": {
+          "maximum": 2048,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "max_total_llm_calls": {
+          "maximum": 2048,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "method": {
+          "enum": [
+            "synthetic_walk_forward"
+          ]
+        },
+        "plan_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "type": "string"
+        },
+        "replay": {
+          "$ref": "#/$defs/ReplayProvenance"
+        },
+        "research_steps_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "type": "string"
+        },
+        "step_count": {
+          "maximum": 32,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "tape_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "method",
+        "plan_sha256",
+        "tape_sha256",
+        "research_steps_sha256",
+        "step_count",
+        "llm_calls_used",
+        "max_total_llm_calls",
+        "replay"
+      ],
+      "title": "WalkForwardProvenance",
       "type": "object"
     }
   },

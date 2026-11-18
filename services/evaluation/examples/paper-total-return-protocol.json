@@ -1,0 +1,48 @@
+{
+  "schema_version": "0.2",
+  "experiment_id": "paper-total-return",
+  "configuration_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+  "source_mode": "synthetic_fixture",
+  "model_training_cutoff": null,
+  "nav_basis": "execution_net",
+  "splits": {
+    "train_start": "2026-10-01",
+    "validation_start": "2026-10-02",
+    "test_start": "2026-10-03",
+    "end_exclusive": "2026-10-06",
+    "embargo_calendar_days": 0
+  },
+  "expected_nav_dates": [
+    "2026-10-01",
+    "2026-10-02",
+    "2026-10-03",
+    "2026-10-04",
+    "2026-10-05"
+  ],
+  "primary_comparison_id": "index-panel",
+  "comparisons": [
+    {
+      "comparison_id": "index-panel",
+      "strategy": "paper",
+      "benchmark": "fixture-index",
+      "benchmark_access": "synthetic_fixture",
+      "minimum_daily_excess_bps": 0
+    },
+    {
+      "comparison_id": "cash-panel",
+      "strategy": "paper",
+      "benchmark": "uninvested-cash",
+      "benchmark_access": "synthetic_fixture",
+      "minimum_daily_excess_bps": 0
+    }
+  ],
+  "bootstrap": {
+    "block_marks": 2,
+    "minimum_blocks": 2,
+    "replications": 100,
+    "seed": 8,
+    "family_alpha_bps": 500
+  },
+  "paper_nav_sha256": "9f73a69915d4ee1fb2144eee097a295d0b93d6ec059209ae898185ca1641468e",
+  "paper_benchmark_sha256": "e8ecc7a58ee31c3d30f93df969f697222cda1d8f8f96173be02e6d45538ae463"
+}

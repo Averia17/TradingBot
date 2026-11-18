@@ -1,0 +1,302 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$ref": "#/$defs/ForwardFreeze",
+  "$defs": {
+    "ForwardFreeze": {
+      "title": "ForwardFreeze",
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "enum": [
+            "0.1"
+          ]
+        },
+        "configuration": {
+          "$ref": "#/$defs/ForwardConfiguration"
+        },
+        "configuration_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "protocol_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "primary_comparison_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"
+        },
+        "comparison_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"
+          },
+          "maxItems": 16,
+          "minItems": 1
+        }
+      },
+      "required": [
+        "schema_version",
+        "configuration",
+        "configuration_sha256",
+        "protocol_sha256",
+        "primary_comparison_id",
+        "comparison_ids"
+      ],
+      "additionalProperties": false
+    },
+    "ForwardConfiguration": {
+      "title": "ForwardConfiguration",
+      "type": "object",
+      "properties": {
+        "plan": {
+          "$ref": "#/$defs/ForwardPlan"
+        },
+        "artifacts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Artifact"
+          },
+          "maxItems": 128,
+          "minItems": 1
+        }
+      },
+      "required": [
+        "plan",
+        "artifacts"
+      ],
+      "additionalProperties": false
+    },
+    "ForwardPlan": {
+      "title": "ForwardPlan",
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "enum": [
+            "0.1"
+          ]
+        },
+        "experiment_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"
+        },
+        "mode": {
+          "enum": [
+            "paper",
+            "shadow"
+          ]
+        },
+        "primary_strategy": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"
+        },
+        "change_policy": {
+          "enum": [
+            "new_run_for_any_change"
+          ]
+        },
+        "insufficient_power": {
+          "enum": [
+            "continue_in_current_mode"
+          ]
+        },
+        "strategies": {
+          "type": "object",
+          "propertyNames": {
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/ForwardStrategy"
+          },
+          "maxProperties": 16,
+          "minProperties": 1
+        }
+      },
+      "required": [
+        "schema_version",
+        "experiment_id",
+        "mode",
+        "primary_strategy",
+        "change_policy",
+        "insufficient_power",
+        "strategies"
+      ],
+      "additionalProperties": false
+    },
+    "ForwardStrategy": {
+      "title": "ForwardStrategy",
+      "type": "object",
+      "properties": {
+        "model_id": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:/@-]{0,191}$"
+        },
+        "files": {
+          "$ref": "#/$defs/StrategyFiles"
+        }
+      },
+      "required": [
+        "model_id",
+        "files"
+      ],
+      "additionalProperties": false
+    },
+    "StrategyFiles": {
+      "title": "StrategyFiles",
+      "type": "object",
+      "properties": {
+        "strategy": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 240,
+            "pattern": "^[a-zA-Z0-9_.-]+(?:/[a-zA-Z0-9_.-]+)*$"
+          },
+          "maxItems": 8,
+          "minItems": 1
+        },
+        "prompts": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 240,
+            "pattern": "^[a-zA-Z0-9_.-]+(?:/[a-zA-Z0-9_.-]+)*$"
+          },
+          "maxItems": 8,
+          "minItems": 1
+        },
+        "model": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 240,
+            "pattern": "^[a-zA-Z0-9_.-]+(?:/[a-zA-Z0-9_.-]+)*$"
+          },
+          "maxItems": 8,
+          "minItems": 1
+        },
+        "universe": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 240,
+            "pattern": "^[a-zA-Z0-9_.-]+(?:/[a-zA-Z0-9_.-]+)*$"
+          },
+          "maxItems": 8,
+          "minItems": 1
+        },
+        "data": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 240,
+            "pattern": "^[a-zA-Z0-9_.-]+(?:/[a-zA-Z0-9_.-]+)*$"
+          },
+          "maxItems": 8,
+          "minItems": 1
+        },
+        "risk": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 240,
+            "pattern": "^[a-zA-Z0-9_.-]+(?:/[a-zA-Z0-9_.-]+)*$"
+          },
+          "maxItems": 8,
+          "minItems": 1
+        },
+        "schedule": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 240,
+            "pattern": "^[a-zA-Z0-9_.-]+(?:/[a-zA-Z0-9_.-]+)*$"
+          },
+          "maxItems": 8,
+          "minItems": 1
+        },
+        "memory": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 240,
+            "pattern": "^[a-zA-Z0-9_.-]+(?:/[a-zA-Z0-9_.-]+)*$"
+          },
+          "maxItems": 8,
+          "minItems": 1
+        },
+        "scorer": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 240,
+            "pattern": "^[a-zA-Z0-9_.-]+(?:/[a-zA-Z0-9_.-]+)*$"
+          },
+          "maxItems": 8,
+          "minItems": 1
+        },
+        "costs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 240,
+            "pattern": "^[a-zA-Z0-9_.-]+(?:/[a-zA-Z0-9_.-]+)*$"
+          },
+          "maxItems": 8,
+          "minItems": 1
+        },
+        "runtime": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 240,
+            "pattern": "^[a-zA-Z0-9_.-]+(?:/[a-zA-Z0-9_.-]+)*$"
+          },
+          "maxItems": 8,
+          "minItems": 1
+        }
+      },
+      "required": [
+        "strategy",
+        "prompts",
+        "model",
+        "universe",
+        "data",
+        "risk",
+        "schedule",
+        "memory",
+        "scorer",
+        "costs",
+        "runtime"
+      ],
+      "additionalProperties": false
+    },
+    "Artifact": {
+      "title": "Artifact",
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "maxLength": 240,
+          "pattern": "^[a-zA-Z0-9_.-]+(?:/[a-zA-Z0-9_.-]+)*$"
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "size_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 8388608
+        }
+      },
+      "required": [
+        "path",
+        "sha256",
+        "size_bytes"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

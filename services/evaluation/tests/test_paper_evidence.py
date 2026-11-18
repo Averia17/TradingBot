@@ -1,10 +1,13 @@
 import json
 from datetime import date, timedelta
 from hashlib import sha256
+from pathlib import Path
 
+import msgspec
 import pytest
 
-from tradingbot_evaluation.paper_evidence import build_paper_evidence
+from tradingbot_evaluation.__main__ import main
+from tradingbot_evaluation.paper_evidence import PaperBenchmark, build_paper_evidence
 from tradingbot_evaluation.statistics import evaluate_statistics, load_protocol, protocol_sha256
 
 ACCOUNT = "11111111-1111-4111-8111-111111111111"
@@ -61,7 +64,7 @@ def report():
     }
 
 
-def freeze(raw, report):
+def freeze(raw, report, benchmark_raw=None):
     doc = {
         "schema_version": "0.2",
         "experiment_id": "paper-cash",
@@ -96,6 +99,19 @@ def freeze(raw, report):
             "family_alpha_bps": 500,
         },
     }
+    if benchmark_raw is not None:
+        doc["paper_benchmark_sha256"] = sha256(benchmark_raw).hexdigest()
+        doc["primary_comparison_id"] = "index-panel"
+        doc["comparisons"].insert(
+            0,
+            {
+                "comparison_id": "index-panel",
+                "strategy": "paper",
+                "benchmark": "fixture-index",
+                "benchmark_access": "synthetic_fixture",
+                "minimum_daily_excess_bps": 0,
+            },
+        )
     protocol = load_protocol(json.dumps(doc).encode())
     return protocol, protocol_sha256(protocol)
 
@@ -112,6 +128,150 @@ def test_generate_aligned_cash_benchmark_and_reproduce_statistics():
     assert result["comparisons"][0]["benchmark_total_return_bps"] == "0.000000"
     with pytest.raises(ValueError, match="paper NAV SHA-256"):
         build_paper_evidence(protocol, raw + b" ", expected_protocol_sha256=frozen)
+
+
+def benchmark(report):
+    return {
+        "schema_version": "0.1",
+        "source_mode": "synthetic_fixture",
+        "series_id": "fixture-index",
+        "basis": "usd_total_return_index",
+        "modeled_entry_cost_bps": 50,
+        "max_age_seconds": 86490,
+        "levels": [
+            {
+                "day": day["day"],
+                "observed_at": f"{day['day']}T23:59:10Z",
+                "available_at": f"{day['day']}T23:59:20Z",
+                "level": level,
+            }
+            for day, level in zip(
+                report["daily_nav"], ["100", "110", "123.45678913", "100", "105"], strict=True
+            )
+        ],
+    }
+
+
+def test_paper_evidence_normalizes_pinned_total_returns_and_modeled_entry_friction():
+    doc = report()
+    raw = json.dumps(doc).encode()
+    levels = benchmark(doc)
+    levels["levels"][3] = levels["levels"][2] | {"day": levels["levels"][3]["day"]}
+    benchmark_raw = json.dumps(levels).encode()
+    protocol, frozen = freeze(raw, doc, benchmark_raw)
+    evidence = build_paper_evidence(
+        protocol, raw, expected_protocol_sha256=frozen, benchmark_raw=benchmark_raw
+    )
+    assert [mark.nav_usd["fixture-index"] for mark in evidence.daily_nav] == [
+        "1000",
+        "1094.50000000",
+        "1228.39505184",
+        "1228.39505184",
+        "1044.75000000",
+    ]
+    assert [mark.nav_usd["uninvested-cash"] for mark in evidence.daily_nav] == ["1000"] * 5
+    result = evaluate_statistics(protocol, evidence, expected_protocol_sha256=frozen)
+    assert result["alpha_measured"] is False
+    assert result["comparisons"][0]["benchmark_access_declared"] == "synthetic_fixture"
+    assert (
+        result["paper_nav_provenance_declared"]["paper_benchmark_sha256"]
+        == sha256(benchmark_raw).hexdigest()
+    )
+    assert result["comparisons"][0]["benchmark_total_return_bps"] == "-1494.999932"
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "missing_day",
+        "after_cutoff",
+        "stale",
+        "backdated_revision",
+        "restated_level",
+        "zero_level",
+        "subprecision_nav",
+        "wrong_series",
+    ],
+)
+def test_paper_evidence_rejects_benchmark_availability_and_identity_mismatches(reason):
+    doc = report()
+    raw = json.dumps(doc).encode()
+    levels = benchmark(doc)
+    marks = levels["levels"]
+    if reason == "missing_day":
+        del marks[2]
+    elif reason == "after_cutoff":
+        marks[2]["available_at"] = "2026-10-04T00:00:00Z"
+    elif reason == "stale":
+        levels["max_age_seconds"] = 49
+    elif reason == "backdated_revision":
+        marks[2]["observed_at"] = "2026-10-02T23:59:40Z"
+        marks[2]["available_at"] = "2026-10-02T23:59:50Z"
+    elif reason == "restated_level":
+        marks[2]["observed_at"] = marks[1]["observed_at"]
+        marks[2]["available_at"] = marks[1]["available_at"]
+    elif reason == "zero_level":
+        marks[2]["level"] = "0"
+    elif reason == "subprecision_nav":
+        marks[0]["level"] = "10000000000000000000000000000"
+        marks[2]["level"] = "0.00000001"
+    else:
+        levels["series_id"] = "different-index"
+    benchmark_raw = json.dumps(levels).encode()
+    protocol, frozen = freeze(raw, doc, benchmark_raw)
+    with pytest.raises(ValueError, match="benchmark"):
+        build_paper_evidence(
+            protocol, raw, expected_protocol_sha256=frozen, benchmark_raw=benchmark_raw
+        )
+
+
+def test_paper_evidence_requires_benchmark_bytes_only_when_pinned():
+    doc = report()
+    raw = json.dumps(doc).encode()
+    benchmark_raw = json.dumps(benchmark(doc)).encode()
+    protocol, frozen = freeze(raw, doc, benchmark_raw)
+    with pytest.raises(ValueError, match="benchmark"):
+        build_paper_evidence(protocol, raw, expected_protocol_sha256=frozen)
+    with pytest.raises(ValueError, match="benchmark"):
+        build_paper_evidence(
+            protocol, raw, expected_protocol_sha256=frozen, benchmark_raw=benchmark_raw + b" "
+        )
+    protocol, frozen = freeze(raw, doc)
+    with pytest.raises(ValueError, match="benchmark"):
+        build_paper_evidence(
+            protocol, raw, expected_protocol_sha256=frozen, benchmark_raw=benchmark_raw
+        )
+
+
+def test_published_total_return_schema_and_cli(capsys):
+    service = Path(__file__).resolve().parents[1]
+    root = service.parents[1]
+    examples = service / "examples"
+    schema = json.loads((root / "contracts/paper-benchmark.schema.json").read_bytes())
+    assert schema == {"$schema": "https://json-schema.org/draft/2020-12/schema"} | (
+        msgspec.json.schema(PaperBenchmark)
+    )
+    protocol_path = examples / "paper-total-return-protocol.json"
+    protocol = load_protocol(protocol_path.read_bytes())
+    assert (
+        main(
+            [
+                "paper-evidence",
+                str(protocol_path),
+                str(examples / "paper-cash-nav.json"),
+                "--benchmark-input",
+                str(examples / "paper-total-return-benchmark.json"),
+                "--protocol-sha256",
+                protocol_sha256(protocol),
+            ]
+        )
+        == 0
+    )
+    evidence = json.loads(capsys.readouterr().out)
+    assert evidence["daily_nav"][-1]["nav_usd"]["fixture-index"] == "1044.75000000"
+    assert evidence["paper_nav_provenance"]["paper_benchmark_sha256"] == (
+        protocol.paper_benchmark_sha256
+    )
 
 
 @pytest.mark.parametrize(

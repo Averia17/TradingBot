@@ -1,0 +1,39 @@
+{
+  "schema_version": "0.2",
+  "experiment_id": "offline-historical-fixture",
+  "configuration_sha256": "45450dd1728a6e92b259c7db3ee365a20011452b76cfc4c902b7ef1cd159c36b",
+  "source_mode": "synthetic_fixture",
+  "model_training_cutoff": null,
+  "nav_basis": "execution_net",
+  "splits": {
+    "train_start": "2026-11-15",
+    "validation_start": "2026-11-16",
+    "test_start": "2026-11-17",
+    "end_exclusive": "2026-11-19",
+    "embargo_calendar_days": 0
+  },
+  "expected_nav_dates": ["2026-11-15", "2026-11-16", "2026-11-17", "2026-11-18"],
+  "primary_comparison_id": "versus-cash",
+  "comparisons": [
+    {
+      "comparison_id": "versus-cash",
+      "strategy": "offline-graph",
+      "benchmark": "cash",
+      "benchmark_access": "synthetic_fixture",
+      "minimum_daily_excess_bps": 0
+    }
+  ],
+  "bootstrap": {
+    "block_marks": 2,
+    "minimum_blocks": 2,
+    "replications": 500,
+    "seed": 0,
+    "family_alpha_bps": 500
+  },
+  "walk_forward_source": {
+    "plan_sha256": "45450dd1728a6e92b259c7db3ee365a20011452b76cfc4c902b7ef1cd159c36b",
+    "tape_sha256": "dd9168e17de0e634545a4ad2bcde55526ef232c6c138ed639c9f9ab3b18114a5",
+    "mark_max_age_seconds": 86400,
+    "benchmarks": [{"series_id": "cash", "kind": "cash"}]
+  }
+}

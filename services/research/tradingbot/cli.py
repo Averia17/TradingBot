@@ -121,6 +121,10 @@ def main(argv=None) -> int:
     worker.add_argument("--poll-interval", type=float, default=1, help="Polling interval in seconds")
     worker.add_argument("--heartbeat-interval", type=float, default=10, help="Maximum heartbeat interval in seconds")
     worker.add_argument("--request-timeout", type=float, default=5, help="Control HTTP timeout in seconds")
+    historical = commands.add_parser(
+        "historical-step", help="Read one synthetic historical step from stdin"
+    )
+    historical.add_argument("--archive-root", type=Path, required=True)
     real = commands.add_parser(
         "analyze", help="Run actual TradingAgents; requires provider API credentials"
     )
@@ -152,6 +156,12 @@ def main(argv=None) -> int:
             print(json.dumps(run_synthetic_probe(), indent=2))
         elif args.command == "worker":
             _serve_worker(args)
+        elif args.command == "historical-step":
+            from tradingbot.historical_step import MAX_STEP_BYTES, run_historical_step
+
+            data = sys.stdin.buffer.read(MAX_STEP_BYTES + 1)
+            result = run_historical_step(data, args.archive_root)
+            print(json.dumps(result, sort_keys=True, separators=(",", ":")))
         else:
             if args.command == "demo":
                 from tradingbot.demo import demo_batch

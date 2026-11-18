@@ -1,0 +1,8 @@
+[
+  {
+    "instrument": {"instrument_id": "fixture:TSLA", "registry_version": "fixture-v1", "decimals": 2},
+    "price_usd": "98",
+    "at": "2026-11-18T09:59:30Z",
+    "available_at": "2026-11-18T09:59:30Z"
+  }
+]

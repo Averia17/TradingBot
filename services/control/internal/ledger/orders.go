@@ -104,10 +104,14 @@ const orderQuery = `SELECT o.request, o.request_hash, o.status, o.account_versio
 	WHERE o.account_id=$1 AND o.order_id=$2`
 
 func (s *Store) GetOrder(ctx context.Context, accountID, orderID string) (Order, error) {
+	return getOrder(ctx, s.pool, accountID, orderID)
+}
+
+func getOrder(ctx context.Context, db rowQuerier, accountID, orderID string) (Order, error) {
 	if !uuidPattern.MatchString(accountID) || !uuidPattern.MatchString(orderID) {
 		return Order{}, ErrInvalid
 	}
-	order, _, err := readOrder(ctx, s.pool, accountID, orderID)
+	order, _, err := readOrder(ctx, db, accountID, orderID)
 	return order, err
 }
 

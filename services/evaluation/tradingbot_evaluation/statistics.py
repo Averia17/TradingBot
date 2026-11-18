@@ -64,6 +64,25 @@ class ReplaySource(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
     benchmarks: Annotated[tuple[ReplayBenchmark, ...], msgspec.Meta(min_length=1, max_length=4)]
 
 
+class WalkForwardSource(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
+    plan_sha256: SHA256
+    tape_sha256: SHA256
+    mark_max_age_seconds: Annotated[int, msgspec.Meta(ge=1, le=604800)]
+    benchmarks: Annotated[tuple[ReplayBenchmark, ...], msgspec.Meta(min_length=1, max_length=4)]
+
+
+ResearchVariant = Literal["full_graph", "no_memory", "single_analyst", "factual_reflection"]
+
+
+class AblationSource(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
+    plan_sha256: SHA256
+    tape_sha256: SHA256
+    mark_max_age_seconds: Annotated[int, msgspec.Meta(ge=1, le=604800)]
+    max_total_llm_calls: Annotated[int, msgspec.Meta(ge=1, le=8192)]
+    baseline: IntentID
+    variants: Annotated[dict[IntentID, ResearchVariant], msgspec.Meta(min_length=2, max_length=4)]
+
+
 class EvaluationProtocol(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
     schema_version: Literal["0.1", "0.2"]
     experiment_id: IntentID
@@ -79,6 +98,9 @@ class EvaluationProtocol(msgspec.Struct, frozen=True, forbid_unknown_fields=True
     replay_source: ReplaySource | msgspec.UnsetType = msgspec.UNSET
     operating_costs_sha256: SHA256 | msgspec.UnsetType = msgspec.UNSET
     paper_nav_sha256: SHA256 | msgspec.UnsetType = msgspec.UNSET
+    walk_forward_source: WalkForwardSource | msgspec.UnsetType = msgspec.UNSET
+    paper_benchmark_sha256: SHA256 | msgspec.UnsetType = msgspec.UNSET
+    ablation_source: AblationSource | msgspec.UnsetType = msgspec.UNSET
 
 
 class DailyNav(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
@@ -114,6 +136,31 @@ class PaperNavProvenance(msgspec.Struct, frozen=True, forbid_unknown_fields=True
     method: Literal["paper_ledger_export"]
     paper_nav_sha256: SHA256
     account_id: IntentID
+    paper_benchmark_sha256: SHA256 | msgspec.UnsetType = msgspec.UNSET
+
+
+class WalkForwardProvenance(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
+    method: Literal["synthetic_walk_forward"]
+    plan_sha256: SHA256
+    tape_sha256: SHA256
+    research_steps_sha256: SHA256
+    step_count: Annotated[int, msgspec.Meta(ge=1, le=32)]
+    llm_calls_used: Annotated[int, msgspec.Meta(ge=1, le=2048)]
+    max_total_llm_calls: Annotated[int, msgspec.Meta(ge=1, le=2048)]
+    replay: ReplayProvenance
+
+
+class AblationArm(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
+    variant: ResearchVariant
+    walk: WalkForwardProvenance
+    research_config_sha256_by_step: Annotated[
+        tuple[SHA256, ...], msgspec.Meta(min_length=1, max_length=32)
+    ]
+
+
+class AblationProvenance(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
+    method: Literal["synthetic_paired_ablation"]
+    arms: Annotated[dict[IntentID, AblationArm], msgspec.Meta(min_length=2, max_length=4)]
 
 
 class EvaluationEvidence(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
@@ -124,6 +171,8 @@ class EvaluationEvidence(msgspec.Struct, frozen=True, forbid_unknown_fields=True
     replay_provenance: ReplayProvenance | msgspec.UnsetType = msgspec.UNSET
     daily_nav_basis: Literal["execution_net"] | msgspec.UnsetType = msgspec.UNSET
     paper_nav_provenance: PaperNavProvenance | msgspec.UnsetType = msgspec.UNSET
+    walk_forward_provenance: WalkForwardProvenance | msgspec.UnsetType = msgspec.UNSET
+    ablation_provenance: AblationProvenance | msgspec.UnsetType = msgspec.UNSET
 
 
 def _decode(data: bytes, contract):
@@ -150,23 +199,41 @@ def _validate_evidence_basis(evidence: EvaluationEvidence) -> None:
     if evidence.schema_version == "0.1" and (
         evidence.daily_nav_basis is not msgspec.UNSET
         or evidence.paper_nav_provenance is not msgspec.UNSET
+        or evidence.walk_forward_provenance is not msgspec.UNSET
+        or evidence.ablation_provenance is not msgspec.UNSET
     ):
-        raise ValueError("Evidence daily_nav_basis and paper NAV provenance require version 0.2")
+        raise ValueError("Evidence daily_nav_basis and new source provenance require 0.2")
+    walk = evidence.walk_forward_provenance
+    if walk is not msgspec.UNSET and walk.llm_calls_used > walk.max_total_llm_calls:
+        raise ValueError("Walk-forward evidence exceeds the declared call budget")
 
 
 def _validate_protocol(protocol: EvaluationProtocol) -> None:
     has_costs = protocol.operating_costs_sha256 is not msgspec.UNSET
     has_paper_nav = protocol.paper_nav_sha256 is not msgspec.UNSET
+    has_paper_benchmark = protocol.paper_benchmark_sha256 is not msgspec.UNSET
+    has_walk = protocol.walk_forward_source is not msgspec.UNSET
+    has_ablation = protocol.ablation_source is not msgspec.UNSET
     if protocol.schema_version == "0.2" and (
         protocol.nav_basis == "gross" or has_costs != (protocol.nav_basis == "operating_net")
     ):
         raise ValueError(
             "Protocol 0.2 requires a frozen cost ledger SHA-256 only for operating_net"
         )
-    if protocol.schema_version == "0.1" and (has_costs or has_paper_nav):
-        raise ValueError("Operating cost ledger and paper NAV pins require protocol 0.2")
+    if protocol.schema_version == "0.1" and (
+        has_costs or has_paper_nav or has_walk or has_paper_benchmark or has_ablation
+    ):
+        raise ValueError(
+            "Operating cost ledger, paper NAV and study source pins require protocol 0.2"
+        )
     if has_paper_nav and protocol.replay_source is not msgspec.UNSET:
         raise ValueError("Paper NAV export and replay source are mutually exclusive")
+    if has_walk and (has_paper_nav or protocol.replay_source is not msgspec.UNSET):
+        raise ValueError("Walk-forward, paper NAV and replay sources are mutually exclusive")
+    if has_ablation and (has_walk or has_paper_nav or protocol.replay_source is not msgspec.UNSET):
+        raise ValueError("Paired ablation requires its own frozen source")
+    if has_paper_benchmark and not has_paper_nav:
+        raise ValueError("Paper benchmark requires a frozen paper NAV export")
     windows = protocol.splits
     if (
         not windows.train_start
@@ -200,9 +267,44 @@ def _validate_protocol(protocol: EvaluationProtocol) -> None:
         raise ValueError("Primary comparison must be registered against a distinct benchmark")
     if protocol.replay_source is not msgspec.UNSET:
         _validate_replay_source(protocol, protocol.replay_source)
+    if has_walk or has_ablation:
+        if days[-1] != windows.end_exclusive - timedelta(days=1) or any(
+            right - left != timedelta(days=1) for left, right in pairwise(days)
+        ):
+            raise ValueError("Walk-forward requires every UTC day through the end of the window")
+    if has_walk:
+        _validate_replay_source(protocol, protocol.walk_forward_source)
+    if has_ablation:
+        source = protocol.ablation_source
+        if (
+            protocol.source_mode != "synthetic_fixture"
+            or source.baseline not in source.variants
+            or len(set(source.variants.values())) != len(source.variants)
+            or pairs
+            != {
+                (challenger, source.baseline)
+                for challenger in source.variants
+                if challenger != source.baseline
+            }
+            or any(row.benchmark_access != "synthetic_fixture" for row in protocol.comparisons)
+        ):
+            raise ValueError(
+                "Paired ablation must compare every distinct variant with its baseline"
+            )
+    if has_paper_benchmark and (
+        protocol.source_mode != "synthetic_fixture"
+        or any(row.benchmark_access != "synthetic_fixture" for row in protocol.comparisons)
+        or len({row.strategy for row in protocol.comparisons}) != 1
+        or len({row.benchmark for row in protocol.comparisons} - {"uninvested-cash"}) != 1
+    ):
+        raise ValueError(
+            "Paper benchmark requires one noncash synthetic reference and one strategy"
+        )
 
 
-def _validate_replay_source(protocol: EvaluationProtocol, source: ReplaySource) -> None:
+def _validate_replay_source(
+    protocol: EvaluationProtocol, source: ReplaySource | WalkForwardSource
+) -> None:
     if protocol.source_mode != "synthetic_fixture" or (
         protocol.schema_version == "0.1" and protocol.nav_basis != "execution_net"
     ):
@@ -239,6 +341,35 @@ def _validate_replay_source(protocol: EvaluationProtocol, source: ReplaySource) 
 
 def protocol_sha256(protocol: EvaluationProtocol) -> str:
     return sha256(msgspec.json.encode(protocol, order="deterministic")).hexdigest()
+
+
+def _validate_ablation_evidence(
+    source: AblationSource | msgspec.UnsetType, evidence: AblationProvenance | msgspec.UnsetType
+) -> None:
+    if source is msgspec.UNSET:
+        if evidence is not msgspec.UNSET:
+            raise ValueError("Ablation provenance requires a frozen ablation source")
+        return
+    if evidence is msgspec.UNSET or evidence.arms.keys() != source.variants.keys():
+        raise ValueError("Ablation evidence must cover every frozen arm")
+    if any(
+        arm.variant != source.variants[key]
+        or arm.walk.plan_sha256 != source.plan_sha256
+        or arm.walk.tape_sha256 != source.tape_sha256
+        or arm.walk.llm_calls_used > arm.walk.max_total_llm_calls
+        or len(arm.research_config_sha256_by_step) != arm.walk.step_count
+        for key, arm in evidence.arms.items()
+    ):
+        raise ValueError(
+            "Ablation evidence differs from the frozen variants, inputs or call limits"
+        )
+    walks = [arm.walk for arm in evidence.arms.values()]
+    if len({(walk.step_count, walk.max_total_llm_calls) for walk in walks}) != 1:
+        raise ValueError("Ablation arms must use identical step counts and call limits")
+    if sum(walk.llm_calls_used for walk in walks) > source.max_total_llm_calls:
+        raise ValueError("Ablation exceeded the aggregate call budget")
+    if len({arm.research_config_sha256_by_step for arm in evidence.arms.values()}) != len(walks):
+        raise ValueError("Ablation requires distinct research configurations for every arm")
 
 
 def _split_audit(windows: SplitWindows, decisions: tuple[DecisionWindow, ...]) -> dict:
@@ -487,6 +618,22 @@ def evaluate_statistics(
             raise ValueError("Paper NAV provenance requires a frozen paper NAV export")
     elif paper is msgspec.UNSET or paper.paper_nav_sha256 != protocol.paper_nav_sha256:
         raise ValueError("Evidence paper NAV provenance must match the frozen paper NAV SHA-256")
+    elif paper.paper_benchmark_sha256 != protocol.paper_benchmark_sha256:
+        raise ValueError(
+            "Evidence paper benchmark provenance must match the frozen benchmark SHA-256"
+        )
+    walk = evidence.walk_forward_provenance
+    walk_source = protocol.walk_forward_source
+    if walk_source is msgspec.UNSET:
+        if walk is not msgspec.UNSET:
+            raise ValueError("Walk-forward provenance requires frozen source inputs")
+    elif walk is msgspec.UNSET or (
+        walk.plan_sha256 != walk_source.plan_sha256 or walk.tape_sha256 != walk_source.tape_sha256
+    ):
+        raise ValueError(
+            "Evidence walk-forward provenance must match the frozen plan and tape hashes"
+        )
+    _validate_ablation_evidence(protocol.ablation_source, evidence.ablation_provenance)
     split = _split_audit(protocol.splits, evidence.decisions)
     navs = _aligned_nav(protocol, evidence.daily_nav)
     test_start = protocol.splits.test_start + timedelta(days=protocol.splits.embargo_calendar_days)
@@ -604,5 +751,12 @@ def evaluate_statistics(
     if provenance is not msgspec.UNSET:
         result["replay_provenance_declared"] = msgspec.structs.asdict(provenance)
     if paper is not msgspec.UNSET:
-        result["paper_nav_provenance_declared"] = msgspec.structs.asdict(paper)
+        result["paper_nav_provenance_declared"] = msgspec.to_builtins(paper)
+    if walk is not msgspec.UNSET:
+        result["walk_forward_provenance_declared"] = msgspec.to_builtins(walk)
+    if evidence.ablation_provenance is not msgspec.UNSET:
+        result["ablation_provenance_declared"] = msgspec.to_builtins(evidence.ablation_provenance)
+        result["ablation_total_llm_calls"] = sum(
+            arm.walk.llm_calls_used for arm in evidence.ablation_provenance.arms.values()
+        )
     return result

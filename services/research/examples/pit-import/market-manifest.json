@@ -1,0 +1,33 @@
+{
+  "schema_version": "0.1",
+  "source_mode": "synthetic_fixture",
+  "captures": [
+    {
+      "kind": "normalized_market",
+      "source": {
+        "ref": "market-initial.json",
+        "sha256": "49a51d58f5258e2f0a6a70e25b1c01acd3f332b2aca68667a41dfe37d7a2d0f4"
+      },
+      "captured_at": "2026-11-17T16:05:00Z",
+      "provider": "fixture-exchange"
+    },
+    {
+      "kind": "normalized_market",
+      "source": {
+        "ref": "market-next.json",
+        "sha256": "8f7cfe4366cf8ee54c77c6af6f1b1e25b7649a2058a7ceb677af86099b0ffa86"
+      },
+      "captured_at": "2026-11-17T18:00:00Z",
+      "provider": "fixture-exchange"
+    },
+    {
+      "kind": "normalized_market",
+      "source": {
+        "ref": "market-reused.json",
+        "sha256": "3491b8cccf448875eb94a94b359ba1878697d1a8cb2c532e17e0b81ab486f1c2"
+      },
+      "captured_at": "2026-11-18T15:05:00Z",
+      "provider": "fixture-exchange"
+    }
+  ]
+}

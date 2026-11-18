@@ -1,0 +1,17 @@
+{
+  "schema_version": "0.1",
+  "source_mode": "synthetic_fixture",
+  "observation_id": "fixture-shadow-sell",
+  "instrument": {
+    "instrument_id": "fixture:TSLA",
+    "registry_version": "fixture-v1",
+    "decimals": 0
+  },
+  "side": "SELL",
+  "quantity_raw": "5",
+  "gross_usd": "105.43210001",
+  "fee_usd": "0.43210002",
+  "observed_at": "2026-11-17T19:59:30Z",
+  "available_at": "2026-11-17T20:00:00Z",
+  "expires_at": "2026-11-17T20:00:40Z"
+}

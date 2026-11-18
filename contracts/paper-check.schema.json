@@ -1,0 +1,102 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tradingbot.local/contracts/paper-check.schema.json",
+  "title": "Paper check report",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "status", "issues"],
+  "properties": {
+    "schema_version": {"const": "0.1"},
+    "status": {"enum": ["ok", "attention", "unavailable"]},
+    "checked_at": {"$ref": "#/$defs/stamp"},
+    "account_id": {"$ref": "#/$defs/id"},
+    "account_version": {"type": "integer", "minimum": 1},
+    "projection_version": {"type": "integer", "minimum": 1},
+    "research": {"$ref": "#/$defs/researchBudget"},
+    "pipeline": {"$ref": "#/$defs/pipeline"},
+    "issues": {"type": "array", "items": {"$ref": "#/$defs/issue"}}
+  },
+  "$defs": {
+    "id": {"type": "string", "pattern": "^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$"},
+    "stamp": {"type": "string", "format": "date-time"},
+    "count": {"type": "integer", "minimum": 0},
+    "researchStatus": {"enum": ["queued", "leased", "completed", "failed", "expired"]},
+    "researchBudget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["job_id", "durable_permits", "unconfirmed_permits", "legacy_budget_unknown"],
+      "properties": {
+        "job_id": {"$ref": "#/$defs/id"},
+        "job_status": {"$ref": "#/$defs/researchStatus"},
+        "max_llm_calls": {"type": "integer", "minimum": 1, "maximum": 64},
+        "durable_permits": {"$ref": "#/$defs/count"},
+        "unconfirmed_permits": {"$ref": "#/$defs/count"},
+        "guaranteed_remaining_llm_calls": {"$ref": "#/$defs/count"},
+        "legacy_budget_unknown": {"type": "boolean"},
+        "completed_attempt": {"type": "integer", "minimum": 1},
+        "reported_llm_calls": {"$ref": "#/$defs/count"},
+        "missing_token_call_usage": {"$ref": "#/$defs/count"}
+      }
+    },
+    "issue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code"],
+      "properties": {
+        "code": {"type": "string", "pattern": "^[a-z][a-z_]*$"},
+        "job_id": {"$ref": "#/$defs/id"},
+        "order_id": {"$ref": "#/$defs/id"},
+        "fill_event_id": {"$ref": "#/$defs/id"},
+        "instrument_id": {"type": "string", "minLength": 1}
+      }
+    },
+    "pipeline": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["stall_after", "truncated", "jobs", "fill_relay"],
+      "properties": {
+        "stall_after": {"type": "string", "minLength": 1},
+        "truncated": {"type": "boolean"},
+        "selected_job_registered": {"type": "boolean"},
+        "jobs": {"type": "array", "maxItems": 100, "items": {"$ref": "#/$defs/pipelineJob"}},
+        "fill_relay": {"$ref": "#/$defs/fillRelay"}
+      }
+    },
+    "pipelineJob": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["job_id", "stage", "research_status", "attempt_count", "job_created_at", "application_receipt"],
+      "properties": {
+        "job_id": {"$ref": "#/$defs/id"},
+        "stage": {
+          "enum": ["queued", "leased", "lease_expired", "awaiting_application", "awaiting_recovery",
+            "awaiting_ack", "research_failed", "research_expired", "finished", "inconsistent"]
+        },
+        "research_status": {"$ref": "#/$defs/researchStatus"},
+        "attempt_count": {"$ref": "#/$defs/count"},
+        "job_created_at": {"$ref": "#/$defs/stamp"},
+        "lease_expires_at": {"$ref": "#/$defs/stamp"},
+        "research_completed_at": {"$ref": "#/$defs/stamp"},
+        "application_created_at": {"$ref": "#/$defs/stamp"},
+        "application_receipt": {"type": "boolean"},
+        "order_id": {"$ref": "#/$defs/id"},
+        "order_status": {"enum": ["reserved", "unknown", "partially_filled", "cancelled", "filled"]},
+        "finished_at": {"$ref": "#/$defs/stamp"},
+        "finished_status": {"enum": ["hold", "applied", "expired", "snapshot_stale", "research_failed", "research_expired"]}
+      }
+    },
+    "fillRelay": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pending_fills"],
+      "properties": {
+        "pending_fills": {"$ref": "#/$defs/count"},
+        "oldest_fill_event_id": {"$ref": "#/$defs/id"},
+        "oldest_created_at": {"$ref": "#/$defs/stamp"}
+      },
+      "if": {"properties": {"pending_fills": {"minimum": 1}}},
+      "then": {"required": ["oldest_fill_event_id", "oldest_created_at"]},
+      "else": {"propertyNames": {"const": "pending_fills"}}
+    }
+  }
+}

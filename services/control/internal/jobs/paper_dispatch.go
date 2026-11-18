@@ -19,7 +19,7 @@ var paperDispatchUUID = regexp.MustCompile(`^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9
 const selectPaperDispatch = `SELECT job_id::text, account_id::text, request, request_sha256
 		FROM research_paper_dispatch WHERE job_id=$1`
 
-// PaperDispatchInput is supplied only by the owner-side review scheduler.
+// PaperDispatchInput is supplied only by the owner-side paper schedulers.
 // The normal research HTTP contract cannot opt a job into paper application.
 type PaperDispatchInput struct {
 	AccountID string

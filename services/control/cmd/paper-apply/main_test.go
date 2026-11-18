@@ -167,11 +167,13 @@ func TestPaperApplyCommandUsesDurableResearchAndSettlesOnlyOnce(t *testing.T) {
 	marksPath := saveDocument(t, dir, "marks", encode(t, []paperrisk.Mark{{Instrument: instrument, PriceUSD: "20", At: markAt, AvailableAt: markAt}}))
 	snapshotArgs := []string{"snapshot", "--account", accountID, "--policy", policyPath, "--marks", marksPath}
 	var output bytes.Buffer
-	if err := run(ctx, dsn, snapshotArgs, &output, clock); err != nil {
+	snapshotClock := func() time.Time { return clock().Add(time.Nanosecond) }
+	if err := run(ctx, dsn, snapshotArgs, &output, snapshotClock); err != nil {
 		t.Fatal(err)
 	}
 	var snapshot snapshotBundle
-	if err := json.Unmarshal(output.Bytes(), &snapshot); err != nil || snapshot.Context.SnapshotVersion != 1 || snapshot.Portfolio.Cash != "1000" {
+	if err := json.Unmarshal(output.Bytes(), &snapshot); err != nil || snapshot.Context.SnapshotVersion != 1 ||
+		snapshot.Portfolio.Cash != "1000" || snapshot.Portfolio.AsOf.Nanosecond()%1000 != 0 {
 		t.Fatalf("snapshot: %+v, %v", snapshot, err)
 	}
 

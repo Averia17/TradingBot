@@ -1,0 +1,108 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Paper shadow outcome 0.1",
+  "$ref": "#/$defs/Request",
+  "$defs": {
+    "UUID": {"type": "string", "pattern": "^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$"},
+    "Timestamp": {"type": "string", "format": "date-time"},
+    "SHA256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "USD": {"type": "string", "pattern": "^(?:0|[1-9][0-9]{0,29})(?:\\.[0-9]{1,8})?$"},
+    "Amount": {"type": "string", "pattern": "^(?:0|[1-9][0-9]*)(?:\\.[0-9]{1,8})?$"},
+    "SignedAmount": {"type": "string", "pattern": "^-?(?:0|[1-9][0-9]*)(?:\\.[0-9]{1,8})?$"},
+    "Quantity": {"type": "string", "pattern": "^[1-9][0-9]{0,37}$"},
+    "ID": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9:._-]{0,127}$"},
+    "Instrument": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["instrument_id", "registry_version", "decimals"],
+      "properties": {
+        "instrument_id": {"$ref": "#/$defs/ID"},
+        "registry_version": {"$ref": "#/$defs/ID"},
+        "decimals": {"type": "integer", "minimum": 0, "maximum": 18}
+      }
+    },
+    "Request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "source_mode", "account_id", "research_job_id", "opening_order_id", "as_of", "max_observation_age_seconds", "entry_sha256", "exit_sha256"],
+      "properties": {
+        "schema_version": {"const": "0.1"},
+        "source_mode": {"const": "synthetic_fixture"},
+        "account_id": {"$ref": "#/$defs/UUID"},
+        "research_job_id": {"$ref": "#/$defs/UUID"},
+        "opening_order_id": {"$ref": "#/$defs/UUID"},
+        "as_of": {"$ref": "#/$defs/Timestamp"},
+        "max_observation_age_seconds": {"type": "integer", "minimum": 1, "maximum": 86400},
+        "entry_sha256": {"$ref": "#/$defs/SHA256"},
+        "exit_sha256": {"$ref": "#/$defs/SHA256"}
+      }
+    },
+    "Observation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "source_mode", "observation_id", "instrument", "side", "quantity_raw", "gross_usd", "fee_usd", "observed_at", "available_at", "expires_at"],
+      "properties": {
+        "schema_version": {"const": "0.1"},
+        "source_mode": {"const": "synthetic_fixture"},
+        "observation_id": {"$ref": "#/$defs/ID"},
+        "instrument": {"$ref": "#/$defs/Instrument"},
+        "side": {"enum": ["BUY", "SELL"]},
+        "quantity_raw": {"$ref": "#/$defs/Quantity"},
+        "gross_usd": {"$ref": "#/$defs/USD"},
+        "fee_usd": {"$ref": "#/$defs/USD"},
+        "observed_at": {"$ref": "#/$defs/Timestamp"},
+        "available_at": {"$ref": "#/$defs/Timestamp"},
+        "expires_at": {"$ref": "#/$defs/Timestamp"}
+      }
+    },
+    "PinnedObservation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sha256", "observation"],
+      "properties": {
+        "sha256": {"$ref": "#/$defs/SHA256"},
+        "observation": {"$ref": "#/$defs/Observation"}
+      }
+    },
+    "Label": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["available_at", "entry_cost_usd", "exit_proceeds_usd", "hypothetical_net_pnl_usd", "hypothetical_return_bps"],
+      "properties": {
+        "available_at": {"$ref": "#/$defs/Timestamp"},
+        "entry_cost_usd": {"$ref": "#/$defs/Amount"},
+        "exit_proceeds_usd": {"$ref": "#/$defs/Amount"},
+        "hypothetical_net_pnl_usd": {"$ref": "#/$defs/SignedAmount"},
+        "hypothetical_return_bps": {"$ref": "#/$defs/SignedAmount"}
+      }
+    },
+    "Report": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "source_mode", "outcome_basis", "status", "input_sha256", "account_id", "research_job_id", "opening_order_id", "decision_id", "as_of", "horizon_deadline", "rejection_reason", "rejection_event_id", "rejected_at", "rejected_quote_sha256", "entry"],
+      "properties": {
+        "schema_version": {"const": "0.1"},
+        "source_mode": {"const": "synthetic_fixture"},
+        "outcome_basis": {"const": "counterfactual"},
+        "status": {"enum": ["immature", "unpriced_at_horizon", "labelled"]},
+        "input_sha256": {"$ref": "#/$defs/SHA256"},
+        "account_id": {"$ref": "#/$defs/UUID"},
+        "research_job_id": {"$ref": "#/$defs/UUID"},
+        "opening_order_id": {"$ref": "#/$defs/UUID"},
+        "decision_id": {"$ref": "#/$defs/UUID"},
+        "as_of": {"$ref": "#/$defs/Timestamp"},
+        "horizon_deadline": {"$ref": "#/$defs/Timestamp"},
+        "rejection_reason": {"const": "simulated_rejection"},
+        "rejection_event_id": {"$ref": "#/$defs/UUID"},
+        "rejected_at": {"$ref": "#/$defs/Timestamp"},
+        "rejected_quote_sha256": {"$ref": "#/$defs/SHA256"},
+        "entry": {"$ref": "#/$defs/PinnedObservation", "properties": {"observation": {"properties": {"side": {"const": "BUY"}}}}},
+        "exit": {"$ref": "#/$defs/PinnedObservation", "properties": {"observation": {"properties": {"side": {"const": "SELL"}}}}},
+        "label": {"$ref": "#/$defs/Label"}
+      },
+      "if": {"properties": {"status": {"const": "labelled"}}},
+      "then": {"required": ["exit", "label"]},
+      "else": {"not": {"anyOf": [{"required": ["exit"]}, {"required": ["label"]}]}}
+    }
+  }
+}

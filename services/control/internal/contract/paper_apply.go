@@ -13,9 +13,12 @@ var paperApplySchema []byte
 //go:embed paper-replay.schema.json
 var paperReplaySchema []byte
 
-var PaperRiskPolicy, PaperMarks, PaperApplication, PaperFixtureIntent, PaperFixtureQuote, PaperReviewSchedule, PaperQuotePin = compilePaperApplication()
+//go:embed research-job.schema.json
+var researchJobSchema []byte
 
-func compilePaperApplication() (policy, marks, request, intent, quote, review, pin *jsonschema.Schema) {
+var PaperRiskPolicy, PaperMarks, PaperApplication, PaperFixtureIntent, PaperFixtureQuote, PaperReviewSchedule, PaperQuotePin, PaperEntrySchedule, PaperEntrySelection = compilePaperApplication()
+
+func compilePaperApplication() (policy, marks, request, intent, quote, review, pin, entry, selection *jsonschema.Schema) {
 	const root = "https://tradingbot.local/contracts/"
 	compiler := jsonschema.NewCompiler()
 	compiler.AssertFormat()
@@ -24,6 +27,7 @@ func compilePaperApplication() (policy, marks, request, intent, quote, review, p
 		"paper-account.schema.json": paperSchema,
 		"paper-replay.schema.json":  paperReplaySchema,
 		"portfolio.schema.json":     portfolioSchema,
+		"research-job.schema.json":  researchJobSchema,
 	} {
 		value, err := jsonschema.UnmarshalJSON(bytes.NewReader(body))
 		if err != nil {
@@ -42,5 +46,6 @@ func compilePaperApplication() (policy, marks, request, intent, quote, review, p
 	}
 	const apply, replay = "paper-apply.schema.json", "paper-replay.schema.json"
 	return load(apply, "Policy"), load(apply, "Marks"), load(apply, "Request"), load(replay, "Intent"),
-		load(replay, "Quote"), load(apply, "ReviewScheduleRequest"), load(apply, "QuotePin")
+		load(replay, "Quote"), load(apply, "ReviewScheduleRequest"), load(apply, "QuotePin"),
+		load(apply, "EntryScheduleRequest"), load(apply, "EntrySelection")
 }

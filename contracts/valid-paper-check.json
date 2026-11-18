@@ -1,0 +1,35 @@
+{
+  "schema_version": "0.1",
+  "status": "attention",
+  "checked_at": "2026-11-18T12:00:00Z",
+  "account_id": "00000000-0000-4000-8000-000000000001",
+  "account_version": 5,
+  "projection_version": 5,
+  "pipeline": {
+    "stall_after": "2m0s",
+    "truncated": false,
+    "jobs": [
+      {
+        "job_id": "00000000-0000-4000-8000-000000000002",
+        "stage": "awaiting_recovery",
+        "research_status": "completed",
+        "attempt_count": 1,
+        "job_created_at": "2026-11-18T11:50:00Z",
+        "lease_expires_at": "2026-11-18T11:52:00Z",
+        "research_completed_at": "2026-11-18T11:51:15Z",
+        "application_created_at": "2026-11-18T11:53:00Z",
+        "application_receipt": false,
+        "order_id": "00000000-0000-4000-8000-000000000003",
+        "order_status": "reserved"
+      }
+    ],
+    "fill_relay": {"pending_fills": 0}
+  },
+  "issues": [
+    {
+      "code": "paper_dispatch_recovery_stalled",
+      "job_id": "00000000-0000-4000-8000-000000000002",
+      "order_id": "00000000-0000-4000-8000-000000000003"
+    }
+  ]
+}

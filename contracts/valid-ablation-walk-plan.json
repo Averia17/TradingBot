@@ -1,0 +1,30 @@
+{
+  "schema_version": "0.1",
+  "source_mode": "synthetic_fixture",
+  "experiment_id": "offline-graph-ablation",
+  "policy_version": "fixture-paper-v1",
+  "max_position_pct": "0.25",
+  "max_total_llm_calls": 32,
+  "steps": [
+    {
+      "as_of": "2026-11-18T10:00:00Z",
+      "completed_at": "2026-11-18T10:01:00Z",
+      "requested_symbols": ["TSLA"],
+      "max_llm_calls": 16,
+      "data_manifest": {
+        "ref": "market.json",
+        "sha256": "945c1510b695ce507cfb0fe10bb7c32bbfecba204c2e3b9d995df3d0ae2ee8d7"
+      }
+    },
+    {
+      "as_of": "2026-11-18T10:10:00Z",
+      "completed_at": "2026-11-18T10:11:00Z",
+      "requested_symbols": ["TSLA"],
+      "max_llm_calls": 16,
+      "data_manifest": {
+        "ref": "market.json",
+        "sha256": "945c1510b695ce507cfb0fe10bb7c32bbfecba204c2e3b9d995df3d0ae2ee8d7"
+      }
+    }
+  ]
+}

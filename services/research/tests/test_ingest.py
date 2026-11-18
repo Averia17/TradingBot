@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from tradingbot.ingest import CaptureManifest, build_archive
+from tradingbot.ingest import BLSReleaseReview, CaptureManifest, build_archive
 from tradingbot.snapshots import load_snapshot
 
 
@@ -124,4 +124,62 @@ def test_published_manifest_schema_and_pins_match_importer():
     root = research / "examples/pit-import"
     result = build_archive(root, json.loads((root / "manifest.json").read_text(encoding="utf-8")))
     assert result["source_mode"] == "synthetic_fixture"
-    assert [record["kind"] for record in result["records"]] == ["filing", "filing", "macro", "macro"]
+    assert [record["kind"] for record in result["records"]] == [
+        "filing",
+        "filing",
+        "macro",
+        "macro",
+    ]
+
+
+@pytest.mark.parametrize("visibility", ["source_published", "locally_ingested"])
+def test_reviewed_bls_releases_keep_official_values_without_backdating_receipt(
+    tmp_path, visibility
+):
+    research = Path(__file__).resolve().parents[1]
+    schema = research.parent.parent / "contracts/pit-bls-release.schema.json"
+    assert json.loads(schema.read_text(encoding="utf-8")) == BLSReleaseReview.model_json_schema()
+    root = research / "examples/pit-import"
+    manifest = json.loads((root / "bls-manifest.json").read_text(encoding="utf-8"))
+    result = build_archive(root, manifest)
+    assert result["source_mode"] == "local_archive"
+    assert [
+        (row["revision"], row["payload"]["released_at"], row["payload"]["value"])
+        for row in result["records"]
+    ] == [
+        (1, "2024-11-01T12:30:00Z", "12000"),
+        (2, "2024-12-06T13:30:00Z", "36000"),
+    ]
+    for record, capture in zip(result["records"], manifest["captures"], strict=True):
+        assert record["payload"]["availability_basis"] == "local_document_review"
+        assert record["payload"]["source_sha256"] == capture["source"]["sha256"]
+        assert record["available_at"] == record["ingested_at"] == capture["reviewed_at"]
+
+    ref = pin(tmp_path, "archive.json", result)
+    cutoffs = (
+        ("2024-12-06T13:30:00Z", []),
+        ("2026-11-18T11:10:28Z", []),
+        ("2026-11-18T11:10:29Z", ["12000"]),
+        ("2026-11-18T11:12:41Z", ["12000"]),
+        ("2026-11-18T11:12:42Z", ["36000"]),
+    )
+    for cutoff, expected in cutoffs:
+        snapshot = load_snapshot(
+            tmp_path, ref, datetime.fromisoformat(cutoff), visibility=visibility
+        )
+        assert [row.payload["value"] for row in snapshot.records] == expected
+
+
+def test_bls_import_rejects_duplicate_release_and_review_before_publication():
+    root = Path(__file__).resolve().parents[1] / "examples/pit-import"
+    manifest = json.loads((root / "bls-manifest.json").read_text(encoding="utf-8"))
+    first, second = manifest["captures"]
+    with pytest.raises(ValueError, match="duplicate BLS observation"):
+        build_archive(root, manifest | {"captures": [first, first]})
+    first["reviewed_at"] = "2024-11-01T12:29:59Z"
+    with pytest.raises(ValueError, match="reviewed before its official release"):
+        build_archive(root, manifest)
+    first["reviewed_at"] = second["reviewed_at"]
+    first["source"]["sha256"] = "0" * 64
+    with pytest.raises(ValueError, match="SHA-256 mismatch"):
+        build_archive(root, manifest)

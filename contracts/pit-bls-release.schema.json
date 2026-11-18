@@ -1,0 +1,52 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "0.1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "source_url": {
+      "pattern": "^https://www\\.bls\\.gov/news\\.release/archives/empsit_[0-9]{8}\\.htm$",
+      "title": "Source Url",
+      "type": "string"
+    },
+    "released_at": {
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,6})?(?:Z|[+-][0-9]{2}:[0-9]{2})$",
+      "title": "Released At",
+      "type": "string"
+    },
+    "observation_date": {
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+      "title": "Observation Date",
+      "type": "string"
+    },
+    "series_id": {
+      "const": "CES_TOTAL_NONFARM_PAYROLL_CHANGE",
+      "title": "Series Id",
+      "type": "string"
+    },
+    "value": {
+      "pattern": "^(?:0|-?[1-9][0-9]{0,11})$",
+      "title": "Value",
+      "type": "string"
+    },
+    "unit": {
+      "const": "jobs",
+      "title": "Unit",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "source_url",
+    "released_at",
+    "observation_date",
+    "series_id",
+    "value",
+    "unit"
+  ],
+  "title": "BLSReleaseReview",
+  "type": "object"
+}

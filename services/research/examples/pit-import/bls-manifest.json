@@ -1,0 +1,22 @@
+{
+  "schema_version": "0.1",
+  "source_mode": "local_archive",
+  "captures": [
+    {
+      "kind": "bls_release_review",
+      "source": {
+        "ref": "bls-release-2024-11-01.json",
+        "sha256": "6271e48587ccfc3b2284b7357daccf768567c487ce548e99a431be72c6d245cf"
+      },
+      "reviewed_at": "2026-11-18T11:10:29Z"
+    },
+    {
+      "kind": "bls_release_review",
+      "source": {
+        "ref": "bls-release-2024-12-06.json",
+        "sha256": "15c8810d7ac49a94ef68dafe3ba1d885aba65c5c7034cb7d716ce4dde14ff556"
+      },
+      "reviewed_at": "2026-11-18T11:12:42Z"
+    }
+  ]
+}

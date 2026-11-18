@@ -1,0 +1,506 @@
+{
+  "$defs": {
+    "Listing": {
+      "additionalProperties": false,
+      "properties": {
+        "security_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+          "title": "Security Id",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "listed",
+            "delisted"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "effective_at": {
+          "format": "date-time",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,6})?(?:Z|[+-][0-9]{2}:[0-9]{2})$",
+          "title": "Effective At",
+          "type": "string"
+        }
+      },
+      "required": [
+        "security_id",
+        "status",
+        "effective_at"
+      ],
+      "title": "Listing",
+      "type": "object"
+    },
+    "MarketAction": {
+      "additionalProperties": false,
+      "properties": {
+        "record_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+          "title": "Record Id",
+          "type": "string"
+        },
+        "symbol": {
+          "pattern": "^[A-Z][A-Z0-9.\\-]{0,15}$",
+          "title": "Symbol",
+          "type": "string"
+        },
+        "revision": {
+          "maximum": 1000000,
+          "minimum": 1,
+          "title": "Revision",
+          "type": "integer"
+        },
+        "event_time": {
+          "format": "date-time",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,6})?(?:Z|[+-][0-9]{2}:[0-9]{2})$",
+          "title": "Event Time",
+          "type": "string"
+        },
+        "available_at": {
+          "format": "date-time",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,6})?(?:Z|[+-][0-9]{2}:[0-9]{2})$",
+          "title": "Available At",
+          "type": "string"
+        },
+        "kind": {
+          "const": "action",
+          "title": "Kind",
+          "type": "string"
+        },
+        "payload": {
+          "discriminator": {
+            "mapping": {
+              "cash_dividend": "#/$defs/_CashDividend",
+              "split": "#/$defs/_StockSplit"
+            },
+            "propertyName": "action"
+          },
+          "oneOf": [
+            {
+              "$ref": "#/$defs/_StockSplit"
+            },
+            {
+              "$ref": "#/$defs/_CashDividend"
+            }
+          ],
+          "title": "Payload"
+        }
+      },
+      "required": [
+        "record_id",
+        "symbol",
+        "revision",
+        "event_time",
+        "available_at",
+        "kind",
+        "payload"
+      ],
+      "title": "MarketAction",
+      "type": "object"
+    },
+    "MarketBar": {
+      "additionalProperties": false,
+      "properties": {
+        "record_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+          "title": "Record Id",
+          "type": "string"
+        },
+        "symbol": {
+          "pattern": "^[A-Z][A-Z0-9.\\-]{0,15}$",
+          "title": "Symbol",
+          "type": "string"
+        },
+        "revision": {
+          "maximum": 1000000,
+          "minimum": 1,
+          "title": "Revision",
+          "type": "integer"
+        },
+        "event_time": {
+          "format": "date-time",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,6})?(?:Z|[+-][0-9]{2}:[0-9]{2})$",
+          "title": "Event Time",
+          "type": "string"
+        },
+        "available_at": {
+          "format": "date-time",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,6})?(?:Z|[+-][0-9]{2}:[0-9]{2})$",
+          "title": "Available At",
+          "type": "string"
+        },
+        "kind": {
+          "const": "bar",
+          "title": "Kind",
+          "type": "string"
+        },
+        "payload": {
+          "$ref": "#/$defs/_RawBar"
+        }
+      },
+      "required": [
+        "record_id",
+        "symbol",
+        "revision",
+        "event_time",
+        "available_at",
+        "kind",
+        "payload"
+      ],
+      "title": "MarketBar",
+      "type": "object"
+    },
+    "MarketListing": {
+      "additionalProperties": false,
+      "properties": {
+        "record_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+          "title": "Record Id",
+          "type": "string"
+        },
+        "symbol": {
+          "pattern": "^[A-Z][A-Z0-9.\\-]{0,15}$",
+          "title": "Symbol",
+          "type": "string"
+        },
+        "revision": {
+          "maximum": 1000000,
+          "minimum": 1,
+          "title": "Revision",
+          "type": "integer"
+        },
+        "event_time": {
+          "format": "date-time",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,6})?(?:Z|[+-][0-9]{2}:[0-9]{2})$",
+          "title": "Event Time",
+          "type": "string"
+        },
+        "available_at": {
+          "format": "date-time",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,6})?(?:Z|[+-][0-9]{2}:[0-9]{2})$",
+          "title": "Available At",
+          "type": "string"
+        },
+        "kind": {
+          "const": "listing",
+          "title": "Kind",
+          "type": "string"
+        },
+        "payload": {
+          "$ref": "#/$defs/Listing"
+        }
+      },
+      "required": [
+        "record_id",
+        "symbol",
+        "revision",
+        "event_time",
+        "available_at",
+        "kind",
+        "payload"
+      ],
+      "title": "MarketListing",
+      "type": "object"
+    },
+    "MarketNews": {
+      "additionalProperties": false,
+      "properties": {
+        "record_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+          "title": "Record Id",
+          "type": "string"
+        },
+        "symbol": {
+          "anyOf": [
+            {
+              "pattern": "^[A-Z][A-Z0-9.\\-]{0,15}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Symbol"
+        },
+        "revision": {
+          "maximum": 1000000,
+          "minimum": 1,
+          "title": "Revision",
+          "type": "integer"
+        },
+        "event_time": {
+          "format": "date-time",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,6})?(?:Z|[+-][0-9]{2}:[0-9]{2})$",
+          "title": "Event Time",
+          "type": "string"
+        },
+        "available_at": {
+          "format": "date-time",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,6})?(?:Z|[+-][0-9]{2}:[0-9]{2})$",
+          "title": "Available At",
+          "type": "string"
+        },
+        "kind": {
+          "const": "news",
+          "title": "Kind",
+          "type": "string"
+        },
+        "payload": {
+          "$ref": "#/$defs/_Headline"
+        }
+      },
+      "required": [
+        "record_id",
+        "symbol",
+        "revision",
+        "event_time",
+        "available_at",
+        "kind",
+        "payload"
+      ],
+      "title": "MarketNews",
+      "type": "object"
+    },
+    "_CashDividend": {
+      "additionalProperties": false,
+      "properties": {
+        "security_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+          "title": "Security Id",
+          "type": "string"
+        },
+        "action": {
+          "const": "cash_dividend",
+          "title": "Action",
+          "type": "string"
+        },
+        "effective_at": {
+          "format": "date-time",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,6})?(?:Z|[+-][0-9]{2}:[0-9]{2})$",
+          "title": "Effective At",
+          "type": "string"
+        },
+        "paid_at": {
+          "format": "date-time",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,6})?(?:Z|[+-][0-9]{2}:[0-9]{2})$",
+          "title": "Paid At",
+          "type": "string"
+        },
+        "cash_per_share_usd": {
+          "pattern": "^(?:0|[1-9][0-9]{0,11})(?:\\.[0-9]{1,8})?$",
+          "title": "Cash Per Share Usd",
+          "type": "string"
+        }
+      },
+      "required": [
+        "security_id",
+        "action",
+        "effective_at",
+        "paid_at",
+        "cash_per_share_usd"
+      ],
+      "title": "_CashDividend",
+      "type": "object"
+    },
+    "_Headline": {
+      "additionalProperties": false,
+      "properties": {
+        "headline": {
+          "maxLength": 500,
+          "minLength": 1,
+          "title": "Headline",
+          "type": "string"
+        },
+        "security_id": {
+          "anyOf": [
+            {
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Security Id"
+        }
+      },
+      "required": [
+        "headline"
+      ],
+      "title": "_Headline",
+      "type": "object"
+    },
+    "_RawBar": {
+      "additionalProperties": false,
+      "properties": {
+        "security_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+          "title": "Security Id",
+          "type": "string"
+        },
+        "price_basis": {
+          "const": "raw",
+          "title": "Price Basis",
+          "type": "string"
+        },
+        "currency": {
+          "const": "USD",
+          "title": "Currency",
+          "type": "string"
+        },
+        "open": {
+          "pattern": "^(?:0|[1-9][0-9]{0,11})(?:\\.[0-9]{1,8})?$",
+          "title": "Open",
+          "type": "string"
+        },
+        "high": {
+          "pattern": "^(?:0|[1-9][0-9]{0,11})(?:\\.[0-9]{1,8})?$",
+          "title": "High",
+          "type": "string"
+        },
+        "low": {
+          "pattern": "^(?:0|[1-9][0-9]{0,11})(?:\\.[0-9]{1,8})?$",
+          "title": "Low",
+          "type": "string"
+        },
+        "close": {
+          "pattern": "^(?:0|[1-9][0-9]{0,11})(?:\\.[0-9]{1,8})?$",
+          "title": "Close",
+          "type": "string"
+        },
+        "volume": {
+          "exclusiveMaximum": 100000000000000000000,
+          "minimum": 0,
+          "title": "Volume",
+          "type": "integer"
+        },
+        "bid": {
+          "anyOf": [
+            {
+              "pattern": "^(?:0|[1-9][0-9]{0,11})(?:\\.[0-9]{1,8})?$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Bid"
+        },
+        "ask": {
+          "anyOf": [
+            {
+              "pattern": "^(?:0|[1-9][0-9]{0,11})(?:\\.[0-9]{1,8})?$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ask"
+        }
+      },
+      "required": [
+        "security_id",
+        "price_basis",
+        "currency",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume"
+      ],
+      "title": "_RawBar",
+      "type": "object"
+    },
+    "_StockSplit": {
+      "additionalProperties": false,
+      "properties": {
+        "security_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+          "title": "Security Id",
+          "type": "string"
+        },
+        "action": {
+          "const": "split",
+          "title": "Action",
+          "type": "string"
+        },
+        "effective_at": {
+          "format": "date-time",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,6})?(?:Z|[+-][0-9]{2}:[0-9]{2})$",
+          "title": "Effective At",
+          "type": "string"
+        },
+        "new_shares": {
+          "maximum": 1000000,
+          "minimum": 1,
+          "title": "New Shares",
+          "type": "integer"
+        },
+        "old_shares": {
+          "maximum": 1000000,
+          "minimum": 1,
+          "title": "Old Shares",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "security_id",
+        "action",
+        "effective_at",
+        "new_shares",
+        "old_shares"
+      ],
+      "title": "_StockSplit",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "0.1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "records": {
+      "items": {
+        "discriminator": {
+          "mapping": {
+            "action": "#/$defs/MarketAction",
+            "bar": "#/$defs/MarketBar",
+            "listing": "#/$defs/MarketListing",
+            "news": "#/$defs/MarketNews"
+          },
+          "propertyName": "kind"
+        },
+        "oneOf": [
+          {
+            "$ref": "#/$defs/MarketBar"
+          },
+          {
+            "$ref": "#/$defs/MarketNews"
+          },
+          {
+            "$ref": "#/$defs/MarketAction"
+          },
+          {
+            "$ref": "#/$defs/MarketListing"
+          }
+        ]
+      },
+      "maxItems": 10000,
+      "minItems": 1,
+      "title": "Records",
+      "type": "array"
+    }
+  },
+  "required": [
+    "schema_version",
+    "records"
+  ],
+  "title": "MarketResponse",
+  "type": "object"
+}

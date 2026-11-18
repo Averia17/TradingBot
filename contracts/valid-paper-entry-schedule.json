@@ -1,0 +1,64 @@
+{
+  "entry_schedule_schema_version": "0.1",
+  "schedule_id": "opening-opportunity",
+  "scheduled_at": "2026-11-18T10:00:01Z",
+  "max_lateness_seconds": 30,
+  "max_job_llm_calls": 20,
+  "snapshot_context": {
+    "account_id": "11111111-1111-4111-8111-111111111111",
+    "snapshot_version": 1,
+    "policy": {
+      "policy_version": "fixture-paper-v1",
+      "max_order_usd": "120",
+      "min_free_cash_usd": "100",
+      "max_position_bps": 2500,
+      "max_group_bps": 5000,
+      "max_gross_bps": 9000,
+      "max_fee_bps": 30,
+      "max_mark_age_seconds": 60,
+      "instruments": [
+        {
+          "instrument": {
+            "instrument_id": "fixture:NVDA",
+            "registry_version": "fixture-v1",
+            "decimals": 2
+          },
+          "symbol": "NVDA",
+          "group": "tech"
+        },
+        {
+          "instrument": {
+            "instrument_id": "fixture:TSLA",
+            "registry_version": "fixture-v1",
+            "decimals": 2
+          },
+          "symbol": "TSLA",
+          "group": "tech"
+        }
+      ]
+    },
+    "marks": [
+      {
+        "instrument": {
+          "instrument_id": "fixture:NVDA",
+          "registry_version": "fixture-v1",
+          "decimals": 2
+        },
+        "price_usd": "102",
+        "at": "2026-11-18T09:59:30Z",
+        "available_at": "2026-11-18T09:59:30Z"
+      },
+      {
+        "instrument": {
+          "instrument_id": "fixture:TSLA",
+          "registry_version": "fixture-v1",
+          "decimals": 2
+        },
+        "price_usd": "98",
+        "at": "2026-11-18T09:59:30Z",
+        "available_at": "2026-11-18T09:59:30Z"
+      }
+    ]
+  },
+  "selection_sha256": "7b6f37d9c275b5fbaca0fed9c8f836cb98389b3faebc0c2a9f1f1bd79e00f604"
+}

@@ -27,6 +27,8 @@ from nautilus_trader.trading.strategy import Strategy
 
 REPLAY_VERSION = "0.1"
 MAX_INPUT_BYTES = 8 * 1024 * 1024
+MAX_PREFIX_EVENTS = 2048
+MAX_PREFIX_SYMBOLS = 8
 EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 MoneyText = Annotated[str, msgspec.Meta(pattern=r"^(0|[1-9][0-9]{0,9})(\.[0-9]{1,2})?$")]
 Ticker = Annotated[str, msgspec.Meta(pattern=r"^[A-Z][A-Z0-9.]{0,11}$")]
@@ -81,6 +83,26 @@ class Replay(msgspec.Struct, frozen=True, forbid_unknown_fields=True, omit_defau
     orders: tuple[Order, ...]
     cash_dividends: tuple[CashDividend, ...] = ()
     stock_splits: tuple[StockSplit, ...] = ()
+
+
+def replay_prefix(replay: Replay, through: datetime) -> Replay:
+    quotes = tuple(quote for quote in replay.quotes if quote.available_at <= through)
+    symbols = {quote.symbol for quote in quotes}
+    return msgspec.structs.replace(
+        replay,
+        quotes=quotes,
+        orders=tuple(order for order in replay.orders if order.ready_at <= through),
+        cash_dividends=tuple(
+            action
+            for action in replay.cash_dividends
+            if action.symbol in symbols and action.available_at <= through
+        ),
+        stock_splits=tuple(
+            action
+            for action in replay.stock_splits
+            if action.symbol in symbols and action.available_at <= through
+        ),
+    )
 
 
 def _nanoseconds(at: datetime) -> int:
@@ -538,6 +560,7 @@ def _run_replay(
         }
         if through is not None:
             result["evaluated_through_ns"] = str(horizon_ns)
+            result["evaluated_through"] = horizon.astimezone(UTC).isoformat().replace("+00:00", "Z")
         if replay.cash_dividends:
             result["simulated_dividend_cash_usd"] = _usd(actions.cash_received)
             result["cash_dividend_events"] = list(actions.receipts.values())

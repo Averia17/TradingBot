@@ -36,6 +36,9 @@ var researchCallBudgetMigration string
 //go:embed 005_paper_dispatch.sql
 var researchPaperDispatchMigration string
 
+//go:embed 006_research_daily_call_budget.sql
+var researchDailyCallBudgetMigration string
+
 type Store struct {
 	pool *pgxpool.Pool
 }
@@ -127,7 +130,10 @@ func (s *Store) migrate(ctx context.Context) error {
 	if err := tx.QueryRow(ctx, `SELECT coalesce(max(version), 0) FROM research_schema_migrations`).Scan(&version); err != nil {
 		return fmt.Errorf("read research schema version: %w", err)
 	}
-	migrations := []string{researchJobsMigration, researchLeasesMigration, researchResultsMigration, researchCallBudgetMigration, researchPaperDispatchMigration}
+	migrations := []string{
+		researchJobsMigration, researchLeasesMigration, researchResultsMigration,
+		researchCallBudgetMigration, researchPaperDispatchMigration, researchDailyCallBudgetMigration,
+	}
 	if version < 0 || version > len(migrations) {
 		return fmt.Errorf("unsupported research database schema version %d", version)
 	}

@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tradingbot.local/contracts/paper-reconciliation.schema.json",
+  "title": "Pinned local paper reconciliation observation",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "paper_observation_schema_version", "source_mode", "account_id", "order_id", "quote_id",
+    "observation_id", "outcome", "observed_at", "received_at"
+  ],
+  "properties": {
+    "paper_observation_schema_version": {"const": "0.1"},
+    "source_mode": {"const": "synthetic_fixture"},
+    "account_id": {"$ref": "#/$defs/ID"},
+    "order_id": {"$ref": "#/$defs/ID"},
+    "quote_id": {"$ref": "#/$defs/ID"},
+    "observation_id": {"$ref": "#/$defs/ID"},
+    "outcome": {"enum": ["partially_filled", "filled", "cancelled"]},
+    "observed_at": {"$ref": "#/$defs/Instant"},
+    "received_at": {"$ref": "#/$defs/Instant"},
+    "quantity_raw": {"type": "string", "pattern": "^[1-9][0-9]{0,37}$"},
+    "gross_usd": {"$ref": "#/$defs/USD"},
+    "fee_usd": {"$ref": "#/$defs/USD"}
+  },
+  "if": {"properties": {"outcome": {"const": "cancelled"}}},
+  "then": {"not": {"anyOf": [
+    {"required": ["quantity_raw"]}, {"required": ["gross_usd"]}, {"required": ["fee_usd"]}
+  ]}},
+  "else": {"required": ["quantity_raw", "gross_usd", "fee_usd"]},
+  "$defs": {
+    "ID": {"type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"},
+    "Instant": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,6})?(Z|[+-][0-9]{2}:[0-9]{2})$"
+    },
+    "USD": {"type": "string", "pattern": "^(0|[1-9][0-9]{0,23})(\\.[0-9]{1,8})?$"}
+  }
+}

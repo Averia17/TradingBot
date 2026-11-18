@@ -106,6 +106,22 @@ Control проверяет batch по сохранённым portfolio и univer
 после истечения lease. `GET /v1/research/jobs/{id}/result` читает результат.
 [JSON Schema результата](contracts/research-result.schema.json).
 
+Для общего потолка вызовов по всем заданиям задайте лимит на сутки UTC.
+День и остаток можно прочитать через `research-budget show`. PostgreSQL
+считает все выданные разрешения, включая разрешения по прерванным
+попыткам и по другим заданиям. Повтор с исходным ID возвращает исходную
+квитанцию. Лимит задаётся один раз на дату. С первой зарегистрированной
+даты сутки без лимита блокируют новые вызовы.
+
+```powershell
+go -C services/control run ./cmd/research-budget show
+go -C services/control run ./cmd/research-budget set --day $budgetUtcDay --max-calls 64
+```
+
+Перед первой активацией остановите экземпляры Control предыдущей версии.
+Показатели относятся к количеству выданных разрешений. Выставленные
+провайдером расходы учитываются отдельно.
+
 ### Офлайн worker для research jobs
 
 Для отдельного локального Go control с тестовыми заданиями и настроенной
@@ -176,6 +192,19 @@ uv --directory services/research run --offline --frozen python -m tradingbot.ing
 `data_manifest`. Импорт проверяет байты и переданные времена, а достоверность
 сбора, права использования и покрытие требуют собственных подтверждений.
 [Схема манифеста](contracts/pit-capture-manifest.schema.json) · [SEC EDGAR API](https://www.sec.gov/search-filings/edgar-application-programming-interfaces) · [Документация ALFRED](https://fred.stlouisfed.org/docs/api/fred/realtime_period.html).
+
+Тот же импорт принимает `normalized_market` с исходными OHLCV, новостями
+и их правками, корпоративными действиями и событиями листинга. Для каждого
+файла фиксируются SHA-256 и местное время получения. Команда `snapshots`
+с `--universe-provider` показывает состояние по устойчивому `security_id`.
+Отбор версии 0.2 сверяет тикер со статусом листинга и принадлежностью
+архивных записей выбранной бумаге. Пример использует синтетические данные.
+[Контракт рыночного импорта](contracts/pit-market-capture.schema.json) · [Пример манифеста](services/research/examples/pit-import/market-manifest.json).
+
+Для BLS добавлен импорт нормализованных наблюдений из двух публичных
+выпусков. Он хранит дату официального релиза и время фактической сверки.
+Архив относит запись к историческому срезу только после её сверки.
+[Пример манифеста](services/research/examples/pit-import/bls-manifest.json) · [Правила и источники](docs/research/SOURCES.md).
 
 Для предварительного отбора используйте SHA-256 архива и снимок счёта.
 Команда фильтрует кандидатов по допуску, свежести, обороту и спреду. Она
@@ -311,6 +340,10 @@ go -C services/control run ./cmd/paper-quote-pin --job $jobId --tape $tapePath -
 go -C services/control run ./cmd/paper-quote-compare --input ../../contracts/valid-paper-quote-comparison.json
 ```
 
+Для заявки `UNKNOWN` или остатка после частичного исполнения
+`paper-apply reconcile` принимает отдельное локальное наблюдение симулятора,
+привязанное к исходной заявке и котировке. [Процедура сверки](docs/runbooks/paper.md#сверка-зависшей-виртуальной-заявки).
+
 `paper-apply review --account $accountId --order $openingOrderId` показывает
 фактический остаток, резерв, ближайший пересмотр и срок тезиса. Время считается
 от первого исполнения, включая частичное. Чтобы проверить катализатор из
@@ -332,6 +365,31 @@ go -C services/control run ./cmd/paper-apply schedule-review --config $reviewCon
 проход. Воркеры читают созданные задания из обычной очереди.
 [Пример конфига](contracts/valid-paper-review-schedule.json).
 
+Для первого входа `paper-apply schedule-entry` принимает готовый результат
+отбора и конфиг владельца со снимком счёта, временем запуска, лимитом
+вызовов и SHA-256 точных байтов отбора. Go перепроверяет состояние счёта,
+разрешённые бумаги и архив. Одно расписание на один момент создаёт одно
+задание и сохраняет контекст применения в той же транзакции.
+
+```powershell
+go -C services/control run ./cmd/paper-apply schedule-entry --config $entryConfig --selection $selectionPath --archive-root $archiveRoot
+```
+
+[Контракт расписания входа](contracts/paper-apply.schema.json#/$defs/EntryScheduleRequest) · [Пример расписания](contracts/valid-paper-entry-schedule.json).
+
+Для нескольких заранее заданных срезов `tradingbot.entry_cycles` принимает
+хешированный план. Он собирает доступный снимок, запускает отбор и сохраняет
+точные входы Go в локальном журнале до отправки задания. При повторе
+используются записанные байты. Просроченный срез без записи пропускается.
+
+```powershell
+uv --directory services/research run --offline --frozen python -m tradingbot.entry_cycles --root $ownerRoot --plan-ref $cyclePlanRef --plan-sha256 $cyclePlanHash --journal $entryJournal --paper-apply $paperApplyBinary
+```
+
+Передайте абсолютные пути к корню, постоянному журналу и собранному
+`paper-apply`. План содержит относительные ссылки из этого корня.
+В примере даты исторические. [Схема плана](contracts/paper-entry-cycle-plan.schema.json) · [Пример плана](contracts/valid-paper-entry-cycle-plan.json).
+
 Новые задания пересмотра получают durable запись для `dispatch` в той же
 транзакции. Диспетчер выбирает завершённые задания заданного счёта,
 сопоставляет policy владельца и выполняет `follow`. Подтверждение наступает
@@ -350,6 +408,31 @@ go -C services/control run ./cmd/paper-apply dispatch --account $accountId --pol
 ```powershell
 go -C services/control run ./cmd/paper-memory --account $accountId --as-of $snapshotAsOf --policy $policyPath --input $marketArchivePath --input-sha256 $marketArchiveHash --output $newArchivePath
 ```
+
+`paper-thesis-outcome` оценивает конкретное открытие по FIFO. Предел
+горизонта считается от первого записанного исполнения по максимальному
+сроку из решения. Для открытого остатка нужен полный по размеру,
+свежий и ещё действовавший к сроку синтетический SELL. Если
+его нет, оценка остатка остаётся неизвестной. Продажи, записанные позже,
+меняют фактический результат к `as_of`, сохраняя исход на горизонте.
+
+```powershell
+go -C services/control run ./cmd/paper-thesis-outcome --input $outcomeInput --sha256 $outcomeHash
+```
+
+[Схема отчёта](contracts/paper-thesis-outcome.schema.json) · [Пример входа](contracts/valid-paper-thesis-outcome-input.json).
+
+Для отклонённого симулятором открытия `paper-shadow-outcome` проверяет
+сохранённую квитанцию и событие отмены. Два отдельных файла фиксируют цены,
+время получения и комиссии гипотетического BUY и SELL. Записи без цены в
+нужном окне остаются без оценки. Отчёт только читает счёт, а результат
+помечается как контрфактуальный.
+
+```powershell
+go -C services/control run ./cmd/paper-shadow-outcome --input $shadowInput --sha256 $shadowHash --entry $entryObservation --exit $exitObservation
+```
+
+[Контракт контрфактуальной оценки](contracts/paper-shadow-outcome.schema.json).
 
 Запишите новый файл в корень архива worker и используйте напечатанный
 `{ref,sha256}` как `data_manifest` задания. Paper-исходы идут отдельным
@@ -382,6 +465,107 @@ uv --directory services/evaluation run --frozen tradingbot-evaluation benchmarks
 uv --directory services/evaluation run --frozen tradingbot-evaluation benchmarks examples/quote-replay.json --start-at 2026-10-02T13:30:10Z --buy-and-hold-symbol TSLA --trend-symbol TSLA --trend-lookback-quotes 1 --trend-max-gap-seconds 60
 ```
 
+Для прогона сохранённых решений экспортируйте завершённые research jobs из
+PostgreSQL. `research-replay` принимает хеши экспорта и отдельной синтетической
+ленты, у которой `orders` пуст. В отчёте видны исходные ID и статусы решений.
+Для поддерживаемых заявок симулятор использует целые акции и первую подходящую
+котировку после записи результата. Исполнения используют общий синтетический
+счёт. Ключ `--require-snapshot-continuity` сверяет все исходные снимки
+с состоянием этого счёта к их времени. Проверяются cash, нулевой денежный
+резерв, точные инструменты и количества, а также midpoints удерживаемых
+бумаг. Проверка использует только котировки и события, доступные к
+соответствующему срезу. Если исполнение другой заявки или корпоративное
+действие меняет счёт до планируемого исполнения, строгий прогон сообщает
+об устаревшем снимке.
+
+```powershell
+# Перенаправление байтов stdout поддерживается в PowerShell 7.4+.
+go -C services/control run ./cmd/research-replay-export --job $jobId > $exportPath
+$exportHash = (Get-FileHash $exportPath).Hash.ToLowerInvariant()
+$tapeHash = (Get-FileHash $tapePath).Hash.ToLowerInvariant()
+uv --directory services/evaluation run --offline --frozen tradingbot-evaluation research-replay $exportPath $tapePath --export-sha256 $exportHash --tape-sha256 $tapeHash --require-snapshot-continuity
+```
+
+Для дневного сравнения сохраните экспорт, ленту и их хеши вместе с отчётом.
+Ключ `--emit-replay-input` выводит производный вход для `replay-evidence`.
+Сохраните его отдельно и укажите `normalized_input_sha256` из отчёта
+в замороженном протоколе. Для воспроизведения конечного остатка обычным
+`replay` передайте значение `evaluated_through` из отчёта через
+`--through`. [Схема экспорта](contracts/research-replay-export.schema.json).
+
+`walk-forward` формирует снимок из состояния Nautilus к каждому сроку
+в плане и запрашивает новое решение у закреплённого офлайн-графа TradingAgents
+в отдельном Python-процессе. Архив передаёт только записи, полученные к
+срезу. Время окончания анализа задано синтетическим планом. До первого
+запуска проверяется общий лимит вызовов всех шагов, а в отчёте сохраняются
+снимки, хеши запросов и результатов, расход и исход каждого решения.
+
+```powershell
+$walkPlan = (Resolve-Path contracts/valid-walk-forward-plan.json).Path
+$walkTape = (Resolve-Path services/evaluation/examples/walk-forward-tape.json).Path
+$walkArchive = (Resolve-Path services/research/examples/selection).Path
+$walkPython = uv --directory services/research run --offline --frozen python -c "import sys; print(sys.executable)"
+$walkPlanHash = (Get-FileHash $walkPlan).Hash.ToLowerInvariant()
+$walkTapeHash = (Get-FileHash $walkTape).Hash.ToLowerInvariant()
+uv --directory services/evaluation run --offline --frozen tradingbot-evaluation walk-forward $walkPlan $walkTape --research-python $walkPython --archive-root $walkArchive --plan-sha256 $walkPlanHash --tape-sha256 $walkTapeHash
+```
+
+Ключ `--include-replay-input` добавляет производный вход для
+`replay-evidence`. Офлайн-модель в этом примере проверяет конвейер на
+синтетических данных и возвращает HOLD. [Схема плана](contracts/walk-forward-plan.schema.json).
+
+Чтобы воспроизвести дневной отчёт, используйте `walk-forward-evidence`.
+Протокол фиксирует план, ленту, даты и бенчмарки до запуска. Команда
+выполняет анализ по каждому срезу, пересчитывает NAV и сохраняет хеш шагов
+и производного replay. Список дат должен покрывать все сутки UTC,
+а позиции стратегии и бенчмарка требуют отметок в пределах указанного
+возраста. `statistics` сверяет происхождение отчёта с протоколом. Для
+проверки сохранённого файла передайте независимо записанный хеш через
+`--evidence-sha256`. [Пример протокола](services/evaluation/examples/walk-forward-protocol.json).
+
+```powershell
+$walkProtocol = (Resolve-Path services/evaluation/examples/walk-forward-protocol.json).Path
+$walkProtocolHash = (uv --directory services/evaluation run --offline --frozen tradingbot-evaluation freeze-statistics $walkProtocol | ConvertFrom-Json).protocol_sha256
+uv --directory services/evaluation run --offline --frozen tradingbot-evaluation walk-forward-evidence $walkProtocol $walkPlan $walkTape --research-python $walkPython --archive-root $walkArchive --protocol-sha256 $walkProtocolHash > $walkEvidencePath
+$walkEvidenceHash = (Get-FileHash $walkEvidencePath).Hash.ToLowerInvariant()
+uv --directory services/evaluation run --offline --frozen tradingbot-evaluation statistics $walkProtocol $walkEvidencePath --protocol-sha256 $walkProtocolHash --evidence-sha256 $walkEvidenceHash
+```
+
+Для сравнения конфигураций `ablation-evidence` выполняет все варианты
+из одного протокола на общих датах, исходном капитале, архиве и ленте.
+У каждого варианта свой виртуальный портфель. Общий лимит проверяется
+до запуска, а отчёт содержит расход вызовов, хеши шагов и конфигураций.
+В примере сравниваются полный граф, граф без памяти, один аналитик
+и граф с производной меткой фактического FIFO-исхода.
+[Протокол](services/evaluation/examples/ablation-protocol.json) · [План](contracts/valid-ablation-walk-plan.json).
+
+```powershell
+$ablationProtocol = (Resolve-Path services/evaluation/examples/ablation-protocol.json).Path
+$ablationPlan = (Resolve-Path contracts/valid-ablation-walk-plan.json).Path
+$ablationArchive = (Resolve-Path services/research/examples/paper-reflection).Path
+$ablationPin = (uv --directory services/evaluation run --offline --frozen tradingbot-evaluation freeze-statistics $ablationProtocol | ConvertFrom-Json).protocol_sha256
+uv --directory services/evaluation run --offline --frozen tradingbot-evaluation ablation-evidence $ablationProtocol $ablationPlan $walkTape --research-python $walkPython --archive-root $ablationArchive --protocol-sha256 $ablationPin > $ablationEvidencePath
+$ablationEvidenceHash = (Get-FileHash $ablationEvidencePath).Hash.ToLowerInvariant()
+uv --directory services/evaluation run --offline --frozen tradingbot-evaluation statistics $ablationProtocol $ablationEvidencePath --protocol-sha256 $ablationPin --evidence-sha256 $ablationEvidenceHash
+```
+
+Для forward-эксперимента перечислите в плане файлы запуска стратегии и
+каждого альтернативного варианта. Первая команда вычисляет
+`configuration_sha256` для протокола оценки. После заполнения этого поля
+сохраните результат `freeze-forward` и его SHA-256 отдельно от рабочих
+файлов. `verify-forward` повторно проверяет содержимое файлов, состав
+сравнений и протокол по сохранённому хешу. Время регистрации подтверждается
+внешней записью.
+
+```powershell
+uv --directory services/evaluation run --offline --frozen tradingbot-evaluation forward-config-sha256 $forwardPlan --root $workspace
+uv --directory services/evaluation run --offline --frozen tradingbot-evaluation freeze-forward $forwardPlan $protocolPath --root $workspace > $freezePath
+$freezeHash = (Get-FileHash $freezePath).Hash.ToLowerInvariant()
+uv --directory services/evaluation run --offline --frozen tradingbot-evaluation verify-forward $freezePath $protocolPath --root $workspace --freeze-sha256 $freezeHash
+```
+
+[Пример локального плана](contracts/valid-forward-plan.json) · [Схема фиксации](contracts/forward-freeze.schema.json).
+
 Для проверки протокола сравнения `freeze-statistics` выводит SHA-256
 заранее зарегистрированных периодов, бенчмарков и параметров блочного bootstrap.
 Команда `statistics` сверяет этот хеш, даты NAV и доступность входов. Пример
@@ -409,6 +593,12 @@ NAV учитывают симулированный спред и комисси
 go -C services/control run ./cmd/paper-nav --input $paperNavInput --sha256 $inputHash
 uv --directory services/evaluation run --offline --frozen tradingbot-evaluation paper-evidence examples/paper-cash-protocol.json examples/paper-cash-nav.json --protocol-sha256 811c97f1b0d0c36d9473ab8612af964d6e2e8fc1d759728e5d46c89db35e417f
 ```
+
+Для синтетического сравнения с индексом полной доходности передайте
+`--benchmark-input`. Протокол фиксирует хеш ряда, а его файл сообщает
+время получения каждого значения и модельный расход на вход.
+Пропущенная дата, будущая или устаревшая оценка останавливают расчёт.
+[Пример протокола](services/evaluation/examples/paper-total-return-protocol.json) · [Схема бенчмарка](contracts/paper-benchmark.schema.json).
 
 Для `operating_net` используйте протокол 0.2 с хешем cost ledger и
 передайте `--operating-costs` в `statistics`. Команда учитывает отнесённые

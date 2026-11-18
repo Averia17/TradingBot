@@ -1,4 +1,6 @@
 import json
+from hashlib import sha256
+from pathlib import Path
 
 import msgspec
 import pytest
@@ -134,6 +136,66 @@ def derive(replay, manifest):
         protocol, replay, expected_protocol_sha256=protocol_sha256(protocol)
     )
     return protocol, evidence
+
+
+def test_durable_research_cli_input_feeds_frozen_daily_evidence(tmp_path, capsys):
+    root = Path(__file__).resolve().parents[3]
+    export = root / "contracts" / "valid-research-replay-export.json"
+    execution = quote("TSLA", 4, "99.99", "100.00")
+    execution["observed_at"] = execution["available_at"] = "2026-10-04T12:02:00Z"
+    tape = tmp_path / "tape.json"
+    tape.write_bytes(
+        dumps(
+            {
+                **replay_document(),
+                "commission_bps": 10,
+                "quotes": [
+                    quote("TSLA", 2, "99.99", "100.00", hour=0),
+                    quote("TSLA", 4, "100.00", "100.00"),
+                    execution,
+                    quote("TSLA", 5, "105.00", "105.01"),
+                ],
+                "orders": [],
+                "cash_dividends": [],
+            }
+        )
+    )
+    args = [
+        "research-replay",
+        str(export),
+        str(tape),
+        "--export-sha256",
+        sha256(export.read_bytes()).hexdigest(),
+        "--tape-sha256",
+        sha256(tape.read_bytes()).hexdigest(),
+        "--require-snapshot-continuity",
+    ]
+    assert main(args) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["snapshot_continuity_verified"] is True
+    assert main([*args, "--emit-replay-input"]) == 0
+    replay = load_replay(capsys.readouterr().out.encode())
+    assert run_replay(replay)["normalized_input_sha256"] == report["normalized_input_sha256"]
+
+    manifest = manifest_document(report["normalized_input_sha256"])
+    manifest["splits"].update(
+        train_start="2026-10-02",
+        validation_start="2026-10-03",
+        test_start="2026-10-04",
+        end_exclusive="2026-10-06",
+    )
+    manifest["expected_nav_dates"] = [f"2026-10-{day:02d}" for day in range(2, 6)]
+    protocol, evidence = derive(replay, manifest)
+    assert [day.nav_usd["fixture-strategy"] for day in evidence.daily_nav] == [
+        "1000.00",
+        "1000.00",
+        "999.89",
+        "1004.90",
+    ]
+    statistics = evaluate_statistics(
+        protocol, evidence, expected_protocol_sha256=protocol_sha256(protocol)
+    )
+    assert statistics["alpha_measured"] is False
 
 
 def test_daily_native_marks_benchmark_cash_dividends_and_delayed_quotes():

@@ -7,6 +7,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,8 +20,10 @@ import (
 	"tradingbot/control/internal/jobs"
 	"tradingbot/control/internal/ledger"
 	"tradingbot/control/internal/paperapply"
+	"tradingbot/control/internal/papermemory"
 	"tradingbot/control/internal/paperrisk"
 	"tradingbot/control/internal/papersim"
+	"tradingbot/control/internal/paperthesis"
 )
 
 func TestFollowPinsQuoteAndRecoversCommittedReservationFromPostgres(t *testing.T) {
@@ -28,6 +32,9 @@ func TestFollowPinsQuoteAndRecoversCommittedReservationFromPostgres(t *testing.T
 	})
 	t.Run("timeout", func(t *testing.T) {
 		testFollowRecovery(t, "timeout", "unknown")
+	})
+	t.Run("reject", func(t *testing.T) {
+		testFollowRecovery(t, "reject", "cancelled")
 	})
 }
 
@@ -187,18 +194,132 @@ func testFollowRecovery(t *testing.T, quoteOutcome, orderStatus string) {
 	if err != nil || settled.Version != 3 {
 		t.Fatalf("recovered ledger: %+v, %v", settled, err)
 	}
-	if quoteOutcome == "fill" {
+	switch quoteOutcome {
+	case "fill":
 		if settled.CashUSD != "899.8" || settled.ReservedCashUSD != "0" ||
 			len(settled.Positions) != 1 || settled.Positions[0].QuantityRaw != "500" {
 			t.Fatalf("fill accounted incorrectly: %+v", settled)
 		}
-	} else if settled.CashUSD != "1000" || settled.ReservedCashUSD != "100.2" || len(settled.Positions) != 0 {
-		t.Fatalf("timeout lost its reservation or fabricated a fill: %+v", settled)
+	case "timeout":
+		if settled.CashUSD != "1000" || settled.ReservedCashUSD != "100.2" || len(settled.Positions) != 0 {
+			t.Fatalf("timeout lost its reservation or fabricated a fill: %+v", settled)
+		}
+		verifyTimeoutReconciliation(t, ctx, dsn, clock, dir, paper, research, recovered.Application.Execution.Order)
+		if replayed := pass("applied"); !bytes.Equal(encode(t, recovered), encode(t, replayed)) {
+			t.Fatal("later reconciliation changed the original application receipt")
+		}
+	case "reject":
+		if settled.CashUSD != "1000" || settled.ReservedCashUSD != "0" || len(settled.Positions) != 0 {
+			t.Fatalf("rejected fixture did not return the reserve without filling: %+v", settled)
+		}
+		verifyShadowRejection(t, ctx, dsn, clock(), paper, settled, recovered.Application.Execution.Order)
 	}
 	input.SnapshotContext.Marks[0].PriceUSD = "21"
 	saveDocument(t, dir, "request", encode(t, input))
 	if err := run(ctx, dsn, args, &bytes.Buffer{}, clock); !errors.Is(err, ledger.ErrConflict) {
 		t.Fatalf("changed application request: %v", err)
+	}
+}
+
+func verifyShadowRejection(t *testing.T, ctx context.Context, dsn string, cutoff time.Time, paper *ledger.Store, settled ledger.Account, order ledger.Order) {
+	t.Helper()
+	events, err := paper.Events(ctx, order.AccountID, 0, 10)
+	if err != nil || len(events) != 3 || events[2].Kind != "paper_order.cancelled" {
+		t.Fatalf("no durable simulated rejection: %+v, %v", events, err)
+	}
+	digest := func(raw []byte) string { return fmt.Sprintf("%x", sha256.Sum256(raw)) }
+	observation := func(side, gross, fee string, at time.Time) []byte {
+		return encode(t, map[string]any{
+			"schema_version": "0.1", "source_mode": papersim.Source, "observation_id": "shadow-" + side,
+			"side": side, "instrument": order.Instrument, "quantity_raw": order.QuantityRaw, "gross_usd": gross, "fee_usd": fee,
+			"observed_at": at, "available_at": at, "expires_at": at.Add(time.Minute),
+		})
+	}
+	buy := observation("BUY", "99.9", "0.1", cutoff)
+	sell := observation("SELL", "105", "0.1", cutoff.Add(24*time.Hour))
+	raw := encode(t, map[string]any{
+		"schema_version": "0.1", "source_mode": papersim.Source, "account_id": order.AccountID,
+		"opening_order_id": order.OrderID, "research_job_id": order.ResearchJobID, "as_of": cutoff,
+		"max_observation_age_seconds": 120, "entry_sha256": digest(buy), "exit_sha256": digest(sell),
+	})
+	input, err := paperthesis.ParseShadowInput(raw, digest(raw), buy, sell)
+	if err != nil {
+		t.Fatal(err)
+	}
+	readOnly, err := url.Parse(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	params := readOnly.Query()
+	params.Set("default_transaction_read_only", "on")
+	readOnly.RawQuery = params.Encode()
+	report, err := paperthesis.ReadShadowReport(ctx, readOnly.String(), input)
+	if err != nil || report.Status != "immature" || report.RejectionEventID != events[2].ID ||
+		!report.RejectedAt.Equal(events[2].RecordedAt) || report.Label != nil || report.Exit != nil {
+		t.Fatalf("read-only rejection projection: %+v, %v", report, err)
+	}
+	repeat, err := paperthesis.ReadShadowReport(ctx, readOnly.String(), input)
+	if err != nil || !bytes.Equal(encode(t, report), encode(t, repeat)) {
+		t.Fatalf("shadow projection changed on retry: %+v, %v", repeat, err)
+	}
+	afterAccount, err := paper.GetAccount(ctx, order.AccountID)
+	if err != nil || !bytes.Equal(encode(t, settled), encode(t, afterAccount)) {
+		t.Fatalf("shadow projection changed account: %+v, %v", afterAccount, err)
+	}
+	afterEvents, err := paper.Events(ctx, order.AccountID, 0, 10)
+	if err != nil || !bytes.Equal(encode(t, events), encode(t, afterEvents)) {
+		t.Fatalf("shadow projection changed events: %+v, %v", afterEvents, err)
+	}
+}
+
+func verifyTimeoutReconciliation(t *testing.T, ctx context.Context, dsn string, clock func() time.Time, dir string, paper *ledger.Store, research *jobs.Store, unknown ledger.Order) {
+	t.Helper()
+	received, err := research.Now(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	observation := ledger.ReconciliationObservation{
+		Version: ledger.ReconciliationVersion, Source: ledger.ReconciliationSource,
+		AccountID: unknown.AccountID, OrderID: unknown.OrderID, QuoteID: unknown.QuoteID,
+		ObservationID: "66666666-6666-4666-8666-666666666666", Outcome: "filled",
+		ObservedAt: unknown.CreatedAt, ReceivedAt: received,
+		QuantityRaw: "500", GrossUSD: "99.90", FeeUSD: "0.19",
+	}
+	raw := encode(t, observation)
+	path := saveDocument(t, dir, "observation", raw)
+	digest := sha256.Sum256(raw)
+	args := []string{"reconcile", "--observation", path, "--sha256", strings.Repeat("0", 64)}
+	var output bytes.Buffer
+	if err := run(ctx, dsn, args, &output, clock); err == nil || !strings.Contains(err.Error(), "SHA-256") {
+		t.Fatalf("unpinned observation accepted: %v", err)
+	}
+	args[len(args)-1] = hex.EncodeToString(digest[:])
+	for _, recorded := range []bool{true, false} {
+		output.Reset()
+		if err := run(ctx, dsn, args, &output, clock); err != nil {
+			t.Fatal(err)
+		}
+		var receipt reconciliationReceipt
+		if err := json.Unmarshal(output.Bytes(), &receipt); err != nil || receipt.Recorded != recorded ||
+			receipt.Order.OrderID != unknown.OrderID || receipt.Order.Status != "filled" ||
+			receipt.Order.Fill == nil || receipt.Order.Fill.GrossUSD != "99.9" {
+			t.Fatalf("reconcile receipt: %s %v", output.Bytes(), err)
+		}
+	}
+	account, err := paper.GetAccount(ctx, unknown.AccountID)
+	if err != nil || account.Version != 4 || account.CashUSD != "899.91" || account.ReservedCashUSD != "0" ||
+		len(account.Positions) != 1 || account.Positions[0].QuantityRaw != "500" {
+		t.Fatalf("reconciled account: %+v %v", account, err)
+	}
+	asOf, err := research.Now(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	projection, err := papermemory.Load(ctx, paper, account.ID, asOf)
+	if err != nil || projection.AccountVersion != account.Version || projection.CashUSD != account.CashUSD ||
+		projection.RecordedFeesUSD != "0.19" || len(projection.OpenLots) != 1 ||
+		projection.OpenLots[0].BuyFillEventID != observation.ObservationID {
+		t.Fatalf("reconciliation event disagrees with FIFO projection: %+v %v", projection, err)
 	}
 }
 

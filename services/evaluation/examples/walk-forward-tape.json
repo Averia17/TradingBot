@@ -1,0 +1,36 @@
+{
+  "schema_version": "0.1",
+  "source_mode": "synthetic_fixture",
+  "starting_cash_usd": "1000",
+  "commission_bps": 10,
+  "quotes": [
+    {
+      "symbol": "TSLA",
+      "observed_at": "2026-11-18T09:59:00Z",
+      "available_at": "2026-11-18T09:59:01Z",
+      "bid_usd": "98.10",
+      "ask_usd": "98.12",
+      "bid_size": 100,
+      "ask_size": 100
+    },
+    {
+      "symbol": "TSLA",
+      "observed_at": "2026-11-18T10:02:00Z",
+      "available_at": "2026-11-18T10:02:01Z",
+      "bid_usd": "98.18",
+      "ask_usd": "98.20",
+      "bid_size": 100,
+      "ask_size": 100
+    },
+    {
+      "symbol": "TSLA",
+      "observed_at": "2026-11-18T10:12:00Z",
+      "available_at": "2026-11-18T10:12:01Z",
+      "bid_usd": "98.22",
+      "ask_usd": "98.24",
+      "bid_size": 100,
+      "ask_size": 100
+    }
+  ],
+  "orders": []
+}

@@ -1,0 +1,6 @@
+valid-paper-entry-selection.json text eol=lf
+valid-paper-policy.json text eol=lf
+valid-walk-forward-plan.json text eol=lf
+valid-paper-shadow-entry.json text eol=lf
+valid-paper-shadow-exit.json text eol=lf
+valid-ablation-walk-plan.json text eol=lf

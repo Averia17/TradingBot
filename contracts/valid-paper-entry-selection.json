@@ -1,0 +1,45 @@
+{
+  "selection_schema_version": "0.1",
+  "source_mode": "synthetic_fixture",
+  "snapshot_sha256": "3e479cb9a312d151dbfa41cb11c9bfafae764d0b40b8484ffe5a564ad5327b8f",
+  "stockstats_version": "0.6.9",
+  "job": {
+    "job_schema_version": "0.1",
+    "job_id": "11111111-1111-4111-8111-111111111111",
+    "policy_version": "fixture-paper-v1",
+    "portfolio": {
+      "snapshot_id": "f72108f4-756a-8e8b-931e-891cb579a95c",
+      "as_of": "2026-11-18T10:00:00Z",
+      "currency": "USD",
+      "cash_asset": "USD",
+      "cash_usd": "1000",
+      "reserved_cash_usd": "0",
+      "max_position_pct": "0.2500",
+      "positions": []
+    },
+    "data_manifest": {
+      "ref": "market.json",
+      "sha256": "ffd8118c19c7ee9c8f49b0156d1bf837046fe6acb2bedf701ef14a39da227531"
+    },
+    "requested_symbols": [
+      "NVDA"
+    ],
+    "max_llm_calls": 17
+  },
+  "candidates": [
+    {
+      "symbol": "NVDA",
+      "status": "selected",
+      "priority": "momentum",
+      "momentum_bps": "408.163265",
+      "latest_bar_sha256": "c77d1a6273e5b5f5eb95e42e3a9f28a9dffe0756dfe8103a4d31751952178a81"
+    },
+    {
+      "symbol": "TSLA",
+      "status": "capacity_exhausted",
+      "priority": "momentum",
+      "momentum_bps": "315.789474",
+      "latest_bar_sha256": "97dc11b2dafcc5afe1bac7decd30be40feedd5a5ce5a0f89fabc467905d49708"
+    }
+  ]
+}

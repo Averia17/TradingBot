@@ -31,10 +31,14 @@ type ResearchSource interface {
 	GetResult(context.Context, string) (jobs.Result, error)
 }
 
-type LedgerSource interface {
+type openingSource interface {
 	papermemory.EventReader
-	GetAccount(context.Context, string) (ledger.Account, error)
 	GetOrder(context.Context, string, string) (ledger.Order, error)
+}
+
+type LedgerSource interface {
+	openingSource
+	GetAccount(context.Context, string) (ledger.Account, error)
 }
 
 type View struct {
@@ -95,36 +99,49 @@ func Load(ctx context.Context, research ResearchSource, source LedgerSource, acc
 // projectOpening derives the trigger from the historical prefix. This lets an
 // accepted schedule replay against its original cutoff after the account moves.
 func projectOpening(ctx context.Context, research ResearchSource, source LedgerSource, accountID, orderID string, asOf time.Time) (View, error) {
+	opening, err := readOpening(ctx, research, source, accountID, orderID, asOf)
+	return opening.view, err
+}
+
+type openingProjection struct {
+	view    View
+	book    papermemory.Snapshot
+	fillIDs map[string]struct{}
+}
+
+func readOpening(ctx context.Context, research ResearchSource, source openingSource, accountID, orderID string, asOf time.Time) (openingProjection, error) {
 	if source == nil || research == nil || accountID == "" || orderID == "" || asOf.IsZero() {
-		return View{}, ErrInvalid
+		return openingProjection{}, ErrInvalid
 	}
 	order, err := source.GetOrder(ctx, accountID, orderID)
 	if err != nil {
-		return View{}, fmt.Errorf("read sourced paper opening: %w", err)
+		return openingProjection{}, fmt.Errorf("read sourced paper opening: %w", err)
 	}
 	if order.ResearchJobID == "" {
-		return View{}, ErrUnlinked
+		return openingProjection{}, ErrUnlinked
 	}
 	if order.Side != "BUY" || order.AccountID != accountID || order.OrderID != orderID {
-		return View{}, ErrInvalid
+		return openingProjection{}, ErrInvalid
 	}
 	trace := openingTrace{EventReader: source, orderID: orderID, asOf: asOf, fillIDs: make(map[string]struct{})}
 	book, err := papermemory.Load(ctx, &trace, accountID, asOf)
 	if err != nil {
-		return View{}, err
+		return openingProjection{}, err
 	}
 	if trace.reservedAt.IsZero() || trace.request != order.ReservationRequest {
-		return View{}, fmt.Errorf("%w: opening reservation does not match its event", ErrInvalid)
+		return openingProjection{}, fmt.Errorf("%w: opening reservation does not match its event", ErrInvalid)
 	}
 	decision, err := openingDecision(ctx, research, order.ReservationRequest, trace.reservedAt)
 	if err != nil {
-		return View{}, err
+		return openingProjection{}, err
 	}
 	held, sourced, err := openQuantities(book.OpenLots, order.ReservationRequest, trace.fillIDs)
 	if err != nil {
-		return View{}, err
+		return openingProjection{}, err
 	}
-	view := View{
+	opening := openingProjection{book: book, fillIDs: trace.fillIDs}
+	view := &opening.view
+	*view = View{
 		Version: Version, AccountID: accountID, AccountVersion: book.AccountVersion, AsOf: asOf.UTC(),
 		JobID: order.ResearchJobID, DecisionID: order.DecisionID, OrderID: orderID,
 		Instrument: order.Instrument, Symbol: decision.Symbol, OpeningOrderState: trace.state,
@@ -136,17 +153,17 @@ func projectOpening(ctx context.Context, research ResearchSource, source LedgerS
 		if trace.state == "cancelled" {
 			view.State = "unopened"
 		}
-		return view, nil
+		return opening, nil
 	}
 	expiry := trace.openedAt.Add(time.Duration(view.Horizon.Max) * time.Hour)
 	view.OpenedAt, view.ExpiresAt = &trace.openedAt, &expiry
 	if sourced.Sign() == 0 {
 		view.State = "closed"
-		return view, nil
+		return opening, nil
 	}
 	view.State = "open"
-	view.NextReviewAt, view.ClockReview = clock(view, trace.openedAt, expiry)
-	return view, nil
+	view.NextReviewAt, view.ClockReview = clock(*view, trace.openedAt, expiry)
+	return opening, nil
 }
 
 type openingTrace struct {

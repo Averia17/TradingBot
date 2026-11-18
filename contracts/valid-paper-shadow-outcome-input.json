@@ -1,0 +1,11 @@
+{
+  "schema_version": "0.1",
+  "source_mode": "synthetic_fixture",
+  "account_id": "a0000000-0000-0000-0000-000000000001",
+  "research_job_id": "a0000000-0000-0000-0000-000000000003",
+  "opening_order_id": "a0000000-0000-0000-0000-000000000002",
+  "as_of": "2026-11-17T20:00:20Z",
+  "max_observation_age_seconds": 120,
+  "entry_sha256": "8feed45f6be7af4f31943c877141ccfe6801c3f29798707bf1b426736d21bd78",
+  "exit_sha256": "7ef236022c2372d0792516fce97f54dbdf2723252a4922580b8b6e026f38abba"
+}

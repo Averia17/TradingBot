@@ -17,6 +17,7 @@ import (
 	"tradingbot/control/internal/ledger"
 	"tradingbot/control/internal/paperrisk"
 	"tradingbot/control/internal/papersim"
+	"tradingbot/control/internal/researchscheduler"
 )
 
 const Version = "0.1"
@@ -35,10 +36,11 @@ type PaperStore interface {
 }
 
 type Request struct {
-	Version         string           `json:"paper_apply_schema_version"`
-	JobID           string           `json:"job_id"`
-	SnapshotContext SnapshotContext  `json:"snapshot_context"`
-	Intent          *papersim.Intent `json:"intent,omitempty"`
+	Version             string           `json:"paper_apply_schema_version"`
+	JobID               string           `json:"job_id"`
+	SnapshotContext     SnapshotContext  `json:"snapshot_context"`
+	Intent              *papersim.Intent `json:"intent,omitempty"`
+	EntryScheduleSHA256 string           `json:"entry_schedule_sha256,omitempty"`
 }
 
 type Result struct {
@@ -48,19 +50,14 @@ type Result struct {
 	Execution *papersim.Result `json:"execution,omitempty"`
 }
 
-type dataManifest struct {
-	Ref    string `json:"ref"`
-	SHA256 string `json:"sha256"`
-}
-
 type storedJob struct {
-	Version          string          `json:"job_schema_version"`
-	ID               string          `json:"job_id"`
-	Portfolio        json.RawMessage `json:"portfolio"`
-	RequestedSymbols []string        `json:"requested_symbols"`
-	DataManifest     dataManifest    `json:"data_manifest"`
-	PolicyVersion    string          `json:"policy_version"`
-	MaxLLMCalls      int             `json:"max_llm_calls"`
+	Version          string                             `json:"job_schema_version"`
+	ID               string                             `json:"job_id"`
+	Portfolio        json.RawMessage                    `json:"portfolio"`
+	RequestedSymbols []string                           `json:"requested_symbols"`
+	DataManifest     researchscheduler.ArchiveReference `json:"data_manifest"`
+	PolicyVersion    string                             `json:"policy_version"`
+	MaxLLMCalls      int                                `json:"max_llm_calls"`
 }
 
 type storedResult struct {
@@ -216,10 +213,10 @@ func knownSource(result storedResult, job storedJob, attempt int) bool {
 		PIT        *bool           `json:"intraday_pit_verified"`
 		CostUSD    json.RawMessage `json:"usd_cost"`
 		Provenance struct {
-			JobID        string       `json:"job_id"`
-			Attempt      int          `json:"attempt"`
-			Policy       string       `json:"policy_version"`
-			DataManifest dataManifest `json:"data_manifest"`
+			JobID        string                             `json:"job_id"`
+			Attempt      int                                `json:"attempt"`
+			Policy       string                             `json:"policy_version"`
+			DataManifest researchscheduler.ArchiveReference `json:"data_manifest"`
 		} `json:"provenance"`
 	}
 	if json.Unmarshal(result.Metadata, &metadata) != nil || metadata.Alpha == nil || *metadata.Alpha || metadata.LLMCalls == nil {

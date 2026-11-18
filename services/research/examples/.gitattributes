@@ -1,3 +1,5 @@
 pit-archive.json text eol=lf
 pit-import/*.json text eol=lf
 selection/*.json text eol=lf
+paper-reflection/*.json text eol=lf
+entry-cycles/*.json text eol=lf

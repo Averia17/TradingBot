@@ -1,0 +1,9 @@
+{
+  "schema_version": "0.1",
+  "source_url": "https://www.bls.gov/news.release/archives/empsit_12062024.htm",
+  "released_at": "2024-12-06T13:30:00Z",
+  "observation_date": "2024-10-01",
+  "series_id": "CES_TOTAL_NONFARM_PAYROLL_CHANGE",
+  "value": "36000",
+  "unit": "jobs"
+}

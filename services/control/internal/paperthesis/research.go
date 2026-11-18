@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"tradingbot/control/internal/contract"
+	"tradingbot/control/internal/jobs"
 	"tradingbot/control/internal/ledger"
 )
 
@@ -20,6 +21,10 @@ func openingDecision(ctx context.Context, research ResearchSource, order ledger.
 	if err != nil {
 		return contract.Intent{}, fmt.Errorf("read opening research result: %w", err)
 	}
+	return checkOpeningDecision(job, receipt, order, reservedAt)
+}
+
+func checkOpeningDecision(job jobs.Job, receipt jobs.Result, order ledger.ReservationRequest, reservedAt time.Time) (contract.Intent, error) {
 	if job.ID != order.ResearchJobID || job.Status != "completed" || job.CreatedAt.IsZero() || receipt.JobID != job.ID || receipt.Attempt < 1 ||
 		receipt.CompletedAt.Before(job.CreatedAt) || receipt.CompletedAt.After(reservedAt) {
 		return contract.Intent{}, fmt.Errorf("%w: opening receipt is not bound to the reservation", ErrInvalid)

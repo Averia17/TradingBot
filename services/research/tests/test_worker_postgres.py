@@ -15,7 +15,9 @@ from uuid import uuid4
 
 import pytest
 
+from tradingbot.paper_memory import build_contexts
 from tradingbot.selection import plan_research
+from tradingbot.snapshots import load_snapshot
 
 ROOT = Path(__file__).resolve().parents[3]
 DATABASE_URL = os.environ.get("TRADINGBOT_E2E_DATABASE_URL")
@@ -269,6 +271,20 @@ def test_python_graph_result_is_persisted_by_go_control(tmp_path, archive_mode):
                 "ref": memory_path.name,
                 "sha256": hashlib.sha256(memory_path.read_bytes()).hexdigest(),
             }
+            archived = load_snapshot(tmp_path, manifest, datetime.fromisoformat(cutoff))
+            context = build_contexts(
+                archived, ["TSLA"], policy["policy_version"], include_reflections=True
+            )["TSLA"]
+            (observation,) = json.loads(context.split("\n", 1)[1])["records"]
+            reflection = observation["factual_reflection"]
+            (source,) = [item for item in archived.records if item.kind == "paper_outcome"]
+            assert reflection["source_fill_event_id"] == fill_id
+            assert reflection["source_decision_id"] == observation["payload"]["decision_id"]
+            assert reflection["source_record_sha256"] == source.sha256
+            assert reflection["realized_outcome"] == "loss"
+            assert reflection["pnl_before_exit_fee_usd"] == "-2.00000002"
+            assert reflection["recorded_exit_fee_usd"] == "0.00000002"
+            assert reflection["exit_fee_erased_positive_pre_fee_pnl"] is False
             marks_path = tmp_path / "marks.json"
             marks_path.write_text(
                 json.dumps(
@@ -320,7 +336,36 @@ def test_python_graph_result_is_persisted_by_go_control(tmp_path, archive_mode):
             )
             job = plan["job"]
             assert job is not None and job["requested_symbols"] == ["TSLA"]
-        assert request(port, "/v1/research/jobs", job)[0] == 201
+            raw_selection = json.dumps(plan).encode()
+            selection_path = tmp_path / "selection.json"
+            selection_path.write_bytes(raw_selection)
+            config_path = tmp_path / "entry-schedule.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "entry_schedule_schema_version": "0.1",
+                        "schedule_id": "pytest-entry",
+                        "scheduled_at": cutoff,
+                        "max_lateness_seconds": 120,
+                        "max_job_llm_calls": 32,
+                        "snapshot_context": bound["snapshot_context"],
+                        "selection_sha256": hashlib.sha256(raw_selection).hexdigest(),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            schedule_command = [
+                paper_apply, "schedule-entry",
+                "--config", str(config_path),
+                "--selection", str(selection_path),
+                "--archive-root", str(tmp_path),
+            ]
+            admission = json.loads(subprocess.check_output(schedule_command, env=env, timeout=40))
+            assert admission["created"] is True and admission["job_id"] != job_id
+            job_id = admission["job_id"]
+            path = f"/v1/research/jobs/{job_id}/result"
+        else:
+            assert request(port, "/v1/research/jobs", job)[0] == 201
         with process(worker, research_environment()) as running:
             receipt = wait_for_resource(port, path, control, running)
 
@@ -368,21 +413,10 @@ def test_python_graph_result_is_persisted_by_go_control(tmp_path, archive_mode):
         if archive_mode:
             decisions = [(item["symbol"], item["action"]) for item in result["batch"]["intents"]]
             assert decisions == [("TSLA", "HOLD")]
-            apply_path = tmp_path / "apply.json"
-            apply_path.write_text(
-                json.dumps(
-                    {
-                        "paper_apply_schema_version": "0.1",
-                        "job_id": job_id,
-                        "snapshot_context": bound["snapshot_context"],
-                    }
-                ),
-                encoding="utf-8",
-            )
-            applied = paper_command(
-                paper_apply, policy_path, env, "apply", "--request", str(apply_path)
-            )
-            assert applied == {
+            repeat = json.loads(subprocess.check_output(schedule_command, env=env, timeout=40))
+            assert repeat["created"] is False and repeat["job_id"] == job_id
+            dispatched = paper_command(paper_apply, policy_path, env, "dispatch", "--account", account_id)
+            assert dispatched["job_id"] == job_id and dispatched["application"] == {
                 "paper_apply_schema_version": "0.1",
                 "job_id": job_id,
                 "status": "hold",

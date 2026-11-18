@@ -1,0 +1,48 @@
+{
+  "schema_version": "0.2",
+  "source_mode": "synthetic_fixture",
+  "records": [
+    {
+      "kind": "bar",
+      "provider": "reflection-fixture",
+      "record_id": "closing-bar",
+      "symbol": "TSLA",
+      "revision": 1,
+      "event_time": "2026-11-18T09:59:30Z",
+      "available_at": "2026-11-18T09:59:30Z",
+      "ingested_at": "2026-11-18T09:59:30Z",
+      "payload": {"close": "98", "volume": 10000, "currency": "USD"}
+    },
+    {
+      "kind": "paper_outcome",
+      "provider": "paper-ledger",
+      "record_id": "10000000-0000-4000-8000-000000000001-10000000-0000-4000-8000-000000000005",
+      "symbol": "TSLA",
+      "revision": 1,
+      "event_time": "2026-11-18T09:55:00Z",
+      "available_at": "2026-11-18T09:55:01Z",
+      "ingested_at": "2026-11-18T09:55:01Z",
+      "payload": {
+        "schema_version": "0.1",
+        "source_mode": "paper_simulated_ledger",
+        "accounting_method": "fifo_recording_order_usd_scale8_v1",
+        "account_id": "10000000-0000-4000-8000-000000000001",
+        "account_version": 5,
+        "fill_event_id": "10000000-0000-4000-8000-000000000005",
+        "decision_id": "10000000-0000-4000-8000-000000000006",
+        "policy_version": "fixture-paper-v1",
+        "risk_group": "fixture-equities",
+        "instrument": {
+          "instrument_id": "fixture:TSLA",
+          "registry_version": "fixture-v1",
+          "decimals": 0
+        },
+        "quantity_raw": "1",
+        "gross_usd": "99.00000002",
+        "fee_usd": "0.00000003",
+        "cost_basis_usd": "99",
+        "net_pnl_usd": "-0.00000001"
+      }
+    }
+  ]
+}

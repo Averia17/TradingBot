@@ -59,6 +59,64 @@
       "title": "ArchiveReference",
       "type": "object"
     },
+    "BLSCapture": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "bls_release_review",
+          "title": "Kind",
+          "type": "string"
+        },
+        "source": {
+          "$ref": "#/$defs/ArchiveReference"
+        },
+        "reviewed_at": {
+          "format": "date-time",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,6})?(?:Z|[+-][0-9]{2}:[0-9]{2})$",
+          "title": "Reviewed At",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "source",
+        "reviewed_at"
+      ],
+      "title": "BLSCapture",
+      "type": "object"
+    },
+    "MarketCapture": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "normalized_market",
+          "title": "Kind",
+          "type": "string"
+        },
+        "source": {
+          "$ref": "#/$defs/ArchiveReference"
+        },
+        "captured_at": {
+          "format": "date-time",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,6})?(?:Z|[+-][0-9]{2}:[0-9]{2})$",
+          "title": "Captured At",
+          "type": "string"
+        },
+        "provider": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+          "title": "Provider",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "source",
+        "captured_at",
+        "provider"
+      ],
+      "title": "MarketCapture",
+      "type": "object"
+    },
     "SECCapture": {
       "additionalProperties": false,
       "properties": {
@@ -128,6 +186,8 @@
         "discriminator": {
           "mapping": {
             "alfred_observations": "#/$defs/ALFREDCapture",
+            "bls_release_review": "#/$defs/BLSCapture",
+            "normalized_market": "#/$defs/MarketCapture",
             "sec_submissions": "#/$defs/SECCapture"
           },
           "propertyName": "kind"
@@ -138,6 +198,12 @@
           },
           {
             "$ref": "#/$defs/ALFREDCapture"
+          },
+          {
+            "$ref": "#/$defs/BLSCapture"
+          },
+          {
+            "$ref": "#/$defs/MarketCapture"
           }
         ]
       },

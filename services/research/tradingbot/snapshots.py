@@ -3,6 +3,7 @@
 import argparse
 import hashlib
 import json
+import re
 from collections.abc import Iterable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -14,6 +15,7 @@ from pydantic import (
     JsonValue,
     TypeAdapter,
     ValidationError,
+    WithJsonSchema,
     field_validator,
     model_validator,
 )
@@ -23,10 +25,13 @@ from tradingbot.paper_memory import PAPER_KIND, validate_record
 
 MAX_ARCHIVE_BYTES = 16 * 1024 * 1024
 Identifier = Annotated[str, Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")]
-RecordKind = Literal["bar", "news", "filing", "action", "macro", "paper_outcome"]
+SHA256 = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
+RecordKind = Literal["bar", "news", "filing", "action", "macro", "paper_outcome", "listing"]
 SourceMode = Literal["synthetic_fixture", "local_archive"]
 Visibility = Literal["source_published", "locally_ingested"]
 _symbols = TypeAdapter(tuple[Symbol, ...])
+_identifiers = TypeAdapter(tuple[Identifier, ...])
+_identifier = TypeAdapter(Identifier)
 
 
 def _utc(value: datetime | str) -> datetime:
@@ -41,6 +46,23 @@ def _utc(value: datetime | str) -> datetime:
 
 
 UTCDateTime = Annotated[datetime, BeforeValidator(_utc)]
+_CAPTURE_TIME_PATTERN = (
+    r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}"
+    r"(?:\.[0-9]{1,6})?(?:Z|[+-][0-9]{2}:[0-9]{2})$"
+)
+
+
+def _capture_time(value: datetime | str) -> datetime:
+    if isinstance(value, str) and re.fullmatch(_CAPTURE_TIME_PATTERN, value) is None:
+        raise ValueError("capture timestamps require a timezone and at most six fractional digits")
+    return _utc(value)
+
+
+CaptureTime = Annotated[
+    datetime,
+    BeforeValidator(_capture_time),
+    WithJsonSchema({"type": "string", "format": "date-time", "pattern": _CAPTURE_TIME_PATTERN}),
+]
 
 
 def _digest(value: Contract) -> str:
@@ -52,7 +74,7 @@ class ArchiveReference(Contract):
     """Reference shape shared with the research job's data_manifest field."""
 
     ref: Annotated[str, Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,511}$")]
-    sha256: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
+    sha256: SHA256
 
     @field_validator("ref")
     @classmethod
@@ -60,6 +82,16 @@ class ArchiveReference(Contract):
         if any(part in {"", ".", ".."} for part in value.split("/")):
             raise ValueError("archive reference must use literal relative path components")
         return value
+
+
+class Listing(Contract):
+    security_id: Identifier
+    status: Literal["listed", "delisted"]
+    effective_at: CaptureTime
+
+
+class ArchivedListing(Listing):
+    source_sha256: SHA256
 
 
 class ArchiveRecord(Contract):
@@ -79,6 +111,10 @@ class ArchiveRecord(Contract):
             raise ValueError("timestamps must satisfy event_time <= available_at <= ingested_at")
         if self.kind == "bar" and self.symbol is None:
             raise ValueError("bar records require a symbol")
+        if self.kind == "listing":
+            if self.symbol is None:
+                raise ValueError("listing records require a symbol")
+            ArchivedListing.model_validate(self.payload)
         validate_record(self)
         return self
 
@@ -133,6 +169,21 @@ class PointInTimeSnapshot(Contract):
     @property
     def sha256(self) -> str:
         return _digest(self)
+
+
+class UniverseEntry(Contract):
+    security_id: Identifier
+    status: Literal["listed", "delisted", "missing"]
+    evidence: ArchiveRecord | None
+
+
+class PointInTimeUniverse(Contract):
+    schema_version: Literal["0.1"] = "0.1"
+    source_mode: SourceMode
+    archive: ArchiveReference
+    as_of: UTCDateTime
+    provider: Identifier
+    entries: tuple[UniverseEntry, ...]
 
 
 def _unique_keys(pairs: list[tuple[str, JsonValue]]) -> dict[str, JsonValue]:
@@ -212,30 +263,102 @@ def load_snapshot(
     )
 
 
+def load_universe(
+    root: Path,
+    manifest: ArchiveReference | dict,
+    as_of: datetime,
+    provider: str,
+    *,
+    security_ids: Iterable[str] | None = None,
+) -> PointInTimeUniverse:
+    """Resolve effective listing status using only revisions received by cutoff."""
+    snapshot = load_snapshot(root, manifest, as_of, visibility="locally_ingested")
+    return _project_universe(snapshot, provider, security_ids)
+
+
+def _project_universe(
+    snapshot: PointInTimeSnapshot,
+    provider: str,
+    security_ids: Iterable[str] | None = None,
+) -> PointInTimeUniverse:
+    """Project listing events from a locally ingested, unfiltered snapshot."""
+    provider = _identifier.validate_python(provider)
+    requested = None if security_ids is None else set(_identifiers.validate_python(security_ids))
+    states: dict[str, tuple[ArchivedListing, ArchiveRecord]] = {}
+    effective = set()
+    for record in snapshot.records:
+        if record.kind != "listing" or record.provider != provider:
+            continue
+        listing = ArchivedListing.model_validate(record.payload)
+        key = listing.security_id, listing.effective_at
+        if listing.effective_at > snapshot.as_of or (
+            requested is not None and listing.security_id not in requested
+        ):
+            continue
+        if key in effective:
+            raise ValueError("ambiguous listing events for the same security and effective instant")
+        effective.add(key)
+        prior = states.get(listing.security_id)
+        if prior is None or listing.effective_at > prior[0].effective_at:
+            states[listing.security_id] = listing, record
+
+    entries = []
+    for security_id in sorted(states.keys() if requested is None else requested):
+        if security_id in states:
+            listing, record = states[security_id]
+            entries.append(
+                UniverseEntry(security_id=security_id, status=listing.status, evidence=record)
+            )
+        else:
+            entries.append(UniverseEntry(security_id=security_id, status="missing", evidence=None))
+    return PointInTimeUniverse(
+        source_mode=snapshot.source_mode,
+        archive=snapshot.archive,
+        as_of=snapshot.as_of,
+        provider=provider,
+        entries=tuple(entries),
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--ref", required=True, help="Relative file under the archive root")
     parser.add_argument("--sha256", required=True, help="Expected SHA-256 of exact file bytes")
     parser.add_argument("--as-of", type=_utc, required=True, help="ISO timestamp with timezone")
-    parser.add_argument(
-        "--visibility", choices=("source_published", "locally_ingested"), default="source_published"
-    )
+    parser.add_argument("--visibility", choices=("source_published", "locally_ingested"))
     parser.add_argument("--symbol", action="append", help="Limit to a symbol; repeat as needed")
+    parser.add_argument("--universe-provider", help="Project the locally known listing roster")
+    parser.add_argument("--security-id", action="append", help="Limit roster by stable ID")
     args = parser.parse_args()
+    if args.security_id and not args.universe_provider:
+        parser.error("--security-id requires --universe-provider")
+    if args.universe_provider and (args.symbol or args.visibility == "source_published"):
+        parser.error("universe projections use security IDs and local receipt")
+    reference = {"ref": args.ref, "sha256": args.sha256}
     try:
-        snapshot = load_snapshot(
-            args.root,
-            {"ref": args.ref, "sha256": args.sha256},
-            args.as_of,
-            symbols=args.symbol,
-            visibility=args.visibility,
-        )
+        if args.universe_provider:
+            universe = load_universe(
+                args.root,
+                reference,
+                args.as_of,
+                args.universe_provider,
+                security_ids=args.security_id,
+            )
+            payload = universe.model_dump(mode="json")
+        else:
+            snapshot = load_snapshot(
+                args.root,
+                reference,
+                args.as_of,
+                symbols=args.symbol,
+                visibility=args.visibility or "source_published",
+            )
+            payload = snapshot.model_dump(mode="json") | {"snapshot_sha256": snapshot.sha256}
     except ValidationError:
         parser.exit(2, "archive rejected: invalid archive or manifest schema\n")
     except (OSError, ValueError, RecursionError) as exc:
         parser.exit(2, f"archive rejected: {exc}\n")
-    payload = snapshot.model_dump(mode="json") | {"snapshot_sha256": snapshot.sha256}
     print(json.dumps(payload, indent=2, sort_keys=True))
     return 0
 

@@ -138,6 +138,53 @@
       },
       "else": {"required": ["trigger", "job_id", "created_at", "snapshot"]}
     },
+    "EntryScheduleRequest": {
+      "description": "One owner-authorized calendar occurrence over a SHA-256-pinned selection receipt. Account ID, schedule ID and scheduled UTC instant determine the durable job ID.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["entry_schedule_schema_version", "schedule_id", "scheduled_at", "max_lateness_seconds", "max_job_llm_calls", "snapshot_context", "selection_sha256"],
+      "properties": {
+        "entry_schedule_schema_version": {"const": "0.1"},
+        "schedule_id": {"$ref": "research-job.schema.json#/$defs/Identifier"},
+        "scheduled_at": {"type": "string", "format": "date-time"},
+        "max_lateness_seconds": {"type": "integer", "minimum": 1, "maximum": 3600},
+        "max_job_llm_calls": {"type": "integer", "minimum": 1, "maximum": 64},
+        "snapshot_context": {"$ref": "#/$defs/SnapshotContext"},
+        "selection_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    },
+    "EntrySelection": {
+      "description": "Selection receipt as emitted by tradingbot.selection. Candidate diagnostics and the suggested job ID are informational.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["selection_schema_version", "source_mode", "snapshot_sha256", "stockstats_version", "job", "candidates"],
+      "properties": {
+        "selection_schema_version": {"const": "0.1"},
+        "source_mode": {"enum": ["synthetic_fixture", "local_archive"]},
+        "snapshot_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "stockstats_version": {"type": "string", "minLength": 1, "maxLength": 128},
+        "job": {"anyOf": [{"$ref": "research-job.schema.json#/$defs/JobRequest"}, {"type": "null"}]},
+        "candidates": {"type": "array", "maxItems": 100, "items": {"type": "object"}}
+      }
+    },
+    "EntryScheduleReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["entry_schedule_schema_version", "status", "created"],
+      "properties": {
+        "entry_schedule_schema_version": {"const": "0.1"},
+        "status": {"enum": ["not_due", "not_selected", "missed", "queued", "leased", "failed", "expired", "completed"]},
+        "created": {"type": "boolean"},
+        "job_id": {"$ref": "paper-account.schema.json#/$defs/AccountID"},
+        "created_at": {"type": "string", "format": "date-time"}
+      },
+      "if": {"properties": {"status": {"enum": ["not_due", "not_selected", "missed"]}}},
+      "then": {
+        "properties": {"created": {"const": false}},
+        "not": {"anyOf": [{"required": ["job_id"]}, {"required": ["created_at"]}]}
+      },
+      "else": {"required": ["job_id", "created_at"]}
+    },
     "Request": {
       "type": "object",
       "additionalProperties": false,
@@ -146,6 +193,7 @@
         "paper_apply_schema_version": {"const": "0.1"},
         "job_id": {"$ref": "paper-account.schema.json#/$defs/AccountID"},
         "snapshot_context": {"$ref": "#/$defs/SnapshotContext"},
+        "entry_schedule_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
         "intent": {"anyOf": [{"$ref": "paper-replay.schema.json#/$defs/Intent"}, {"type": "null"}]}
       }
     },

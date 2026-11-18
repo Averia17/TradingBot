@@ -4,17 +4,18 @@ import hashlib
 import json
 from collections import defaultdict
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from importlib.metadata import version
 from importlib.util import find_spec
 from itertools import chain
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Event, Lock
+from time import monotonic
 from types import SimpleNamespace
 from typing import Annotated, Literal
 from unittest.mock import patch
-from uuid import UUID
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 from langchain_core.language_models import SimpleChatModel
 from langchain_core.runnables import RunnableLambda
@@ -32,6 +33,7 @@ from tradingbot.paper_memory import (
     PAPER_CONTEXT_BYTES,
     PAPER_CONTEXT_RECORDS,
     PAPER_KIND,
+    PAPER_REFLECTION_METHOD,
     build_contexts,
 )
 from tradingbot.research import collect_reports, create_decisions
@@ -45,7 +47,9 @@ SCRIPTED_ARCHIVE_REPORT = "Scripted offline evidence uses archived prompt contex
 GRAPH_CONSTRUCTION = Lock()
 ARCHIVE_CONTEXT_BYTES = 2048
 ARCHIVE_CONTEXT_RECORDS = 8
+HISTORICAL_STEP_TIMEOUT = timedelta(seconds=60)
 Identifier = Annotated[str, Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")]
+HistoricalVariant = Literal["full_graph", "no_memory", "single_analyst", "factual_reflection"]
 
 
 class OfflineAnalysisCancelled(RuntimeError):
@@ -234,6 +238,7 @@ def _offline_graph(
     budget: OfflineBudget,
     archive_contexts: dict[str, str],
     memory_contexts: dict[str, str],
+    analysts: tuple[str, ...],
 ):
     from tradingagents.graph import trading_graph
 
@@ -263,7 +268,7 @@ def _offline_graph(
         ),
         patch.object(trading_graph, "set_config", return_value=None),
     ):
-        return OfflineGraph(selected_analysts=ANALYSTS, config=config, callbacks=[budget])
+        return OfflineGraph(selected_analysts=analysts, config=config, callbacks=[budget])
 
 
 def analyze_offline(
@@ -279,8 +284,76 @@ def analyze_offline(
     if type(attempt) is not int or not 1 <= attempt <= 3 or attempt_deadline.utcoffset() is None:
         raise ValueError("invalid offline attempt identity or deadline")
 
+    return _analyze_offline(request, attempt, attempt_deadline, cancelled, authorize_call, archive_root)
+
+
+def analyze_historical(
+    job: OfflineJob,
+    completed_at: datetime,
+    archive_root: Path,
+    *,
+    variant: HistoricalVariant = "full_graph",
+) -> dict:
+    """Use the pinned graph for a synthetic historical step with a simulated clock."""
+    now = datetime.now(UTC)
+    if completed_at.utcoffset() != timedelta(0) or not job.portfolio.as_of <= completed_at <= now:
+        raise ValueError("historical completion must be UTC, at or after the cutoff and in the past")
+
+    return _analyze_offline(
+        job, 1, now + HISTORICAL_STEP_TIMEOUT, Event(), None, archive_root,
+        historical_completed_at=completed_at,
+        historical_variant=variant,
+    )
+
+
+def _historical_batch(
+    decision: DecisionBatch, job: OfflineJob, completed_at: datetime, config_sha256: str, upstream_sha: str
+) -> DecisionBatch:
+    identity = json.dumps(
+        {
+            "completed_at": completed_at.isoformat(),
+            "config_sha256": config_sha256,
+            "job": job.model_dump(mode="json"),
+            "upstream_sha": upstream_sha,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    run_id = uuid5(NAMESPACE_URL, "https://tradingbot.local/historical-step/0.1/" + identity)
+    return DecisionBatch.model_validate(
+        decision.model_dump() | {
+            "run_id": run_id,
+            "created_at": completed_at,
+            "expires_at": completed_at + (decision.expires_at - decision.created_at),
+            "intents": [
+                intent.model_dump() | {"decision_id": uuid5(run_id, intent.symbol)}
+                for intent in decision.intents
+            ],
+        }
+    )
+
+
+def _analyze_offline(
+    request: OfflineJob | dict,
+    attempt: int,
+    attempt_deadline: datetime,
+    cancelled: Event,
+    authorize_call: Callable[[UUID], None] | None,
+    archive_root: Path | None,
+    *,
+    historical_completed_at: datetime | None = None,
+    historical_variant: HistoricalVariant = "full_graph",
+) -> dict:
+    historical = historical_completed_at is not None
+    analysts = ("market",) if historical_variant == "single_analyst" else ANALYSTS
+    wall_limit = monotonic() + HISTORICAL_STEP_TIMEOUT.total_seconds() if historical else None
+
     def ensure_active():
-        if cancelled.is_set() or datetime.now(UTC) >= attempt_deadline:
+        if (
+            cancelled.is_set()
+            or datetime.now(UTC) >= attempt_deadline
+            or (wall_limit is not None and monotonic() >= wall_limit)
+        ):
             raise OfflineAnalysisCancelled("offline research attempt is no longer active")
 
     ensure_active()
@@ -298,8 +371,14 @@ def analyze_offline(
             symbols=symbols,
             visibility="locally_ingested",
         )
+        if historical and snapshot.source_mode != "synthetic_fixture":
+            raise ValueError("historical steps require a synthetic archive")
         archive_contexts = _archive_contexts(snapshot, symbols)
-        memory_contexts = build_contexts(snapshot, symbols, job.policy_version)
+        if historical_variant != "no_memory":
+            memory_contexts = build_contexts(
+                snapshot, symbols, job.policy_version,
+                include_reflections=historical_variant == "factual_reflection",
+            )
         ensure_active()
     upstream_version, upstream_sha = _verified_upstream()
     ensure_active()
@@ -339,10 +418,16 @@ def analyze_offline(
             stable_config["paper_memory_context_limits"] = [
                 PAPER_CONTEXT_BYTES, PAPER_CONTEXT_RECORDS,
             ]
+        if historical:
+            stable_config["offline_clock"] = "synthetic-historical-step-0.1"
+            if historical_variant != "full_graph":
+                stable_config["historical_variant"] = historical_variant
+            if historical_variant == "factual_reflection":
+                stable_config["paper_reflection_method"] = PAPER_REFLECTION_METHOD
         config_hash = hashlib.sha256(
-            json.dumps({"config": stable_config, "analysts": ANALYSTS}, sort_keys=True).encode()
+            json.dumps({"config": stable_config, "analysts": analysts}, sort_keys=True).encode()
         ).hexdigest()
-        graph = _offline_graph(config, model, budget, archive_contexts, memory_contexts)
+        graph = _offline_graph(config, model, budget, archive_contexts, memory_contexts, analysts)
         reports = collect_reports(
             TradingAgentsAdapter(graph), symbols, job.portfolio.as_of.date().isoformat(), job.portfolio
         )
@@ -354,9 +439,14 @@ def analyze_offline(
         budget.check_active()
         decision = create_decisions(model, reports, job.portfolio)
         budget.check_active()
-        batch = DecisionBatch.model_validate(
-            decision.model_dump() | {"expires_at": min(decision.expires_at, attempt_deadline)}
-        )
+        if historical_completed_at is None:
+            batch = DecisionBatch.model_validate(
+                decision.model_dump() | {"expires_at": min(decision.expires_at, attempt_deadline)}
+            )
+        else:
+            batch = _historical_batch(
+                decision, job, historical_completed_at, config_hash, upstream_sha
+            )
     budget.check_active()
     return {
         "result_schema_version": "0.2",

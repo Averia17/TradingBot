@@ -4,7 +4,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID
 
-from tradingbot.selection import SelectionRequest, plan_research
+from tradingbot.selection import SELECTION_INPUT, plan_research
 
 NOW = datetime(2026, 11, 18, 10, tzinfo=UTC)
 
@@ -167,10 +167,82 @@ def test_sparse_or_split_crossing_history_is_excluded(tmp_path):
     ] == "bar_gap_above_limit"
 
 
+def test_pinned_roster_excludes_delisted_missing_and_mixed_issuer_history(tmp_path):
+    listed_at = NOW - timedelta(days=2)
+    delisted_at = NOW - timedelta(days=1)
+    new_at = NOW - timedelta(hours=4)
+
+    def listing(event, security, status, effective):
+        return entry(
+            "listing",
+            "TSLA",
+            event,
+            listed_at,
+            {
+                "security_id": security,
+                "status": status,
+                "effective_at": effective.isoformat(),
+                "source_sha256": "a" * 64,
+            },
+        )
+
+    def pricing(security, prices):
+        records = bars("TSLA", prices)
+        for index, record in enumerate(records):
+            record["record_id"] = f"{security}-{index}"
+            record["payload"]["security_id"] = security
+        return records
+
+    roster = [
+        listing("old-list", "id-old", "listed", listed_at),
+        listing("old-delist", "id-old", "delisted", delisted_at),
+        listing("new-list", "id-new", "listed", new_at),
+    ]
+    new_bars = pricing("id-new", [100, 110, 120])
+
+    def guarded(data, security, *, held=False):
+        config = request(tmp_path, data) | {
+            "schema_version": "0.2",
+            "universe_provider": "selection-fixture",
+            "candidates": [{"symbol": "TSLA", "allowed": True, "security_id": security}],
+        }
+        if not held:
+            config["portfolio"]["positions"] = []
+        return config
+
+    missing = plan_research(tmp_path, guarded(roster + new_bars, "id-missing"))
+    assert missing["job"] is None
+    assert missing["candidates"][0]["status"] == "universe_evidence_missing"
+
+    old = plan_research(tmp_path, guarded(roster + new_bars, "id-old"))
+    assert old["job"] is None
+    assert old["candidates"][0]["status"] == "security_delisted"
+
+    mixed = plan_research(
+        tmp_path, guarded(roster + new_bars + pricing("id-old", [10, 11, 18]), "id-new")
+    )
+    assert mixed["job"] is None
+    assert mixed["candidates"][0]["status"] == "ambiguous_security_history"
+
+    current = plan_research(tmp_path, guarded(roster + new_bars, "id-new"))
+    assert current["job"]["requested_symbols"] == ["TSLA"]
+    assert current["candidates"][0]["security_id"] == "id-new"
+    assert current["candidates"][0]["momentum_bps"] == "2000.000000"
+
+    holding = plan_research(tmp_path, guarded(roster + new_bars, "id-new", held=True))
+    assert holding["job"] is None
+    assert holding["candidates"][0]["status"] == "ambiguous_held_security"
+
+    two_current = [roster[0], roster[2], *new_bars]
+    ambiguous = plan_research(tmp_path, guarded(two_current, "id-new"))
+    assert ambiguous["job"] is None
+    assert ambiguous["candidates"][0]["status"] == "ambiguous_universe_symbol"
+
+
 def test_published_selection_schema_and_example():
     research = Path(__file__).resolve().parents[1]
     schema = research.parent.parent / "contracts/research-selection.schema.json"
-    assert json.loads(schema.read_text(encoding="utf-8")) == SelectionRequest.model_json_schema(
+    assert json.loads(schema.read_text(encoding="utf-8")) == SELECTION_INPUT.json_schema(
         mode="serialization"
     )
     example = research / "examples/selection"

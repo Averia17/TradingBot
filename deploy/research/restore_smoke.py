@@ -209,7 +209,18 @@ def database_counts(container):
     )
 
 
-def drill(binary, archive):
+def budget_command(binary, dsn, *arguments):
+    completed = subprocess.run(
+        [str(binary), *arguments],
+        env=os.environ | {"TRADINGBOT_DATABASE_URL": dsn},
+        stdout=subprocess.PIPE,
+        check=True,
+        timeout=30,
+    )
+    return json.loads(completed.stdout)
+
+
+def drill(binary, budget, archive):
     prefix = "tradingbot-restore-" + uuid4().hex[:10]
     source, target = prefix + "-source", prefix + "-target"
     with postgres(source) as dsn:
@@ -252,6 +263,19 @@ def drill(binary, archive):
             checked(
                 permit["remaining_llm_calls"] == pending["max_llm_calls"] - 1,
                 "wrong permit budget",
+            )
+            day = docker(
+                "exec", source, "psql", "-XAt", "-U", "postgres", "-d", DATABASE, "-c",
+                "SELECT to_char(granted_at AT TIME ZONE 'UTC','YYYY-MM-DD') "
+                "FROM research_call_permits",
+                capture=True, timeout=10,
+            ).strip()
+            daily = budget_command(budget, dsn, "set", "--day", day, "--max-calls", "1")
+            checked(
+                daily["status"] == "exhausted"
+                and daily["recorded_permits"] == 1
+                and daily["remaining_permits"] == 0,
+                "daily budget did not include the committed permit",
             )
         before = database_counts(source)
         checked(
@@ -304,6 +328,10 @@ def drill(binary, archive):
             timeout=30,
         )
         checked(database_counts(target) == before, "restored row counts changed")
+        checked(
+            budget_command(budget, dsn, "show", "--day", day) == daily,
+            "restored daily budget changed",
+        )
         with control(binary, dsn) as origin:
             checked(
                 request(origin, paper_path, 200) == before_account,
@@ -372,6 +400,14 @@ def drill(binary, archive):
                 "wrong recovery attempt",
             )
             request(origin, permit_path, 409, call)
+            request(
+                origin, permit_path, 422,
+                {
+                    "worker_id": retry["worker_id"],
+                    "lease_token": retry["lease_token"],
+                    "call_id": str(uuid4()),
+                },
+            )
             recovery_path, recovery_fixture, recovered = complete_fixture(origin, pending, retry)
             checked(
                 request(origin, recovery_path, 200, recovery_fixture) == recovered,
@@ -400,6 +436,7 @@ def drill(binary, archive):
         "restored_counts": before,
         "resumed_counts": after,
         "active_permit_replayed": active_lease,
+        "restored_daily_budget": daily,
         "recovered_research_attempt": recovered["attempt"],
     }
 
@@ -407,7 +444,9 @@ def drill(binary, archive):
 def main():
     with tempfile.TemporaryDirectory(prefix="tradingbot-restore-") as workspace:
         directory = Path(workspace)
-        binary = directory / ("control.exe" if os.name == "nt" else "control")
+        extension = ".exe" if os.name == "nt" else ""
+        binary = directory / ("control" + extension)
+        budget = directory / ("research-budget" + extension)
         subprocess.run(
             [
                 "go",
@@ -416,15 +455,16 @@ def main():
                 "build",
                 "-mod=readonly",
                 "-o",
-                str(binary),
+                str(directory),
                 "./cmd/control",
+                "./cmd/research-budget",
             ],
             cwd=ROOT,
             env=os.environ | {"GOPROXY": "off", "GOTOOLCHAIN": "local"},
             check=True,
             timeout=90,
         )
-        print(json.dumps(drill(binary, directory / "tradingbot.dump"), indent=2))
+        print(json.dumps(drill(binary, budget, directory / "tradingbot.dump"), indent=2))
 
 
 if __name__ == "__main__":

@@ -1,5 +1,58 @@
 {
   "$defs": {
+    "AblationSource": {
+      "additionalProperties": false,
+      "properties": {
+        "baseline": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+          "type": "string"
+        },
+        "mark_max_age_seconds": {
+          "maximum": 604800,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "max_total_llm_calls": {
+          "maximum": 8192,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "plan_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "type": "string"
+        },
+        "tape_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "type": "string"
+        },
+        "variants": {
+          "additionalProperties": {
+            "enum": [
+              "factual_reflection",
+              "full_graph",
+              "no_memory",
+              "single_analyst"
+            ]
+          },
+          "maxProperties": 4,
+          "minProperties": 2,
+          "propertyNames": {
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"
+          },
+          "type": "object"
+        }
+      },
+      "required": [
+        "plan_sha256",
+        "tape_sha256",
+        "mark_max_age_seconds",
+        "max_total_llm_calls",
+        "baseline",
+        "variants"
+      ],
+      "title": "AblationSource",
+      "type": "object"
+    },
     "BlockBootstrap": {
       "additionalProperties": false,
       "properties": {
@@ -80,6 +133,9 @@
     "EvaluationProtocol": {
       "additionalProperties": false,
       "properties": {
+        "ablation_source": {
+          "$ref": "#/$defs/AblationSource"
+        },
         "bootstrap": {
           "$ref": "#/$defs/BlockBootstrap"
         },
@@ -130,6 +186,10 @@
           "pattern": "^[a-f0-9]{64}$",
           "type": "string"
         },
+        "paper_benchmark_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "type": "string"
+        },
         "paper_nav_sha256": {
           "pattern": "^[a-f0-9]{64}$",
           "type": "string"
@@ -155,6 +215,9 @@
         },
         "splits": {
           "$ref": "#/$defs/SplitWindows"
+        },
+        "walk_forward_source": {
+          "$ref": "#/$defs/WalkForwardSource"
         }
       },
       "required": [
@@ -290,6 +353,40 @@
         "embargo_calendar_days"
       ],
       "title": "SplitWindows",
+      "type": "object"
+    },
+    "WalkForwardSource": {
+      "additionalProperties": false,
+      "properties": {
+        "benchmarks": {
+          "items": {
+            "$ref": "#/$defs/ReplayBenchmark"
+          },
+          "maxItems": 4,
+          "minItems": 1,
+          "type": "array"
+        },
+        "mark_max_age_seconds": {
+          "maximum": 604800,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "plan_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "type": "string"
+        },
+        "tape_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "plan_sha256",
+        "tape_sha256",
+        "mark_max_age_seconds",
+        "benchmarks"
+      ],
+      "title": "WalkForwardSource",
       "type": "object"
     }
   },

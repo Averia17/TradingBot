@@ -20,6 +20,17 @@ func (s ReadSnapshot) Events(ctx context.Context, accountID string, afterVersion
 	return readEvents(ctx, s.tx, accountID, afterVersion, limit)
 }
 
+func (s ReadSnapshot) GetOrder(ctx context.Context, accountID, orderID string) (Order, error) {
+	return getOrder(ctx, s.tx, accountID, orderID)
+}
+
+func (s ReadSnapshot) GetApplication(ctx context.Context, jobID string) (ApplicationRecord, error) {
+	if !uuidPattern.MatchString(jobID) {
+		return ApplicationRecord{}, ErrInvalid
+	}
+	return readApplication(ctx, s.tx, jobID)
+}
+
 // WithReadSnapshot runs a ledger query in a read-only, repeatable-read
 // transaction. It allows a reporting role with SELECT access and no migrations.
 func WithReadSnapshot(ctx context.Context, dsn string, read func(ReadSnapshot) error) error {

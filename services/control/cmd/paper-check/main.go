@@ -19,7 +19,9 @@ var uuid = regexp.MustCompile(`^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$`)
 
 type issue struct {
 	Code         string `json:"code"`
+	JobID        string `json:"job_id,omitempty"`
 	OrderID      string `json:"order_id,omitempty"`
+	FillEventID  string `json:"fill_event_id,omitempty"`
 	InstrumentID string `json:"instrument_id,omitempty"`
 }
 
@@ -31,6 +33,7 @@ type report struct {
 	AccountVersion    int64           `json:"account_version,omitempty"`
 	ProjectionVersion int64           `json:"projection_version,omitempty"`
 	Research          *researchBudget `json:"research,omitempty"`
+	Pipeline          *paperPipeline  `json:"pipeline,omitempty"`
 	Issues            []issue         `json:"issues"`
 }
 
@@ -53,14 +56,16 @@ func run(ctx context.Context, dsn string, args []string, output io.Writer) int {
 	accountID := flags.String("account", "", "virtual paper account UUID")
 	jobID := flags.String("job", "", "optional research job UUID")
 	unknownAfter := flags.Duration("unknown-after", 5*time.Minute, "age at which an UNKNOWN order needs attention")
+	pipeline := flags.Bool("pipeline", false, "inspect durable paper dispatch for the account")
+	stallAfter := flags.Duration("stall-after", 5*time.Minute, "age at which a waiting pipeline stage needs attention")
 	r := report{SchemaVersion: "0.1", Status: "unavailable", Issues: []issue{}}
 	parseErr := flags.Parse(args)
 	if errors.Is(parseErr, flag.ErrHelp) {
-		_, _ = io.WriteString(output, "paper-check --account UUID [--job UUID] [--unknown-after 5m]\nPostgreSQL configuration is read from TRADINGBOT_DATABASE_URL.\n")
+		_, _ = io.WriteString(output, "paper-check --account UUID [--job UUID] [--unknown-after 5m] [--pipeline [--stall-after 5m]]\nPostgreSQL configuration is read from TRADINGBOT_DATABASE_URL.\n")
 		return 0
 	}
 	if parseErr != nil || flags.NArg() != 0 || !uuid.MatchString(*accountID) ||
-		(*jobID != "" && !uuid.MatchString(*jobID)) || *unknownAfter <= 0 || dsn == "" {
+		(*jobID != "" && !uuid.MatchString(*jobID)) || *unknownAfter <= 0 || *stallAfter <= 0 || dsn == "" {
 		r.add("invalid_configuration")
 		return writeReport(output, r, 2)
 	}
@@ -68,7 +73,10 @@ func run(ctx context.Context, dsn string, args []string, output io.Writer) int {
 	if *jobID != "" {
 		r.Research = &researchBudget{JobID: *jobID}
 	}
-	if err := check(ctx, dsn, *unknownAfter, &r); err != nil {
+	if *pipeline {
+		r.Pipeline = &paperPipeline{StallAfter: stallAfter.String(), Jobs: []pipelineJob{}}
+	}
+	if err := check(ctx, dsn, *unknownAfter, *stallAfter, &r); err != nil {
 		// The DSN and database/provider error strings never enter the report.
 		r.add("postgres_read_failed")
 		return writeReport(output, r, 2)
@@ -88,7 +96,7 @@ func writeReport(output io.Writer, r report, status int) int {
 	return status
 }
 
-func check(ctx context.Context, dsn string, unknownAfter time.Duration, r *report) error {
+func check(ctx context.Context, dsn string, unknownAfter, stallAfter time.Duration, r *report) error {
 	config, err := pgx.ParseConfig(dsn)
 	if err != nil {
 		return err
@@ -114,7 +122,12 @@ func check(ctx context.Context, dsn string, unknownAfter time.Duration, r *repor
 			return err
 		}
 		if r.Research != nil {
-			return checkBudget(ctx, tx, r)
+			if err := checkBudget(ctx, tx, r); err != nil {
+				return err
+			}
+		}
+		if r.Pipeline != nil {
+			return checkPipeline(ctx, tx, stallAfter, r)
 		}
 		return nil
 	})

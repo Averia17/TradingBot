@@ -1,8 +1,9 @@
-"""Generate paired paper-ledger and idle USD cash marks for a frozen protocol."""
+"""Generate synchronized paper-ledger and benchmark marks for a frozen protocol."""
 
 import json
 from datetime import date, datetime, timedelta
 from decimal import ROUND_FLOOR, Decimal, localcontext
+from fractions import Fraction
 from hashlib import sha256
 from typing import Annotated, Literal
 
@@ -92,6 +93,23 @@ class PaperNAV(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
     daily_nav: Annotated[tuple[LedgerDay, ...], msgspec.Meta(min_length=1, max_length=366)]
 
 
+class BenchmarkLevel(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
+    day: date
+    observed_at: UTC_STAMP
+    available_at: UTC_STAMP
+    level: LEDGER_USD
+
+
+class PaperBenchmark(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
+    schema_version: Literal["0.1"]
+    source_mode: Literal["synthetic_fixture"]
+    series_id: IntentID
+    basis: Literal["usd_total_return_index"]
+    modeled_entry_cost_bps: Annotated[int, msgspec.Meta(ge=0, le=9999)]
+    max_age_seconds: Annotated[int, msgspec.Meta(ge=1, le=604800)]
+    levels: Annotated[tuple[BenchmarkLevel, ...], msgspec.Meta(min_length=2, max_length=366)]
+
+
 def _source_snapshot(day: LedgerDay) -> tuple:
     positions = tuple(
         sorted(
@@ -153,8 +171,54 @@ def _verify_day(day: LedgerDay, max_age_seconds: int) -> str:
     return day.nav_usd
 
 
+def _benchmark_nav(
+    source: PaperBenchmark, days: tuple[LedgerDay, ...], funding: str
+) -> tuple[str, ...]:
+    if tuple(mark.day for mark in source.levels) != tuple(day.day for day in days):
+        raise ValueError("Paper benchmark levels must cover every frozen UTC day")
+    anchor = Decimal(source.levels[0].level)
+    if anchor <= 0:
+        raise ValueError("Paper benchmark levels must be positive")
+    invested = Fraction(funding) * Fraction(10_000 - source.modeled_entry_cost_bps, 10_000)
+    nav = [funding]
+    previous = None
+    for day, mark in zip(days, source.levels, strict=True):
+        cutoff = _utc_nanoseconds(day.cutoff)
+        observed = _utc_nanoseconds(mark.observed_at)
+        available = _utc_nanoseconds(mark.available_at)
+        level = Decimal(mark.level)
+        if not observed <= available <= cutoff or (
+            cutoff - observed > source.max_age_seconds * NS_PER_SECOND
+        ):
+            raise ValueError("Paper benchmark level timing differs from cutoff or freshness policy")
+        if level <= 0:
+            raise ValueError("Paper benchmark levels must be positive")
+        if previous is not None:
+            last_cutoff, last_observed, last_available, last_level = previous
+            if (
+                observed < last_observed
+                or observed == last_observed
+                and (available, level) != (last_available, last_level)
+                or observed > last_observed
+                and available <= last_cutoff
+            ):
+                raise ValueError("Paper benchmark observations disagree with prior day-end marks")
+            units = invested * Fraction(level) / Fraction(anchor) * 100_000_000
+            whole_units = units.numerator // units.denominator
+            if whole_units == 0:
+                raise ValueError("Paper benchmark NAV is below the supported precision")
+            dollars, remainder = divmod(whole_units, 100_000_000)
+            nav.append(f"{dollars}.{remainder:08d}")
+        previous = cutoff, observed, available, level
+    return tuple(nav)
+
+
 def build_paper_evidence(
-    protocol: EvaluationProtocol, raw: bytes, *, expected_protocol_sha256: str
+    protocol: EvaluationProtocol,
+    raw: bytes,
+    *,
+    expected_protocol_sha256: str,
+    benchmark_raw: bytes | None = None,
 ) -> EvaluationEvidence:
     frozen = protocol_sha256(protocol)
     if protocol.schema_version != "0.2" or frozen != expected_protocol_sha256:
@@ -174,12 +238,16 @@ def build_paper_evidence(
     ):
         raise ValueError("Synthetic marks require a synthetic protocol")
     comparisons = protocol.comparisons
+    benchmarks = {row.benchmark for row in comparisons}
+    benchmark_pin = protocol.paper_benchmark_sha256
     if (
-        len(comparisons) != 1
-        or comparisons[0].benchmark != CASH_SERIES
-        or comparisons[0].benchmark_access != "synthetic_fixture"
+        len({row.strategy for row in comparisons}) != 1
+        or len(comparisons) != len(benchmarks)
+        or any(row.benchmark_access != "synthetic_fixture" for row in comparisons)
     ):
-        raise ValueError("Paper ledger evidence supports the uninvested-cash synthetic benchmark")
+        raise ValueError(
+            "Paper ledger evidence requires one strategy and distinct synthetic benchmarks"
+        )
     baseline = report.initial_funding.cash_usd
     first = report.daily_nav[0]
     if (
@@ -192,9 +260,34 @@ def build_paper_evidence(
         or _utc_nanoseconds(report.initial_funding.recorded_at) > _utc_nanoseconds(first.cutoff)
     ):
         raise ValueError("Paper NAV requires an initial mark before portfolio activity")
+    benchmark_values = {}
+    if CASH_SERIES in benchmarks:
+        benchmark_values[CASH_SERIES] = (baseline,) * len(report.daily_nav)
+    if benchmark_pin is msgspec.UNSET:
+        if benchmark_raw is not None or benchmarks != {CASH_SERIES}:
+            raise ValueError("Paper ledger evidence requires a pin for a noncash benchmark")
+    else:
+        if (
+            benchmark_raw is None
+            or len(benchmark_raw) > MAX_INPUT_BYTES
+            or sha256(benchmark_raw).hexdigest() != benchmark_pin
+        ):
+            raise ValueError("Frozen paper benchmark SHA-256 or source size does not match")
+        source = msgspec.convert(
+            json.loads(benchmark_raw, object_pairs_hook=_unique_fields), type=PaperBenchmark
+        )
+        if (
+            protocol.source_mode != "synthetic_fixture"
+            or source.series_id == CASH_SERIES
+            or benchmarks - {CASH_SERIES} != {source.series_id}
+        ):
+            raise ValueError(
+                "Paper benchmark identity differs from the registered synthetic series"
+            )
+        benchmark_values[source.series_id] = _benchmark_nav(source, report.daily_nav, baseline)
     rows = []
     previous = None
-    for day in report.daily_nav:
+    for index, day in enumerate(report.daily_nav):
         if previous is not None and (
             day.day - previous.day != timedelta(days=1)
             or day.account_version < previous.account_version
@@ -204,9 +297,9 @@ def build_paper_evidence(
         ):
             raise ValueError("Paper NAV ledger lineage or UTC dates are inconsistent")
         mark = _verify_day(day, report.mark_max_age_seconds)
-        rows.append(
-            DailyNav(day=day.day, nav_usd={comparisons[0].strategy: mark, CASH_SERIES: baseline})
-        )
+        nav = {name: values[index] for name, values in benchmark_values.items()}
+        nav[comparisons[0].strategy] = mark
+        rows.append(DailyNav(day=day.day, nav_usd=nav))
         previous = day
     evidence = EvaluationEvidence(
         schema_version="0.2",
@@ -217,6 +310,7 @@ def build_paper_evidence(
             method="paper_ledger_export",
             paper_nav_sha256=digest,
             account_id=report.account_id,
+            paper_benchmark_sha256=benchmark_pin,
         ),
     )
     return load_evidence(msgspec.json.encode(evidence))

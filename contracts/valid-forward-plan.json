@@ -1,0 +1,43 @@
+{
+  "schema_version": "0.1",
+  "experiment_id": "offline-paper-smoke",
+  "mode": "paper",
+  "primary_strategy": "offline-research",
+  "change_policy": "new_run_for_any_change",
+  "insufficient_power": "continue_in_current_mode",
+  "strategies": {
+    "offline-research": {
+      "model_id": "scripted-offline-v1",
+      "files": {
+        "strategy": [
+          "services/research/tradingbot/research.py",
+          "services/research/tradingbot/adapters/offline.py"
+        ],
+        "prompts": [
+          "services/research/tradingbot/research.py",
+          "services/research/tradingbot/adapters/offline.py",
+          "services/research/upstream.lock.json"
+        ],
+        "model": ["services/research/tradingbot/adapters/offline.py"],
+        "universe": ["services/research/examples/selection/request.json"],
+        "data": [
+          "services/research/examples/selection/request.json",
+          "services/research/examples/selection/market.json"
+        ],
+        "risk": ["contracts/valid-paper-policy.json"],
+        "schedule": ["contracts/valid-paper-review-schedule.json"],
+        "memory": ["services/research/tradingbot/paper_memory.py"],
+        "scorer": ["services/research/tradingbot/selection.py"],
+        "costs": ["services/evaluation/examples/operating-costs.json"],
+        "runtime": [
+          "services/research/upstream.lock.json",
+          "services/research/uv.lock",
+          "services/control/go.mod",
+          "services/control/go.sum",
+          "services/evaluation/uv.lock",
+          "deploy/research/compose.yaml"
+        ]
+      }
+    }
+  }
+}

@@ -1,0 +1,40 @@
+{
+  "schema_version": "0.1",
+  "source_mode": "synthetic_fixture",
+  "series_id": "fixture-index",
+  "basis": "usd_total_return_index",
+  "modeled_entry_cost_bps": 50,
+  "max_age_seconds": 86490,
+  "levels": [
+    {
+      "day": "2026-10-01",
+      "observed_at": "2026-10-01T23:59:10Z",
+      "available_at": "2026-10-01T23:59:20Z",
+      "level": "100"
+    },
+    {
+      "day": "2026-10-02",
+      "observed_at": "2026-10-02T23:59:10Z",
+      "available_at": "2026-10-02T23:59:20Z",
+      "level": "110"
+    },
+    {
+      "day": "2026-10-03",
+      "observed_at": "2026-10-03T23:59:10Z",
+      "available_at": "2026-10-03T23:59:20Z",
+      "level": "123.45678913"
+    },
+    {
+      "day": "2026-10-04",
+      "observed_at": "2026-10-03T23:59:10Z",
+      "available_at": "2026-10-03T23:59:20Z",
+      "level": "123.45678913"
+    },
+    {
+      "day": "2026-10-05",
+      "observed_at": "2026-10-05T23:59:10Z",
+      "available_at": "2026-10-05T23:59:20Z",
+      "level": "105"
+    }
+  ]
+}

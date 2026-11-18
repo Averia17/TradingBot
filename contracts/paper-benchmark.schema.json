@@ -1,0 +1,88 @@
+{
+  "$defs": {
+    "BenchmarkLevel": {
+      "additionalProperties": false,
+      "properties": {
+        "available_at": {
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,9})?Z$",
+          "type": "string"
+        },
+        "day": {
+          "format": "date",
+          "type": "string"
+        },
+        "level": {
+          "pattern": "^(0|[1-9][0-9]{0,29})(\\.[0-9]{1,8})?$",
+          "type": "string"
+        },
+        "observed_at": {
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,9})?Z$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "day",
+        "observed_at",
+        "available_at",
+        "level"
+      ],
+      "title": "BenchmarkLevel",
+      "type": "object"
+    },
+    "PaperBenchmark": {
+      "additionalProperties": false,
+      "properties": {
+        "basis": {
+          "enum": [
+            "usd_total_return_index"
+          ]
+        },
+        "levels": {
+          "items": {
+            "$ref": "#/$defs/BenchmarkLevel"
+          },
+          "maxItems": 366,
+          "minItems": 2,
+          "type": "array"
+        },
+        "max_age_seconds": {
+          "maximum": 604800,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "modeled_entry_cost_bps": {
+          "maximum": 9999,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "schema_version": {
+          "enum": [
+            "0.1"
+          ]
+        },
+        "series_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+          "type": "string"
+        },
+        "source_mode": {
+          "enum": [
+            "synthetic_fixture"
+          ]
+        }
+      },
+      "required": [
+        "schema_version",
+        "source_mode",
+        "series_id",
+        "basis",
+        "modeled_entry_cost_bps",
+        "max_age_seconds",
+        "levels"
+      ],
+      "title": "PaperBenchmark",
+      "type": "object"
+    }
+  },
+  "$ref": "#/$defs/PaperBenchmark",
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
+}
