@@ -51,6 +51,7 @@ type Snapshot struct {
 // matched buy sources come from the original executions and their receipts.
 type Outcome struct {
 	FillEventID    string            `json:"fill_event_id"`
+	OrderID        string            `json:"-"`
 	DecisionID     string            `json:"decision_id"`
 	Instrument     ledger.Instrument `json:"instrument"`
 	QuantityRaw    string            `json:"quantity_raw"`
@@ -317,7 +318,7 @@ func (p *projection) sell(order ledger.ReservationRequest, fill ledger.Resolutio
 	net := new(big.Int).Sub(proceeds, &basis)
 	p.realized.Add(&p.realized, net)
 	p.view.Realized = append(p.view.Realized, Outcome{
-		FillEventID: fill.EventID, DecisionID: order.DecisionID, Instrument: order.Instrument,
+		FillEventID: fill.EventID, OrderID: order.OrderID, DecisionID: order.DecisionID, Instrument: order.Instrument,
 		QuantityRaw: quantity.String(), GrossUSD: formatUSD(gross), FeeUSD: formatUSD(fee),
 		CostBasisUSD: formatUSD(&basis), NetPnLUSD: formatUSD(net),
 		ObservedAt: fill.ObservedAt.UTC(), AvailableAt: p.availableAt, Lots: matches,

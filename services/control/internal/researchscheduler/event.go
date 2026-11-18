@@ -47,18 +47,22 @@ type eventAnchor struct {
 type VerifiedEvent struct {
 	reference EventReference
 	symbol    string
+	eventTime time.Time
 	knownAt   time.Time
 	cutoff    time.Time
 	digest    string
+	payload   json.RawMessage
 }
 
 func (e VerifiedEvent) Kind() string          { return e.reference.Kind }
 func (e VerifiedEvent) Provider() string      { return e.reference.Provider }
 func (e VerifiedEvent) RecordID() string      { return e.reference.RecordID }
 func (e VerifiedEvent) Symbol() string        { return e.symbol }
+func (e VerifiedEvent) EventTime() time.Time  { return e.eventTime }
 func (e VerifiedEvent) KnownAt() time.Time    { return e.knownAt }
 func (e VerifiedEvent) Cutoff() time.Time     { return e.cutoff }
 func (e VerifiedEvent) ArchiveSHA256() string { return e.digest }
+func (e VerifiedEvent) Payload() []byte       { return bytes.Clone(e.payload) }
 
 type archiveEvent struct {
 	Kind        string          `json:"kind"`
@@ -123,8 +127,10 @@ func (a eventAnchor) verify(data []byte, digest string) (VerifiedEvent, error) {
 	if len(revisions) == 0 || revisions[len(revisions)-1].IngestedAt.After(a.cutoff) {
 		return VerifiedEvent{}, errors.New("event record is unavailable at the portfolio cutoff")
 	}
+	latest := revisions[len(revisions)-1]
 	return VerifiedEvent{
-		reference: a.reference, symbol: eventSymbol, knownAt: revisions[len(revisions)-1].IngestedAt.UTC(), cutoff: a.cutoff.UTC(), digest: digest,
+		reference: a.reference, symbol: eventSymbol, eventTime: latest.EventTime.UTC(), knownAt: latest.IngestedAt.UTC(),
+		cutoff: a.cutoff.UTC(), digest: digest, payload: latest.Payload,
 	}, nil
 }
 

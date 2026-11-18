@@ -7,7 +7,7 @@ RUN go mod download && go mod verify
 COPY cmd ./cmd
 COPY internal ./internal
 RUN mkdir /out && go build -mod=readonly -trimpath -o /out/ \
-    ./cmd/control ./cmd/paper-apply ./cmd/paper-check ./cmd/paper-nav ./cmd/paper-quote-pin \
+    ./cmd/control ./cmd/paper-apply ./cmd/paper-check ./cmd/paper-memory ./cmd/paper-nav ./cmd/paper-quote-pin \
     ./cmd/paper-thesis-outcome ./cmd/paper-shadow-outcome ./cmd/research-replay-export \
     ./cmd/research-budget ./cmd/research-usage-export ./cmd/research-schedule-coverage ./cmd/paper-quote-study
 

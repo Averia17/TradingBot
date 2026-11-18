@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io/fs"
 	"net/http"
 	"regexp"
 	"strings"
@@ -14,9 +15,10 @@ import (
 )
 
 const (
-	jobSchemaVersion = "0.1"
-	maxLLMCalls      = 64
-	jobStoreTimeout  = 3 * time.Second
+	jobSchemaVersion         = "0.1"
+	identityJobSchemaVersion = "0.2"
+	maxLLMCalls              = 64
+	jobStoreTimeout          = 3 * time.Second
 )
 
 var (
@@ -39,9 +41,10 @@ type jobStore interface {
 }
 
 type jobHTTP struct {
-	store          jobStore
-	now            func() time.Time
-	maxResearchAge time.Duration
+	store                  jobStore
+	now                    func() time.Time
+	maxResearchAge         time.Duration
+	identityRegistrySHA256 string
 }
 
 type manifest struct {
@@ -49,14 +52,43 @@ type manifest struct {
 	SHA256 string `json:"sha256"`
 }
 
+type securityBinding struct {
+	Symbol     string `json:"symbol"`
+	SecurityID string `json:"security_id"`
+}
+
 type jobRequest struct {
-	Version          string          `json:"job_schema_version"`
-	ID               string          `json:"job_id"`
-	Portfolio        json.RawMessage `json:"portfolio"`
-	RequestedSymbols []string        `json:"requested_symbols"`
-	DataManifest     manifest        `json:"data_manifest"`
-	PolicyVersion    string          `json:"policy_version"`
-	MaxLLMCalls      int             `json:"max_llm_calls"`
+	Version          string            `json:"job_schema_version"`
+	ID               string            `json:"job_id"`
+	Portfolio        json.RawMessage   `json:"portfolio"`
+	RequestedSymbols []string          `json:"requested_symbols"`
+	DataManifest     manifest          `json:"data_manifest"`
+	PolicyVersion    string            `json:"policy_version"`
+	MaxLLMCalls      int               `json:"max_llm_calls"`
+	IdentityRegistry *manifest         `json:"identity_registry,omitempty"`
+	SecurityBindings []securityBinding `json:"security_bindings,omitempty"`
+}
+
+func validIdentityRegistry(registry *manifest) bool {
+	return registry != nil && manifestRef.MatchString(registry.Ref) && fs.ValidPath(registry.Ref) &&
+		sha256Hex.MatchString(registry.SHA256)
+}
+
+func (r jobRequest) hasIdentityBindings() bool {
+	if !validIdentityRegistry(r.IdentityRegistry) || len(r.SecurityBindings) != len(r.RequestedSymbols) {
+		return false
+	}
+	seen := make(map[string]struct{}, len(r.SecurityBindings))
+	for i, binding := range r.SecurityBindings {
+		if binding.Symbol != r.RequestedSymbols[i] || !policyVersion.MatchString(binding.SecurityID) {
+			return false
+		}
+		if _, duplicate := seen[binding.SecurityID]; duplicate {
+			return false
+		}
+		seen[binding.SecurityID] = struct{}{}
+	}
+	return true
 }
 
 func (h jobHTTP) create(w http.ResponseWriter, r *http.Request) {
@@ -65,20 +97,37 @@ func (h jobHTTP) create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var parts map[string]json.RawMessage
-	if contract.Decode(body, nil, &parts) != nil || !hasExactKeys(parts,
-		"job_schema_version", "job_id", "portfolio", "requested_symbols", "data_manifest", "policy_version", "max_llm_calls") {
+	var version string
+	if contract.Decode(body, nil, &parts) != nil || json.Unmarshal(parts["job_schema_version"], &version) != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request")
 		return
 	}
-	var manifestParts map[string]json.RawMessage
 	var request jobRequest
-	if json.Unmarshal(parts["data_manifest"], &manifestParts) != nil || !hasExactKeys(manifestParts, "ref", "sha256") ||
-		json.Unmarshal(body, &request) != nil {
-		writeError(w, http.StatusBadRequest, "invalid_request")
-		return
+	if version == identityJobSchemaVersion {
+		if contract.Decode(body, contract.ResearchIdentityJob, &request) != nil || !request.hasIdentityBindings() {
+			writeError(w, http.StatusUnprocessableEntity, "invalid_job_request")
+			return
+		}
+		if h.identityRegistrySHA256 == "" {
+			writeError(w, http.StatusUnprocessableEntity, "research_identity_registry_unavailable")
+			return
+		}
+		if request.IdentityRegistry.SHA256 != h.identityRegistrySHA256 {
+			writeError(w, http.StatusUnprocessableEntity, "research_identity_registry_mismatch")
+			return
+		}
+	} else {
+		var manifestParts map[string]json.RawMessage
+		if !hasExactKeys(parts, "job_schema_version", "job_id", "portfolio", "requested_symbols", "data_manifest",
+			"policy_version", "max_llm_calls") ||
+			json.Unmarshal(parts["data_manifest"], &manifestParts) != nil || !hasExactKeys(manifestParts, "ref", "sha256") ||
+			json.Unmarshal(body, &request) != nil {
+			writeError(w, http.StatusBadRequest, "invalid_request")
+			return
+		}
 	}
 	request.ID = strings.ToLower(request.ID)
-	if request.Version != jobSchemaVersion || !jobUUID.MatchString(request.ID) ||
+	if (request.Version != jobSchemaVersion && request.Version != identityJobSchemaVersion) || !jobUUID.MatchString(request.ID) ||
 		!policyVersion.MatchString(request.PolicyVersion) || request.MaxLLMCalls < 1 || request.MaxLLMCalls > maxLLMCalls ||
 		!manifestRef.MatchString(request.DataManifest.Ref) || !sha256Hex.MatchString(request.DataManifest.SHA256) ||
 		contract.CheckSymbols(request.RequestedSymbols) != nil {

@@ -1,0 +1,19 @@
+{
+  "schema_version": "0.3",
+  "data_manifest": {
+    "ref": "services/research/examples/selection/identity-market.json",
+    "sha256": "7015cfad25251d66832f7db2d84739a5e9ee0558406932509e544ecffab38046"
+  },
+  "universe_provider": "selection-fixture",
+  "candidates": [{"symbol": "TSLA", "security_id": "fixture-current", "allowed": true}],
+  "top_k": 1,
+  "remaining_analysis_slots": 1,
+  "calls_per_symbol": 16,
+  "max_llm_calls": 20,
+  "roc_periods": 2,
+  "max_bar_age_seconds": 60,
+  "max_bar_gap_seconds": 60,
+  "max_catalyst_age_seconds": 1200,
+  "min_bar_turnover_usd": "10000",
+  "max_spread_bps": 25
+}

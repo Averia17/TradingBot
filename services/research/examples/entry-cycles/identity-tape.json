@@ -1,0 +1,27 @@
+{
+  "paper_quote_tape_schema_version": "0.3",
+  "source_mode": "synthetic_fixture",
+  "account_id": "11111111-1111-4111-8111-111111111111",
+  "identity_registry_sha256": "aa3d6dc48790eb7d7e549f684ffb0cdfa855625c4dd6d76c3fe2220c35a86f5c",
+  "observations": [
+    {
+      "available_at": "2026-11-18T10:00:08Z",
+      "firmness": "firm",
+      "quote": {
+        "paper_quote_schema_version": "0.3",
+        "source_mode": "synthetic_fixture",
+        "instrument": {"instrument_id": "fixture:TSLA", "registry_version": "fixture-v1", "decimals": 2},
+        "side": "BUY",
+        "quantity_raw": "102",
+        "gross_usd": "100",
+        "fee_bps": 0,
+        "fixed_fee_usd": "0",
+        "observed_at": "2026-11-18T10:00:07Z",
+        "expires_at": "2026-11-18T10:00:35Z",
+        "execution": "fill",
+        "security_id": "fixture-current",
+        "identity_registry_sha256": "aa3d6dc48790eb7d7e549f684ffb0cdfa855625c4dd6d76c3fe2220c35a86f5c"
+      }
+    }
+  ]
+}

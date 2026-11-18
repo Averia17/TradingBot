@@ -14,6 +14,7 @@ import msgspec
 
 from tradingbot_evaluation.replay import (
     EPOCH,
+    MAX_INPUT_BYTES,
     MAX_PREFIX_EVENTS,
     MAX_PREFIX_SYMBOLS,
     Order,
@@ -26,6 +27,13 @@ from tradingbot_evaluation.replay import (
     replay_event_count,
     replay_prefix,
     run_replay,
+)
+from tradingbot_evaluation.replay_identity import (
+    ActiveInstrument,
+    IdentityTape,
+    ReplayIdentity,
+    SecurityBinding,
+    identity_profile,
 )
 
 MAX_RESEARCH_EXPORT_BYTES = 48 * 1024 * 1024
@@ -92,13 +100,15 @@ class _Portfolio(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
 
 
 class _Request(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
-    job_schema_version: Literal["0.1"]
+    job_schema_version: Literal["0.1", "0.2"]
     job_id: _UUID
     portfolio: _Portfolio
     requested_symbols: Annotated[tuple[_SYMBOL, ...], msgspec.Meta(min_length=1, max_length=100)]
     data_manifest: _Manifest
     policy_version: _ID
     max_llm_calls: _BUDGET
+    identity_registry: _Manifest | msgspec.UnsetType = msgspec.UNSET
+    security_bindings: tuple[SecurityBinding, ...] | msgspec.UnsetType = msgspec.UNSET
 
 
 class _Horizon(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
@@ -153,6 +163,9 @@ class _Provenance(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
     upstream_sha: Annotated[str, msgspec.Meta(pattern=r"^[a-f0-9]{40}$")]
     config_sha256: _HASH
     model_id: Literal["scripted-offline-v1"]
+    identity_registry: _Manifest | msgspec.UnsetType = msgspec.UNSET
+    security_bindings: tuple[SecurityBinding, ...] | msgspec.UnsetType = msgspec.UNSET
+    projected_snapshot_sha256: _HASH | msgspec.UnsetType = msgspec.UNSET
 
 
 class _OfflineMetadata(
@@ -173,7 +186,7 @@ class _OfflineMetadata(
 
 
 class _Result(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
-    result_schema_version: Literal["0.1", "0.2"]
+    result_schema_version: Literal["0.1", "0.2", "0.3"]
     batch: _Batch
     reports: dict[_SYMBOL, dict[_NONEMPTY, _NONEMPTY]]
     metadata: _FixtureMetadata | _OfflineMetadata
@@ -187,6 +200,18 @@ class PreparedResearchReplay:
     jobs: tuple[dict, ...]
     decisions: tuple[dict, ...]
     validated_evaluation: dict | None
+    identity: ReplayIdentity | None = None
+
+    def native_input(self) -> dict:
+        replay = json.loads(msgspec.json.encode(self.replay))
+        if self.identity is None:
+            return replay
+        return {
+            "schema_version": "0.2",
+            "identity_registry": msgspec.to_builtins(self.identity.registry),
+            "instruments": _identity_instruments(self.identity),
+            "replay": replay,
+        }
 
 
 def _reject_nonfinite(_value: str):
@@ -230,11 +255,20 @@ def _validate_record(record: _Record, request: _Request, result: _Result) -> tup
     if record.job_id != request.job_id:
         raise ValueError("Research job ID does not match the stored request")
 
+    bound = request.job_schema_version == "0.2"
+    if (
+        bound != (result.result_schema_version == "0.3")
+        or (not bound and (
+            request.identity_registry is not msgspec.UNSET
+            or request.security_bindings is not msgspec.UNSET
+        ))
+    ):
+        raise ValueError("Research job and result identity versions differ")
     metadata = result.metadata
     if isinstance(metadata, _OfflineMetadata):
         provenance = metadata.provenance
         if (
-            result.result_schema_version != "0.2"
+            result.result_schema_version != ("0.3" if bound else "0.2")
             or provenance.job_id != record.job_id
             or provenance.attempt != record.attempt
             or provenance.policy_version != request.policy_version
@@ -249,6 +283,24 @@ def _validate_record(record: _Record, request: _Request, result: _Result) -> tup
             )
         ):
             raise ValueError("Offline result provenance or job budget differs from stored request")
+        if bound:
+            bindings = request.security_bindings
+            if (
+                request.identity_registry is msgspec.UNSET
+                or request.identity_registry.sha256 == request.data_manifest.sha256
+                or request.identity_registry.ref == request.data_manifest.ref
+                or provenance.identity_registry != request.identity_registry
+                or provenance.projected_snapshot_sha256 is msgspec.UNSET
+                or bindings is msgspec.UNSET
+                or provenance.security_bindings != bindings
+                or tuple(row.symbol for row in bindings) != request.requested_symbols
+                or len({row.security_id for row in bindings}) != len(bindings)
+            ):
+                raise ValueError("Stored research identity registry or ordered security bindings differ")
+        elif any(value is not msgspec.UNSET for value in (
+            provenance.identity_registry, provenance.security_bindings, provenance.projected_snapshot_sha256,
+        )):
+            raise ValueError("Legacy research result has identity provenance")
     elif result.result_schema_version != "0.1":
         raise ValueError("Unsupported research result metadata and version")
 
@@ -341,9 +393,23 @@ class _Window:
     expiry: datetime
 
 
-def _reference_quote(quotes: list[Quote], splits: list[datetime], cutoff: datetime) -> Quote | None:
+@dataclass(frozen=True)
+class _Snapshot:
+    portfolio: _Portfolio
+    cutoff: datetime
+    held: dict[str, _Position]
+    mark_floors: dict[str, datetime]
+
+
+def _reference_quote(
+    quotes: list[Quote], splits: list[datetime], cutoff: datetime,
+    *, mark_floor: datetime | None = None,
+) -> Quote | None:
     mark = max(
-        (q for q in quotes if q.available_at <= cutoff),
+        (
+            q for q in quotes if q.available_at <= cutoff
+            and (mark_floor is None or q.observed_at >= mark_floor)
+        ),
         default=None,
         key=lambda q: (q.observed_at, q.available_at),
     )
@@ -366,12 +432,14 @@ def _matching_order(
     audit: dict,
     *,
     calendar_horizon: datetime | None = None,
+    replay_key: str | None = None,
+    mark_floor: datetime | None = None,
 ) -> tuple[Order | None, str]:
     if intent.action == "HOLD":
         return None, "hold"
-    symbol = intent.symbol
+    symbol = intent.symbol if replay_key is None else replay_key
     if not _NATIVE_SYMBOL.fullmatch(symbol) or (
-        held is not None and held.instrument_id != f"fixture:{symbol}"
+        replay_key is None and held is not None and held.instrument_id != f"fixture:{symbol}"
     ):
         return None, "unsupported_instrument"
     if intent.action != "BUY" and held is None:
@@ -396,7 +464,7 @@ def _matching_order(
         return None, "cancelled_stock_split"
 
     if held is None:
-        mark = _reference_quote(quotes, splits, window.cutoff)
+        mark = _reference_quote(quotes, splits, window.cutoff, mark_floor=mark_floor)
         if mark is None:
             return None, "unavailable_reference_mark"
         reference = _midpoint(mark)
@@ -444,10 +512,12 @@ def _matching_order(
 
 def _verify_snapshots(
     replay: Replay,
-    snapshots: list[tuple[_Portfolio, datetime]],
+    snapshots: list[_Snapshot],
     jobs: list[dict],
     timeline: dict[str, list[Quote]],
     splits: dict[str, list[datetime]],
+    *,
+    bound: bool,
 ) -> None:
     if (
         len({quote.symbol for quote in replay.quotes} | timeline.keys()) > MAX_PREFIX_SYMBOLS
@@ -457,11 +527,12 @@ def _verify_snapshots(
             f"Snapshot continuity is bounded to {MAX_PREFIX_SYMBOLS} symbols "
             f"and {MAX_PREFIX_EVENTS} replay events"
         )
-    if len({portfolio.cash_asset for portfolio, _ in snapshots}) != 1:
+    if len({snapshot.portfolio.cash_asset for snapshot in snapshots}) != 1:
         raise ValueError("Snapshot continuity requires a consistent cash asset")
 
     states = {}
-    for (portfolio, cutoff), job in zip(snapshots, jobs, strict=True):
+    for snapshot, job in zip(snapshots, jobs, strict=True):
+        portfolio, cutoff, held = snapshot.portfolio, snapshot.cutoff, snapshot.held
         description = f"Job {job['job_id']} snapshot"
         if Decimal(portfolio.reserved_cash_usd):
             raise ValueError(f"{description} has reserved cash outside the synthetic account")
@@ -470,15 +541,18 @@ def _verify_snapshots(
         cash, positions = states[cutoff]
         if Decimal(portfolio.cash_usd) != Decimal(cash):
             raise ValueError(f"{description} cash differs from the native replay at its cutoff")
-        for position in portfolio.positions:
-            if position.instrument_id != f"fixture:{position.symbol}":
-                raise ValueError(f"{description} uses an unsupported held instrument")
-        if {pos.symbol: Decimal(pos.quantity) for pos in portfolio.positions} != {
+        if not bound and any(
+            position.instrument_id != f"fixture:{symbol}" for symbol, position in held.items()
+        ):
+            raise ValueError(f"{description} uses an unsupported held instrument")
+        if {key: Decimal(pos.quantity) for key, pos in held.items()} != {
             symbol: Decimal(quantity) for symbol, quantity in positions.items()
         }:
             raise ValueError(f"{description} positions differ from the native replay at its cutoff")
-        for position in portfolio.positions:
-            quote = _reference_quote(timeline[position.symbol], splits[position.symbol], cutoff)
+        for key, position in held.items():
+            quote = _reference_quote(
+                timeline[key], splits[key], cutoff, mark_floor=snapshot.mark_floors.get(key),
+            )
             if quote is None or Decimal(position.mark_price_usd) != _midpoint(quote):
                 raise ValueError(
                     f"{description} held mark differs from the pinned point-in-time quote"
@@ -501,19 +575,46 @@ def prepare_research_replay(
     expected_export_sha256: str,
     expected_tape_sha256: str,
     require_snapshot_continuity: bool = False,
+    identity_registry_raw: bytes | None = None,
+    expected_identity_registry_sha256: str | None = None,
 ) -> PreparedResearchReplay:
     if len(export_raw) > MAX_RESEARCH_EXPORT_BYTES:
         raise ValueError("Research export exceeds the input limit")
+    if len(tape_raw) > MAX_INPUT_BYTES:
+        raise ValueError("Synthetic research tape exceeds the input limit")
     export_hash = _pinned(export_raw, expected_export_sha256, "export")
     tape_hash = _pinned(tape_raw, expected_tape_sha256, "tape")
     export = _decode(export_raw, _Export)
+    tape, identity = load_research_tape(tape_raw, identity_registry_raw, expected_identity_registry_sha256)
     return _prepare_records(
         export.jobs,
-        _load_tape(tape_raw),
+        tape,
         export_hash,
         tape_hash,
-        require_snapshot_continuity=require_snapshot_continuity,
+        require_snapshot_continuity=require_snapshot_continuity or identity is not None,
+        identity=identity,
     )
+
+
+def load_research_tape(
+    tape_raw: bytes,
+    identity_registry_raw: bytes | None,
+    expected_identity_registry_sha256: str | None,
+) -> tuple[Replay, ReplayIdentity | None]:
+    if len(tape_raw) > MAX_INPUT_BYTES:
+        raise ValueError("Synthetic research tape exceeds the input limit")
+    wire = json.loads(tape_raw, object_pairs_hook=_unique_fields, parse_constant=_reject_nonfinite)
+    if isinstance(wire, dict) and wire.get("schema_version") == "0.2":
+        identity_tape = msgspec.convert(wire, type=IdentityTape)
+        identity = identity_profile(
+            identity_tape, identity_registry_raw, expected_identity_registry_sha256,
+        )
+        tape = _load_tape(msgspec.json.encode(identity_tape.replay))
+        identity.validate_tape_keys(tape)
+        return tape, identity
+    if identity_registry_raw is not None or expected_identity_registry_sha256 is not None:
+        raise ValueError("Legacy research tape does not accept an identity registry")
+    return _load_tape(tape_raw), None
 
 
 def _prepare_records(
@@ -523,6 +624,7 @@ def _prepare_records(
     tape_hash: str,
     *,
     require_snapshot_continuity: bool = False,
+    identity: ReplayIdentity | None = None,
 ) -> PreparedResearchReplay:
     decoded_bytes = sum(len(row.request_base64) + len(row.result_base64) for row in records)
     if decoded_bytes > _MAX_RESEARCH_RECORD_BYTES:
@@ -546,6 +648,8 @@ def _prepare_records(
         _pinned(record.result_base64, record.result_sha256, "result")
         request = _decode(record.request_base64, _Request)
         result = _decode(record.result_base64, _Result)
+        if (request.job_schema_version == "0.2") != (identity is not None):
+            raise ValueError("Research job and synthetic tape identity versions differ")
         cutoff, completed, expiry = _validate_record(record, request, result)
         window = _Window(*map(_floor_microseconds, (cutoff, completed, expiry)))
         job_key = (completed, record.job_id)
@@ -565,6 +669,15 @@ def _prepare_records(
             )
         ):
             raise ValueError("Research snapshot contains invalid cash, limits or positions")
+        native_holdings = held
+        mark_floors = {}
+        resolved = {}
+        if identity is not None:
+            if cutoff % 1000:
+                raise ValueError("Identity replay portfolio requires a microsecond-precise cutoff")
+            resolved, native_holdings, mark_floors = _resolve_identity(
+                request, identity, held, window.cutoff,
+            )
 
         jobs.append(
             {
@@ -585,7 +698,7 @@ def _prepare_records(
                 "research_metadata": msgspec.to_builtins(result.metadata),
             }
         )
-        snapshots.append((portfolio, window.cutoff))
+        snapshots.append(_Snapshot(portfolio, window.cutoff, native_holdings, mark_floors))
         for intent in result.batch.intents:
             decision_id = intent.decision_id.lower()
             if decision_id in seen_decisions:
@@ -599,16 +712,35 @@ def _prepare_records(
                 "requested_notional_usd": intent.notional_usd,
                 "max_execution_cost_bps": intent.max_execution_cost_bps,
             }
+            replay_key = None
+            mark_floor = None
+            decision_window = window
+            if identity is not None:
+                active = resolved[intent.symbol]
+                instrument, expires_at = active.mapping, active.expires_at
+                replay_key = instrument.key
+                mark_floor = active.effective_at
+                audit.update(
+                    replay_key=replay_key,
+                    security_id=instrument.security_id,
+                    instrument=msgspec.to_builtins(instrument.instrument),
+                )
+                if expires_at is not None:
+                    decision_window = _Window(
+                        window.cutoff, window.completed, min(window.expiry, expires_at),
+                    )
             with localcontext(prec=64):
                 order, status = _matching_order(
                     intent,
                     held.get(intent.symbol),
-                    timeline[intent.symbol],
-                    splits[intent.symbol],
-                    window,
+                    timeline[replay_key or intent.symbol],
+                    splits[replay_key or intent.symbol],
+                    decision_window,
                     tape.commission_bps,
                     audit,
                     calendar_horizon=calendar_horizon,
+                    replay_key=replay_key,
+                    mark_floor=mark_floor,
                 )
             if order is not None:
                 issued_orders.append(order)
@@ -619,10 +751,10 @@ def _prepare_records(
     if require_snapshot_continuity:
         # An order cannot execute before the cutoff of its own research job.
         # Running each prefix also handles analyses with overlapping clocks.
-        _verify_snapshots(replay, snapshots, jobs, timeline, splits)
+        _verify_snapshots(replay, snapshots, jobs, timeline, splits, bound=identity is not None)
         horizon = max(
             latest_quote,
-            max(cutoff for _, cutoff in snapshots),
+            max(snapshot.cutoff for snapshot in snapshots),
         )
         evaluation = run_replay(replay, through=horizon)
         _verify_execution_quotes(evaluation["fills"], tuple(decisions))
@@ -634,7 +766,30 @@ def _prepare_records(
         tuple(jobs),
         tuple(decisions),
         evaluation,
+        identity,
     )
+
+
+def _resolve_identity(
+    request: _Request, identity: ReplayIdentity, held: dict[str, _Position], cutoff: datetime,
+) -> tuple[dict[str, ActiveInstrument], dict[str, _Position], dict[str, datetime]]:
+    pin = request.identity_registry
+    if pin is msgspec.UNSET or (pin.ref, pin.sha256) != (identity.registry.ref, identity.registry.sha256):
+        raise ValueError("Stored job and owner tape identity registry differ")
+    resolved = {row.symbol: identity.resolve(row, cutoff) for row in request.security_bindings}
+    native_holdings = {}
+    mark_floors = {}
+    for symbol, position in held.items():
+        match = identity.holding(symbol, position.instrument_id, cutoff)
+        if symbol in resolved and resolved[symbol] != match:
+            raise ValueError("Held instrument differs from the requested security")
+        native_holdings[match.mapping.key] = position
+        mark_floors[match.mapping.key] = match.effective_at
+    return resolved, native_holdings, mark_floors
+
+
+def _identity_instruments(identity: ReplayIdentity) -> list[dict]:
+    return [msgspec.to_builtins(item) for item in identity.instruments]
 
 
 def _tape_timeline(tape: Replay) -> tuple[dict[str, list[Quote]], dict[str, list[datetime]]]:
@@ -654,6 +809,8 @@ def run_research_replay(
     expected_export_sha256: str,
     expected_tape_sha256: str,
     require_snapshot_continuity: bool = False,
+    identity_registry_raw: bytes | None = None,
+    expected_identity_registry_sha256: str | None = None,
 ) -> dict:
     prepared = prepare_research_replay(
         export_raw,
@@ -661,14 +818,22 @@ def run_research_replay(
         expected_export_sha256=expected_export_sha256,
         expected_tape_sha256=expected_tape_sha256,
         require_snapshot_continuity=require_snapshot_continuity,
+        identity_registry_raw=identity_registry_raw,
+        expected_identity_registry_sha256=expected_identity_registry_sha256,
     )
     verified = prepared.validated_evaluation is not None
     evaluation = prepared.validated_evaluation
     if evaluation is None:
         evaluation = run_replay(prepared.replay)
         _verify_execution_quotes(evaluation["fills"], prepared.decisions)
-    return evaluation | {
-        "research_replay_schema_version": "0.1",
+    identity_fields = {}
+    if prepared.identity is not None:
+        identity_fields = {
+            "identity_registry": msgspec.to_builtins(prepared.identity.registry),
+            "replay_instruments": _identity_instruments(prepared.identity),
+        }
+    return evaluation | identity_fields | {
+        "research_replay_schema_version": "0.2" if prepared.identity is not None else "0.1",
         "intent_pipeline_connected": True,
         "research_export_sha256": prepared.export_sha256,
         "synthetic_tape_sha256": prepared.tape_sha256,
@@ -717,7 +882,9 @@ def _verify_execution_quotes(fills: list[dict], decisions: tuple[dict, ...]) -> 
     by_id = {row["decision_id"]: row for row in decisions}
     for fill in fills:
         row = by_id[fill["intent_id"]]
-        if int(fill["quote_available_at_ns"]) != _time_ns(
-            row["execution_quote_available_at"]
-        ) or Decimal(fill["price_usd"]) != Decimal(row["execution_quote_price_usd"]):
+        if (
+            fill["symbol"] != row.get("replay_key", row["symbol"])
+            or int(fill["quote_available_at_ns"]) != _time_ns(row["execution_quote_available_at"])
+            or Decimal(fill["price_usd"]) != Decimal(row["execution_quote_price_usd"])
+        ):
             raise RuntimeError("Native research replay fill does not match its selected quote")

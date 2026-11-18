@@ -25,6 +25,7 @@ services:
     command: [--listen, 0.0.0.0:8080]
     environment:
       TRADINGBOT_DATABASE_URL: postgresql://research_control@postgres:5432/tradingbot?sslmode=disable
+      TRADINGBOT_RESEARCH_IDENTITY_REGISTRY_SHA256: ${TRADINGBOT_RESEARCH_IDENTITY_REGISTRY_SHA256:-}
     depends_on:
       postgres:
         condition: service_healthy
@@ -64,6 +65,91 @@ services:
         bind:
           create_host_path: false
 
+  identity-research:
+    extends:
+      service: research
+    profiles: [research-identity]
+    command:
+      - worker
+      - --control-url
+      - http://control:8080
+      - --archive-root
+      - /archive
+      - --identity-registry-ref
+      - '${TRADINGBOT_RESEARCH_IDENTITY_REGISTRY_REF:-}'
+      - --identity-registry-sha256
+      - '${TRADINGBOT_RESEARCH_IDENTITY_REGISTRY_SHA256:-}'
+    volumes:
+      - type: bind
+        source: ${TRADINGBOT_RESEARCH_IDENTITY_ARCHIVE_DIR:-./paper-archive}
+        target: /archive
+        read_only: true
+        bind:
+          create_host_path: false
+
+  paper-entry: &paper-scheduler
+    profiles: [paper-entry]
+    image: ${TRADINGBOT_PAPER_ENTRY_IMAGE:-tradingbot-paper-entry:local}
+    build:
+      context: ../../services/research
+      target: paper-entry
+      additional_contexts:
+        control-image: service:control
+    command:
+      - --root
+      - /archive
+      - --plan-ref
+      - '${TRADINGBOT_PAPER_ENTRY_PLAN_REF:-}'
+      - --plan-sha256
+      - '${TRADINGBOT_PAPER_ENTRY_PLAN_SHA256:-}'
+      - --journal
+      - /journal
+      - --paper-apply
+      - /usr/local/bin/paper-apply
+      - --poll-interval-seconds
+      - '1'
+    environment:
+      TRADINGBOT_DATABASE_URL: postgresql://research_control@postgres:5432/tradingbot?sslmode=disable
+      TRADINGBOT_RESEARCH_IDENTITY_REGISTRY_SHA256: ${TRADINGBOT_RESEARCH_IDENTITY_REGISTRY_SHA256:-}
+    depends_on:
+      control:
+        condition: service_healthy
+    networks: [storage]
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp
+    volumes:
+      - paper-entry-journal:/journal
+      - &paper-scheduler-archive
+        type: bind
+        source: ${TRADINGBOT_PAPER_ARCHIVE_DIR:-./paper-archive}
+        target: /archive
+        read_only: true
+        bind:
+          create_host_path: false
+
+  paper-review-cycles:
+    <<: *paper-scheduler
+    profiles: [paper-review-cycles]
+    entrypoint: [python, -m, tradingbot.review_cycles]
+    command:
+      - --root
+      - /archive
+      - --plan-ref
+      - '${TRADINGBOT_PAPER_REVIEW_PLAN_REF:-}'
+      - --plan-sha256
+      - '${TRADINGBOT_PAPER_REVIEW_PLAN_SHA256:-}'
+      - --journal
+      - /journal
+      - --paper-apply
+      - /usr/local/bin/paper-apply
+      - --poll-interval-seconds
+      - '1'
+    volumes:
+      - paper-review-journal:/journal
+      - *paper-scheduler-archive
+
   paper-review:
     profiles: [paper]
     image: ${TRADINGBOT_CONTROL_IMAGE:-tradingbot-control:local}
@@ -71,6 +157,7 @@ services:
     command: [schedule-review, --config, /paper-config/review.json, --archive-root, /archive, --poll-interval, 30s]
     environment:
       TRADINGBOT_DATABASE_URL: postgresql://research_control@postgres:5432/tradingbot?sslmode=disable
+      TRADINGBOT_RESEARCH_IDENTITY_REGISTRY_SHA256: ${TRADINGBOT_RESEARCH_IDENTITY_REGISTRY_SHA256:-}
     depends_on:
       control:
         condition: service_healthy
@@ -90,11 +177,49 @@ services:
         bind:
           create_host_path: false
 
-  paper-dispatch:
+  paper-dispatch: &paper-dispatch
     profiles: [paper]
     image: ${TRADINGBOT_CONTROL_IMAGE:-tradingbot-control:local}
     entrypoint: [/usr/local/bin/paper-apply]
     command: [dispatch, --account, '${TRADINGBOT_PAPER_ACCOUNT_ID:-}', --policy, /paper-config/policy.json, --quote-root, /quotes, --poll-interval, 5s]
+    environment: &paper-dispatch-environment
+      TRADINGBOT_DATABASE_URL: postgresql://research_control@postgres:5432/tradingbot?sslmode=disable
+    depends_on:
+      control:
+        condition: service_healthy
+    networks: [storage]
+    read_only: true
+    volumes:
+      - &paper-dispatch-config
+        type: bind
+        source: ${TRADINGBOT_PAPER_CONFIG_DIR:-./paper-config}
+        target: /paper-config
+        read_only: true
+        bind:
+          create_host_path: false
+      - &paper-dispatch-quotes
+        type: bind
+        source: ${TRADINGBOT_PAPER_QUOTES_DIR:-./paper-quotes}
+        target: /quotes
+        read_only: true
+        bind:
+          create_host_path: false
+
+  paper-quote: &paper-quote
+    profiles: [paper-quote]
+    image: ${TRADINGBOT_CONTROL_IMAGE:-tradingbot-control:local}
+    entrypoint: [/usr/local/bin/paper-quote-pin]
+    command:
+      - --account
+      - '${TRADINGBOT_PAPER_ACCOUNT_ID:-}'
+      - --tape
+      - /paper-config/quote-tape.json
+      - --sha256
+      - '${TRADINGBOT_PAPER_QUOTE_TAPE_SHA256:-}'
+      - --quote-root
+      - /quotes
+      - --poll-interval
+      - 2s
     environment:
       TRADINGBOT_DATABASE_URL: postgresql://research_control@postgres:5432/tradingbot?sslmode=disable
     depends_on:
@@ -103,18 +228,57 @@ services:
     networks: [storage]
     read_only: true
     volumes:
-      - type: bind
+      - &paper-quote-config
+        type: bind
         source: ${TRADINGBOT_PAPER_CONFIG_DIR:-./paper-config}
         target: /paper-config
         read_only: true
         bind:
           create_host_path: false
-      - type: bind
+      - &paper-quote-output
+        type: bind
         source: ${TRADINGBOT_PAPER_QUOTES_DIR:-./paper-quotes}
         target: /quotes
+        bind:
+          create_host_path: false
+
+  paper-identity-dispatch:
+    <<: *paper-dispatch
+    profiles: [paper-identity]
+    command: [dispatch, --account, '${TRADINGBOT_PAPER_ACCOUNT_ID:-}', --policy, /paper-config/policy.json, --quote-root, /quotes, --archive-root, /archive, --poll-interval, 5s]
+    environment:
+      <<: *paper-dispatch-environment
+      TRADINGBOT_RESEARCH_IDENTITY_REGISTRY_SHA256: ${TRADINGBOT_RESEARCH_IDENTITY_REGISTRY_SHA256:-}
+      TRADINGBOT_PAPER_QUOTE_TAPE_SHA256: ${TRADINGBOT_PAPER_QUOTE_TAPE_SHA256:-}
+    volumes:
+      - *paper-dispatch-config
+      - *paper-dispatch-quotes
+      - &paper-identity-archive
+        type: bind
+        source: ${TRADINGBOT_PAPER_ARCHIVE_DIR:-./paper-archive}
+        target: /archive
         read_only: true
         bind:
           create_host_path: false
+
+  paper-identity-quote:
+    <<: *paper-quote
+    profiles: [paper-identity]
+    command:
+      - --account
+      - '${TRADINGBOT_PAPER_ACCOUNT_ID:-}'
+      - --tape
+      - '/archive/${TRADINGBOT_PAPER_IDENTITY_QUOTE_TAPE_REF:-quote-tape.json}'
+      - --sha256
+      - '${TRADINGBOT_PAPER_QUOTE_TAPE_SHA256:-}'
+      - --quote-root
+      - /quotes
+      - --poll-interval
+      - 2s
+    volumes:
+      - *paper-quote-config
+      - *paper-quote-output
+      - *paper-identity-archive
 
   evaluation:
     profiles: [evaluation]
@@ -128,6 +292,8 @@ services:
 
 volumes:
   research-data:
+  paper-entry-journal:
+  paper-review-journal:
 
 networks:
   storage:

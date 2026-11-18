@@ -29,13 +29,15 @@ print(json.dumps({
     "lock_sha256": hashlib.sha256(Path("uv.lock").read_bytes()).hexdigest(),
     "adapter_contract": check_compatibility()["adapter_contract"],
     "research_job_schema_version": "0.1",
+    "research_job_schema_versions": ["0.1", "0.2"],
     "research_result_schema_version": "0.2",
+    "research_result_schema_versions": ["0.2", "0.3"],
     "research_job_call_budget": True,
 }, sort_keys=True))
 PY
 SH
 
-FROM ${PYTHON_IMAGE}
+FROM ${PYTHON_IMAGE} AS research-runtime
 WORKDIR /opt/tradingbot
 ENV PATH=/opt/tradingbot/.venv/bin:$PATH HOME=/tmp PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 GIT_OPTIONAL_LOCKS=0 GIT_TERMINAL_PROMPT=0
@@ -44,3 +46,13 @@ RUN git config --system --add safe.directory /opt/tradingbot/vendor/trading-agen
 USER 65532:65532
 ENTRYPOINT ["tradingbot"]
 CMD ["worker"]
+
+FROM research-runtime AS paper-entry
+USER root
+RUN install -d -o 65532 -g 65532 -m 0700 /journal
+COPY --from=control-image /usr/local/bin/paper-apply /usr/local/bin/paper-apply
+USER 65532:65532
+ENTRYPOINT ["python", "-m", "tradingbot.entry_cycles"]
+CMD ["--help"]
+
+FROM research-runtime AS research

@@ -30,6 +30,11 @@ import (
 
 func isolatedDatabase(t *testing.T) (context.Context, string, func() time.Time) {
 	t.Helper()
+	return isolatedDatabaseWithTimeout(t, 20*time.Second)
+}
+
+func isolatedDatabaseWithTimeout(t *testing.T, timeout time.Duration) (context.Context, string, func() time.Time) {
+	t.Helper()
 	dsn := os.Getenv("TRADINGBOT_TEST_DATABASE_URL")
 	if dsn == "" {
 		t.Skip("TRADINGBOT_TEST_DATABASE_URL is required for real PostgreSQL tests")
@@ -38,7 +43,7 @@ func isolatedDatabase(t *testing.T) (context.Context, string, func() time.Time) 
 	if err != nil || parsed.Scheme == "" {
 		t.Fatal("test database must be a PostgreSQL URI")
 	}
-	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), timeout)
 	t.Cleanup(cancel)
 	base, err := pgx.Connect(ctx, dsn)
 	if err != nil {

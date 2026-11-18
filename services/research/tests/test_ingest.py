@@ -76,6 +76,134 @@ def archive(captures):
     return {"schema_version": "0.1", "source_mode": "synthetic_fixture", "captures": captures}
 
 
+def sec_facts(root, submissions, *, transform=lambda rows: rows):
+    original, amendment = submissions["accessions"]
+    rows = [
+        {
+            "accn": accession,
+            "form": form,
+            "filed": "2026-11-17",
+            "start": "2026-07-01",
+            "end": "2026-09-30",
+            "val": value,
+        }
+        for accession, form, value in (
+            (original, "10-Q", "exact-original"),
+            (amendment, "10-Q/A", "exact-revised"),
+        )
+    ]
+    source = {
+        "cik": 123456,
+        "facts": {"us-gaap": {"EarningsPerShareDiluted": {"units": {"USD/shares": transform(rows)}}}},
+    }
+    raw = (
+        json.dumps(source)
+        .replace('"exact-original"', "0.123456789123456789")
+        .replace('"exact-revised"', "-2.5e-3")
+        .encode()
+    )
+    (root / "sec-facts.json").write_bytes(raw)
+    return {
+        "kind": "sec_company_facts",
+        "source": {"ref": "sec-facts.json", "sha256": hashlib.sha256(raw).hexdigest()},
+        "captured_at": "2026-11-18T15:20:00Z",
+        "cik": submissions["cik"],
+        "symbol": submissions["symbol"],
+        "selectors": [
+            {
+                "accession": accession,
+                "concept": "EarningsPerShareDiluted",
+                "unit": "USD/shares",
+                "period_start": "2026-07-01",
+                "period_end": "2026-09-30",
+            }
+            for accession in (original, amendment)
+        ],
+    }
+
+
+@pytest.mark.parametrize("visibility", ["source_published", "locally_ingested"])
+def test_pinned_company_facts_join_exact_accessions_and_do_not_backdate(tmp_path, visibility):
+    submissions = sec(tmp_path)
+    facts = sec_facts(tmp_path, submissions)
+    result = build_archive(tmp_path, archive([facts, submissions]))
+    assert result == build_archive(tmp_path, archive([submissions, facts]))
+    ref = pin(tmp_path, "archive.json", result)
+
+    before = load_snapshot(
+        tmp_path, ref, datetime.fromisoformat("2026-11-18T15:19:59Z"), visibility=visibility
+    )
+    after = load_snapshot(
+        tmp_path, ref, datetime.fromisoformat(facts["captured_at"]), visibility=visibility
+    )
+    assert len(before.records) == 2
+    assert all(row.revision == 1 and "facts" not in row.payload for row in before.records)
+    assert [row.record_id for row in after.records] == submissions["accessions"]
+    assert [row.payload["form"] for row in after.records] == ["10-Q", "10-Q/A"]
+    assert [row.payload["facts"][0]["value"] for row in after.records] == [
+        "0.123456789123456789", "-0.0025",
+    ]
+    assert [row.event_time for row in after.records] == [row.event_time for row in before.records]
+    for row in after.records:
+        assert row.revision == 2
+        assert row.payload["company_facts_sha256"] == facts["source"]["sha256"]
+        assert row.payload["source_sha256"] == submissions["source"]["sha256"]
+
+
+def test_company_facts_wait_for_later_submissions_capture(tmp_path):
+    submissions = sec(tmp_path)
+    facts = sec_facts(tmp_path, submissions)
+    submissions["captured_at"] = "2026-11-18T16:00:00Z"
+    result = build_archive(tmp_path, archive([facts, submissions]))
+    ref = pin(tmp_path, "archive.json", result)
+    before = load_snapshot(tmp_path, ref, datetime.fromisoformat(facts["captured_at"]))
+    after = load_snapshot(tmp_path, ref, datetime.fromisoformat(submissions["captured_at"]))
+    assert before.records == ()
+    assert [row.revision for row in after.records] == [2, 2]
+
+
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        ("different_symbol", "matching SEC submission"),
+        ("before_acceptance", "before SEC acceptance"),
+        ("different_form", "SEC submission form"),
+        ("ambiguous_fact", "exactly one SEC fact"),
+        ("missing_fact", "exactly one SEC fact"),
+        ("duplicate_selector", "duplicate SEC fact selector"),
+        ("unbounded_decimal", "SEC fact value"),
+        ("changed_bytes", "SHA-256 mismatch"),
+    ],
+)
+def test_company_facts_reject_unverifiable_or_ambiguous_capture(tmp_path, change, message):
+    submissions = sec(tmp_path)
+
+    def transform(rows):
+        if change == "different_form":
+            rows[0]["form"] = "10-K"
+        if change == "ambiguous_fact":
+            rows.append(rows[0] | {"val": 123})
+        if change == "missing_fact":
+            rows.pop()
+        return rows
+
+    facts = sec_facts(tmp_path, submissions, transform=transform)
+    if change == "different_symbol":
+        facts["symbol"] = "NVDA"
+    if change == "before_acceptance":
+        facts["captured_at"] = "2026-11-17T15:20:00Z"
+    if change == "duplicate_selector":
+        facts["selectors"].append(facts["selectors"][0])
+    if change in {"unbounded_decimal", "changed_bytes"}:
+        path = tmp_path / "sec-facts.json"
+        raw = path.read_bytes().replace(b"-2.5e-3", b"2.5e+500000")
+        path.write_bytes(raw)
+        if change == "unbounded_decimal":
+            facts["source"]["sha256"] = hashlib.sha256(raw).hexdigest()
+    with pytest.raises(ValueError, match=message):
+        build_archive(tmp_path, archive([submissions, facts]))
+
+
 def test_pinned_sec_amendment_keeps_accession_and_uses_known_capture_time(tmp_path):
     capture = sec(tmp_path)
     result = build_archive(tmp_path, archive([capture]))
@@ -130,6 +258,11 @@ def test_published_manifest_schema_and_pins_match_importer():
         "macro",
         "macro",
     ]
+    enriched = build_archive(
+        root, json.loads((root / "sec-facts-manifest.json").read_text(encoding="utf-8"))
+    )
+    assert [row["revision"] for row in enriched["records"]] == [1, 2, 1, 2]
+    assert enriched["records"][-1]["payload"]["facts"][0]["value"] == "0.123456789123456788"
 
 
 @pytest.mark.parametrize("visibility", ["source_published", "locally_ingested"])

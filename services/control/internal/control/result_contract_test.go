@@ -16,12 +16,15 @@ import (
 func TestResearchResultWireContract(t *testing.T) {
 	for _, name := range []string{"valid-result-request.json", "valid-offline-result-request.json"} {
 		t.Run(name, func(t *testing.T) {
-			checkResearchResultWireContract(t, fixture(t, name))
+			checkResearchResultWireContract(t, fixture(t, name), jobBody(t))
 		})
 	}
+	t.Run("identity-bound", func(t *testing.T) {
+		checkResearchResultWireContract(t, fixture(t, identityResultFixture), fixture(t, identityJobFixture))
+	})
 }
 
-func checkResearchResultWireContract(t *testing.T, request []byte) {
+func checkResearchResultWireContract(t *testing.T, request, jobRequest []byte) {
 	t.Helper()
 	const schemaFile = "research-result.schema.json"
 	compiler := wireSchemaCompiler(t, schemaFile, "research-job.schema.json", "portfolio.schema.json", "schema.json")
@@ -38,7 +41,7 @@ func checkResearchResultWireContract(t *testing.T, request []byte) {
 			if input.JobID != jobID || input.WorkerID != "fixture-worker" || input.Token != "00000000-0000-0000-0000-000000000020" {
 				t.Fatal("wire result authority was not passed correctly")
 			}
-			if err := verify(jobs.Job{ID: jobID, Status: "leased", Request: jobBody(t)}, now); err != nil {
+			if err := verify(jobs.Job{ID: jobID, Status: "leased", Request: jobRequest}, now); err != nil {
 				t.Fatal(err)
 			}
 			saved = jobs.Result{JobID: input.JobID, Attempt: 1, CompletedAt: now, Payload: input.Payload}

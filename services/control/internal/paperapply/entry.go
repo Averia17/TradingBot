@@ -32,6 +32,7 @@ type EntrySchedule struct {
 	Budget          int             `json:"max_job_llm_calls"`
 	Context         SnapshotContext `json:"snapshot_context"`
 	SelectionSHA256 string          `json:"selection_sha256"`
+	Identity        *OwnerIdentity  `json:"identity_binding,omitempty"`
 }
 
 type EntryReceipt struct {
@@ -54,6 +55,7 @@ type screenedSelection struct {
 type EntryJobStore interface {
 	Get(context.Context, string) (jobs.Job, error)
 	Create(context.Context, jobs.CreateJob, func() error) (jobs.Job, bool, error)
+	CreateBoundPaperEntry(context.Context, jobs.BoundPaperEntry, func() error) (jobs.Job, bool, error)
 	GetPaperDispatch(context.Context, string) (jobs.PaperDispatchTask, error)
 }
 
@@ -66,17 +68,28 @@ type EntryLedger interface {
 // binding in one durable transaction. The occurrence, not the suggested job ID,
 // determines the key. Retrying committed input does not re-admit the snapshot.
 func ScheduleEntry(ctx context.Context, research EntryJobStore, paper EntryLedger, config EntrySchedule, rawSelection []byte, archiveRoot string, now time.Time, maxAge time.Duration) (EntryReceipt, error) {
-	status := EntryReceipt{Version: Version}
+	return ScheduleEntryWithRegistry(ctx, research, paper, config, rawSelection, archiveRoot, now, maxAge, "")
+}
+
+// ScheduleEntryWithRegistry requires an independent owner pin for stable entry
+// and keeps the schedule API usable for unchanged legacy configurations.
+func ScheduleEntryWithRegistry(ctx context.Context, research EntryJobStore, paper EntryLedger, config EntrySchedule,
+	rawSelection []byte, archiveRoot string, now time.Time, maxAge time.Duration, ownerRegistrySHA256 string) (EntryReceipt, error) {
+	status := EntryReceipt{Version: config.Version}
 	started := time.Now()
 	if !config.valid() || archiveRoot == "" || now.IsZero() || maxAge <= 0 {
 		return EntryReceipt{}, ErrInvalid
+	}
+	stable := config.Version == IdentityVersion
+	if stable && (!entryDigest.MatchString(ownerRegistrySHA256) || config.Identity.Registry.SHA256 != ownerRegistrySHA256) {
+		return EntryReceipt{}, fmt.Errorf("%w: stable paper entry requires its independent owner registry pin", ErrInvalid)
 	}
 	config.At = config.At.UTC()
 	if !entryDigest.MatchString(config.SelectionSHA256) || fmt.Sprintf("%x", sha256.Sum256(rawSelection)) != config.SelectionSHA256 {
 		return EntryReceipt{}, fmt.Errorf("%w: screened selection does not match its pinned SHA-256", ErrInvalid)
 	}
 	var selection screenedSelection
-	if contract.Decode(rawSelection, contract.PaperEntrySelection, &selection) != nil {
+	if contract.Decode(rawSelection, contract.PaperEntrySelection, &selection) != nil || selection.Version != config.Version {
 		return EntryReceipt{}, fmt.Errorf("%w: invalid screened selection", ErrInvalid)
 	}
 	if config.At.After(now) {
@@ -98,8 +111,12 @@ func ScheduleEntry(ctx context.Context, research EntryJobStore, paper EntryLedge
 		!uuidPattern.MatchString(strings.ToLower(job.ID)) || contract.CheckSymbols(job.RequestedSymbols) != nil {
 		return EntryReceipt{}, fmt.Errorf("%w: screened job exceeds its owner binding", ErrInvalid)
 	}
+	if !config.matchesJobIdentity(job, selection.Snapshot) {
+		return EntryReceipt{}, fmt.Errorf("%w: screened job identity does not match its owner binding", ErrInvalid)
+	}
 	portfolio, err := contract.ParsePortfolio(job.Portfolio)
-	if err != nil || portfolio.AsOf.After(config.At) || config.Context.CheckPortfolio(portfolio) != nil {
+	if err != nil || portfolio.AsOf.After(config.At) || stable && !portfolio.AsOf.Equal(config.At) ||
+		config.Context.CheckPortfolio(portfolio) != nil {
 		return EntryReceipt{}, fmt.Errorf("%w: screened portfolio does not match the owner snapshot", ErrInvalid)
 	}
 	if err := config.checkRequestedMarks(job.RequestedSymbols, portfolio.AsOf); err != nil {
@@ -107,14 +124,19 @@ func ScheduleEntry(ctx context.Context, research EntryJobStore, paper EntryLedge
 	}
 	job.ID = jobID
 	deadline := config.At.Add(time.Duration(config.MaxLateness) * time.Second)
-	if _, err := research.Get(ctx, job.ID); errors.Is(err, jobs.ErrNotFound) {
+	_, lookupErr := research.Get(ctx, job.ID)
+	if errors.Is(lookupErr, jobs.ErrNotFound) {
+		if stable && now.After(deadline) {
+			status.Status = "missed"
+			return status, nil
+		}
 		if !now.After(deadline) {
 			if _, err := researchscheduler.VerifyArchive(archiveRoot, job.DataManifest, portfolio.AsOf, job.RequestedSymbols, nil); err != nil {
 				return EntryReceipt{}, err
 			}
 		}
-	} else if err != nil {
-		return EntryReceipt{}, err
+	} else if lookupErr != nil {
+		return EntryReceipt{}, lookupErr
 	}
 	portfolio.AsOf = portfolio.AsOf.UTC()
 	snapshot, err := json.Marshal(portfolio)
@@ -131,15 +153,29 @@ func ScheduleEntry(ctx context.Context, research EntryJobStore, paper EntryLedge
 		return EntryReceipt{}, fmt.Errorf("encode owner entry schedule: %w", err)
 	}
 	fingerprint := sha256.Sum256(owner)
-	dispatch, err := json.Marshal(Request{Version: Version, JobID: job.ID, SnapshotContext: config.Context,
-		EntryScheduleSHA256: hex.EncodeToString(fingerprint[:])})
+	entryHash := hex.EncodeToString(fingerprint[:])
+	var binding *IdentityBinding
+	if stable {
+		if lookupErr == nil {
+			binding, err = existingEntryIdentity(ctx, research, job, config, selection.Snapshot, entryHash)
+		} else {
+			binding, err = BindOwnerIdentity(archiveRoot, config.Context, *config.Identity, job.SecurityBindings,
+				selection.Snapshot, portfolio.AsOf, nil)
+		}
+		if err != nil {
+			return EntryReceipt{}, err
+		}
+	}
+	dispatch, err := json.Marshal(Request{Version: config.Version, JobID: job.ID, SnapshotContext: config.Context,
+		EntryScheduleSHA256: entryHash, Identity: binding})
 	if err != nil {
 		return EntryReceipt{}, fmt.Errorf("encode paper entry binding: %w", err)
 	}
-	accepted, created, err := research.Create(ctx, jobs.CreateJob{
+	input := jobs.CreateJob{
 		ID: job.ID, Request: body, SnapshotID: portfolio.ID, Snapshot: snapshot,
 		PaperDispatch: &jobs.PaperDispatchInput{AccountID: config.Context.AccountID, Request: dispatch},
-	}, func() error {
+	}
+	admit := func() error {
 		admissionAt := now.Add(time.Since(started))
 		if admissionAt.After(deadline) {
 			return errEntryMissed
@@ -147,11 +183,26 @@ func ScheduleEntry(ctx context.Context, research EntryJobStore, paper EntryLedge
 		if admissionAt.Sub(portfolio.AsOf) > maxAge {
 			return ledger.ErrStale
 		}
+		if binding != nil {
+			for _, security := range binding.Securities {
+				if security.ExpiresAt != nil && !security.ExpiresAt.After(admissionAt) {
+					return ledger.ErrStale
+				}
+			}
+		}
 		if err := config.Context.CheckMarks(admissionAt); err != nil {
 			return err
 		}
 		return currentEntrySnapshot(ctx, paper, config.Context, portfolio)
-	})
+	}
+	var accepted jobs.Job
+	var created bool
+	if stable {
+		accepted, created, err = research.CreateBoundPaperEntry(ctx,
+			jobs.BoundPaperEntry{Job: input, OwnerRegistrySHA256: ownerRegistrySHA256}, admit)
+	} else {
+		accepted, created, err = research.Create(ctx, input, admit)
+	}
 	if errors.Is(err, errEntryMissed) {
 		status.Status = "missed"
 		return status, nil
@@ -159,7 +210,7 @@ func ScheduleEntry(ctx context.Context, research EntryJobStore, paper EntryLedge
 	if err != nil {
 		return EntryReceipt{}, err
 	}
-	if !created {
+	if !created && !stable {
 		task, err := research.GetPaperDispatch(ctx, accepted.ID)
 		if errors.Is(err, jobs.ErrNotFound) || err == nil &&
 			(task.AccountID != config.Context.AccountID || !bytes.Equal(task.Request, dispatch)) {
@@ -169,14 +220,39 @@ func ScheduleEntry(ctx context.Context, research EntryJobStore, paper EntryLedge
 			return EntryReceipt{}, err
 		}
 	}
-	return EntryReceipt{Version: Version, Status: accepted.Status, Created: created, JobID: accepted.ID, CreatedAt: &accepted.CreatedAt}, nil
+	return EntryReceipt{Version: config.Version, Status: accepted.Status, Created: created, JobID: accepted.ID, CreatedAt: &accepted.CreatedAt}, nil
 }
 
 func (c EntrySchedule) valid() bool {
-	return c.Version == Version && scheduleName.MatchString(c.ID) && !c.At.IsZero() &&
+	identity := c.Version == IdentityVersion && c.Identity != nil && validArchiveReference(c.Identity.Registry) &&
+		validArchiveReference(c.Identity.QuoteTape) && independentEntryRefs(c.Identity.Registry, c.Identity.QuoteTape)
+	return (c.Version == Version && c.Identity == nil || identity) && scheduleName.MatchString(c.ID) && !c.At.IsZero() &&
 		c.MaxLateness >= 1 && c.MaxLateness <= 3600 && c.Budget >= 1 && c.Budget <= 64 &&
 		uuidPattern.MatchString(c.Context.AccountID) && c.Context.SnapshotVersion >= 1 &&
 		scheduleName.MatchString(c.Context.Policy.Version) && c.Context.Policy.Validate() == nil
+}
+
+func independentEntryRefs(a, b ArchiveReference) bool {
+	return a.Ref != b.Ref && a.SHA256 != b.SHA256
+}
+
+func (c EntrySchedule) matchesJobIdentity(job storedJob, selectedSHA256 string) bool {
+	if c.Version == Version {
+		return job.Version == Version && job.IdentityRegistry == nil && len(job.SecurityBindings) == 0
+	}
+	if job.Version != IdentityVersion || !entryDigest.MatchString(selectedSHA256) || job.IdentityRegistry == nil ||
+		*job.IdentityRegistry != c.Identity.Registry || len(job.SecurityBindings) != len(job.RequestedSymbols) ||
+		!independentEntryRefs(c.Identity.Registry, job.DataManifest) || !independentEntryRefs(c.Identity.QuoteTape, job.DataManifest) {
+		return false
+	}
+	seen := make(map[string]bool, len(job.SecurityBindings))
+	for i, binding := range job.SecurityBindings {
+		if binding.Symbol != job.RequestedSymbols[i] || !scheduleName.MatchString(binding.SecurityID) || seen[binding.SecurityID] {
+			return false
+		}
+		seen[binding.SecurityID] = true
+	}
+	return true
 }
 
 func (c EntrySchedule) checkRequestedMarks(symbols []string, asOf time.Time) error {

@@ -4,23 +4,27 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"io/fs"
 	"time"
 
 	"tradingbot/control/internal/contract"
 	"tradingbot/control/internal/ledger"
+	"tradingbot/control/internal/paperapply"
 )
 
 const MaxOutcomeInputBytes = 4 * 1024 * 1024
 
 type OutcomeRequest struct {
-	Version                  string            `json:"schema_version"`
-	AccountID                string            `json:"account_id"`
-	OpeningOrderID           string            `json:"opening_order_id"`
-	AsOf                     time.Time         `json:"as_of"`
-	Source                   string            `json:"source_mode"`
-	MaxObservationAgeSeconds int               `json:"max_observation_age_seconds"`
-	ExitObservations         []ExitObservation `json:"exit_observations"`
-	Benchmark                *BenchmarkInput   `json:"benchmark,omitempty"`
+	Version                  string                       `json:"schema_version"`
+	AccountID                string                       `json:"account_id"`
+	OpeningOrderID           string                       `json:"opening_order_id"`
+	AsOf                     time.Time                    `json:"as_of"`
+	Source                   string                       `json:"source_mode"`
+	MaxObservationAgeSeconds int                          `json:"max_observation_age_seconds"`
+	ExitObservations         []ExitObservation            `json:"exit_observations"`
+	ExitTape                 *paperapply.ArchiveReference `json:"exit_tape,omitempty"`
+	ExitRegistry             *paperapply.ArchiveReference `json:"exit_identity_registry,omitempty"`
+	Benchmark                *BenchmarkInput              `json:"benchmark,omitempty"`
 }
 
 // ExitObservation is an executable simulated SELL observation for the exact
@@ -65,6 +69,10 @@ func ParseOutcomeRequest(raw []byte, expectedSHA256 string) (OutcomeInput, error
 	var request OutcomeRequest
 	if err := contract.Decode(raw, contract.PaperThesisOutcomeRequest, &request); err != nil || request.AsOf.Year() <= 0 || request.AsOf.IsZero() {
 		return OutcomeInput{}, errors.New("invalid paper thesis outcome request schema")
+	}
+	if request.ExitTape != nil && (request.ExitRegistry == nil || !fs.ValidPath(request.ExitTape.Ref) || !fs.ValidPath(request.ExitRegistry.Ref) ||
+		request.ExitTape.Ref == request.ExitRegistry.Ref || request.ExitTape.SHA256 == request.ExitRegistry.SHA256) {
+		return OutcomeInput{}, errors.New("invalid independent paper thesis exit archive pins")
 	}
 	type window struct {
 		Observed  time.Time

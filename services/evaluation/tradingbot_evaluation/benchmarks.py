@@ -6,6 +6,7 @@ from decimal import Decimal
 
 import msgspec
 
+from tradingbot_evaluation.equal_weight import EqualWeightSchedule, run_scheduled_equal_weight
 from tradingbot_evaluation.replay import (
     Order,
     Quote,
@@ -180,8 +181,9 @@ def run_benchmarks(
     through: datetime | None = None,
     include_equal_weight: bool = True,
     trend: TrendConfig | None = None,
+    equal_weight_schedule: EqualWeightSchedule | None = None,
 ) -> dict:
-    """Compare cash, single-symbol buy-and-hold and a one-time equal allocation."""
+    """Compare cash, buy-and-hold and optionally rebalanced equal allocations."""
     if replay.source_mode != "synthetic_fixture":
         raise ValueError("Benchmarks require a synthetic quote fixture")
     if start_at.utcoffset() is None:
@@ -215,7 +217,7 @@ def run_benchmarks(
         raise ValueError("Buy-and-hold benchmark symbol must have a quote known at benchmark start")
     if include_equal_weight and not formation:
         raise ValueError("Equal-weight benchmark requires a quote known at benchmark start")
-    active_symbols = set(formation) if include_equal_weight else set()
+    active_symbols = set(formation) if include_equal_weight or equal_weight_schedule else set()
     if buy_and_hold_symbol is not None:
         active_symbols.add(buy_and_hold_symbol)
     share_steps = {
@@ -247,6 +249,14 @@ def run_benchmarks(
         benchmarks["equal_weight_once"] = _equal_weight(
             replay, formation, by_symbol, start_at, end_at, share_steps
         )
+    if equal_weight_schedule is not None:
+        benchmarks["equal_weight_scheduled"] = run_scheduled_equal_weight(
+            replay,
+            config=equal_weight_schedule,
+            start_at=start_at,
+            end_at=end_at,
+            universe=tuple(sorted(formation)),
+        )
     if trend is not None:
         active_symbols.add(trend.symbol)
         benchmarks["trend_momentum"] = run_trend(
@@ -270,6 +280,11 @@ def run_benchmarks(
             "position_mark": "final_known_bid",
             "entry": "whole_share_ioc_on_next_newer_quote",
             "equal_weight": "one_time_equal_starting_cash_no_rebalancing",
+            **(
+                {"equal_weight_scheduled": "fixed_utc_cutoffs_native_sells_before_cash_sized_buys"}
+                if equal_weight_schedule is not None
+                else {}
+            ),
             "corporate_actions_included": any(
                 action.symbol in active_symbols and action.available_at <= end_at
                 for action in replay.cash_dividends

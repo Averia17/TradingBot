@@ -132,3 +132,36 @@ func TestOutcomeRequestPublicFixtureIsPinned(t *testing.T) {
 		t.Fatal("accepted changed input under original hash")
 	}
 }
+
+func TestIdentityOutcomeRequestRejectsInlineQuotesAndLegacyTape(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "..", "contracts", "valid-paper-thesis-outcome-input.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var request map[string]any
+	if err := json.Unmarshal(raw, &request); err != nil {
+		t.Fatal(err)
+	}
+	parse := func() error {
+		raw := fixtureJSON(t, request)
+		_, err := ParseOutcomeRequest(raw, fmt.Sprintf("%x", sha256.Sum256(raw)))
+		return err
+	}
+	request["exit_tape"] = map[string]any{"ref": "horizon.json", "sha256": fmt.Sprintf("%064x", 1)}
+	request["exit_identity_registry"] = map[string]any{"ref": "horizon-registry.json", "sha256": fmt.Sprintf("%064x", 2)}
+	if err := parse(); err == nil {
+		t.Fatal("legacy accepted a stable exit tape")
+	}
+	request["schema_version"] = "0.2"
+	if err := parse(); err == nil {
+		t.Fatal("stable request accepted inline, unbound exit observations")
+	}
+	request["exit_observations"] = []any{}
+	if err := parse(); err != nil {
+		t.Fatalf("stable pinned tape request was rejected: %v", err)
+	}
+	request["exit_tape"].(map[string]any)["ref"] = "archive/../horizon.json"
+	if err := parse(); err == nil {
+		t.Fatal("stable request accepted a traversing tape ref")
+	}
+}

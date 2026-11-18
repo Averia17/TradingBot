@@ -16,6 +16,12 @@ from uuid import UUID
 from pydantic import Field, TypeAdapter, ValidationError
 
 from tradingbot.contracts import Contract, Money, PortfolioSnapshot, Symbol
+from tradingbot.security_identity import (
+    IdentityProjectionError,
+    SecurityBinding,
+    load_identity_registry,
+    project_identity_snapshot,
+)
 from tradingbot.snapshots import (
     MAX_ARCHIVE_BYTES,
     ArchiveRecord,
@@ -66,8 +72,16 @@ class RosterSelectionRequest(SelectionRequest):
     candidates: Annotated[tuple[RosterCandidate, ...], Field(min_length=1, max_length=100)]
 
 
+class IdentitySelectionRequest(RosterSelectionRequest):
+    schema_version: Literal["0.3"]
+    identity_registry: ArchiveReference
+
+
 SELECTION_INPUT = TypeAdapter(
-    Annotated[SelectionRequest | RosterSelectionRequest, Field(discriminator="schema_version")]
+    Annotated[
+        SelectionRequest | RosterSelectionRequest | IdentitySelectionRequest,
+        Field(discriminator="schema_version"),
+    ]
 )
 
 
@@ -207,17 +221,35 @@ def _roster_status(
     return None
 
 
-def plan_research(root: Path, request: dict) -> dict:
+def plan_research(
+    root: Path,
+    request: dict,
+    *,
+    trusted_identity_registry: ArchiveReference | dict | None = None,
+) -> dict:
     config = SELECTION_INPUT.validate_python(request)
+    if isinstance(config, IdentitySelectionRequest):
+        if (
+            trusted_identity_registry is None
+            or ArchiveReference.model_validate(trusted_identity_registry)
+            != config.identity_registry
+        ):
+            raise ValueError("identity selection requires the matching owner registry pin")
+    elif trusted_identity_registry is not None:
+        raise ValueError("owner registry pin requires identity selection request 0.3")
     symbols = sorted(candidate.symbol for candidate in config.candidates)
     if len(set(symbols)) != len(symbols):
         raise ValueError("duplicate research candidate symbol")
-    guarded = isinstance(config, RosterSelectionRequest)
+    stable = isinstance(config, IdentitySelectionRequest)
+    guarded = isinstance(config, RosterSelectionRequest) and not stable
+    registry = load_identity_registry(root, config.identity_registry) if stable else None
+    if registry is not None and registry.universe_provider != config.universe_provider:
+        raise ValueError("owner registry and selection universe providers disagree")
     snapshot = load_snapshot(
         root,
         config.data_manifest,
         config.portfolio.as_of,
-        symbols=None if guarded else symbols,
+        symbols=None if guarded or stable else symbols,
         visibility="locally_ingested",
     )
     records: dict[str, list[ArchiveRecord]] = defaultdict(list)
@@ -245,7 +277,24 @@ def plan_research(root: Path, request: dict) -> dict:
     ranked, rejected = [], []
     for candidate in config.candidates:
         symbol = candidate.symbol
-        if isinstance(candidate, RosterCandidate) and candidate.allowed:
+        group = records[symbol]
+        if registry is not None and candidate.allowed:
+            binding = SecurityBinding(symbol=symbol, security_id=candidate.security_id)
+            try:
+                scoped = project_identity_snapshot(
+                    snapshot,
+                    registry,
+                    config.identity_registry,
+                    (binding,),
+                    positions=config.portfolio.positions,
+                )
+            except IdentityProjectionError as exc:
+                rejected.append(
+                    {"symbol": symbol, "security_id": candidate.security_id, "status": exc.reason}
+                )
+                continue
+            group = [item for item in scoped.records if item.symbol == symbol]
+        elif guarded and candidate.allowed:
             status = _roster_status(
                 candidate,
                 roster,
@@ -259,7 +308,7 @@ def plan_research(root: Path, request: dict) -> dict:
                     {"symbol": symbol, "security_id": candidate.security_id, "status": status}
                 )
                 continue
-        row = _score(config, candidate, records[symbol], held)
+        row = _score(config, candidate, group, held)
         if isinstance(candidate, RosterCandidate):
             row["security_id"] = candidate.security_id
         if row["status"] == "ranked":
@@ -282,6 +331,7 @@ def plan_research(root: Path, request: dict) -> dict:
     for index, row in enumerate(ranked):
         row["status"] = "selected" if index < capacity else "capacity_exhausted"
     job = None
+    receipt_snapshot = snapshot
     if selected:
         job = {
             "job_schema_version": "0.1",
@@ -292,10 +342,27 @@ def plan_research(root: Path, request: dict) -> dict:
             "requested_symbols": selected,
             "max_llm_calls": ALLOCATION_CALLS + len(selected) * config.calls_per_symbol,
         }
+        if registry is not None:
+            bindings = tuple(
+                SecurityBinding(symbol=row["symbol"], security_id=row["security_id"])
+                for row in ranked[:capacity]
+            )
+            receipt_snapshot = project_identity_snapshot(
+                snapshot,
+                registry,
+                config.identity_registry,
+                bindings,
+                positions=config.portfolio.positions,
+            )
+            job |= {
+                "job_schema_version": "0.2",
+                "identity_registry": config.identity_registry.model_dump(mode="json"),
+                "security_bindings": [binding.model_dump(mode="json") for binding in bindings],
+            }
     return {
-        "selection_schema_version": "0.1",
+        "selection_schema_version": "0.2" if stable else "0.1",
         "source_mode": snapshot.source_mode,
-        "snapshot_sha256": snapshot.sha256,
+        "snapshot_sha256": receipt_snapshot.sha256,
         "stockstats_version": version("stockstats"),
         "job": job,
         "candidates": ranked + sorted(rejected, key=lambda row: row["symbol"]),
@@ -307,18 +374,27 @@ def main() -> int:
     parser.add_argument("--schema", action="store_true", help="Print the selection-request schema")
     parser.add_argument("--root", type=Path)
     parser.add_argument("--request", type=Path)
+    parser.add_argument("--identity-registry-ref", help="Owner-pinned file under the archive root")
+    parser.add_argument("--identity-registry-sha256", help="Owner-pinned SHA-256 of registry bytes")
     args = parser.parse_args()
     if args.schema:
         print(json.dumps(SELECTION_INPUT.json_schema(mode="serialization"), indent=2))
         return 0
     if args.root is None or args.request is None:
         parser.error("--root and --request are required")
+    if (args.identity_registry_ref is None) != (args.identity_registry_sha256 is None):
+        parser.error("--identity-registry-ref and --identity-registry-sha256 are required together")
+    registry = None
+    if args.identity_registry_ref is not None:
+        registry = {"ref": args.identity_registry_ref, "sha256": args.identity_registry_sha256}
     try:
         with args.request.open("rb") as stream:
             raw = stream.read(MAX_ARCHIVE_BYTES + 1)
         if len(raw) > MAX_ARCHIVE_BYTES:
             raise ValueError("selection request exceeds the per-document byte limit")
-        result = plan_research(args.root, decode_pinned_json(raw))
+        result = plan_research(
+            args.root, decode_pinned_json(raw), trusted_identity_registry=registry
+        )
     except ValidationError:
         parser.exit(2, "selection rejected: invalid request or archive schema\n")
     except (OSError, ValueError, RecursionError) as exc:

@@ -1,11 +1,77 @@
 {
   "$defs": {
+    "Reference": {
+      "additionalProperties": false,
+      "properties": {
+        "ref": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]{0,511}$",
+          "type": "string"
+        },
+        "sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "ref",
+        "sha256"
+      ],
+      "title": "Reference",
+      "type": "object"
+    },
+    "SecurityBinding": {
+      "additionalProperties": false,
+      "properties": {
+        "security_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+          "type": "string"
+        },
+        "symbol": {
+          "pattern": "^[A-Z][A-Z0-9.-]{0,15}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "symbol",
+        "security_id"
+      ],
+      "title": "SecurityBinding",
+      "type": "object"
+    },
     "WalkForwardPlan": {
       "additionalProperties": false,
+      "else": {
+        "not": {
+          "required": [
+            "identity_registry"
+          ]
+        },
+        "properties": {
+          "steps": {
+            "items": {
+              "not": {
+                "required": [
+                  "security_bindings"
+                ]
+              }
+            }
+          }
+        }
+      },
+      "if": {
+        "properties": {
+          "schema_version": {
+            "const": "0.2"
+          }
+        }
+      },
       "properties": {
         "experiment_id": {
           "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
           "type": "string"
+        },
+        "identity_registry": {
+          "$ref": "#/$defs/Reference"
         },
         "max_position_pct": {
           "pattern": "^(0|[1-9][0-9]{0,11})(\\.[0-9]{1,8})?$",
@@ -22,7 +88,8 @@
         },
         "schema_version": {
           "enum": [
-            "0.1"
+            "0.1",
+            "0.2"
           ]
         },
         "source_mode": {
@@ -48,6 +115,20 @@
         "max_total_llm_calls",
         "steps"
       ],
+      "then": {
+        "properties": {
+          "steps": {
+            "items": {
+              "required": [
+                "security_bindings"
+              ]
+            }
+          }
+        },
+        "required": [
+          "identity_registry"
+        ]
+      },
       "title": "WalkForwardPlan",
       "type": "object"
     },
@@ -72,8 +153,16 @@
         },
         "requested_symbols": {
           "items": {
-            "pattern": "^[A-Z][A-Z0-9.]{0,11}$",
+            "pattern": "^[A-Z][A-Z0-9.-]{0,15}$",
             "type": "string"
+          },
+          "maxItems": 8,
+          "minItems": 1,
+          "type": "array"
+        },
+        "security_bindings": {
+          "items": {
+            "$ref": "#/$defs/SecurityBinding"
           },
           "maxItems": 8,
           "minItems": 1,

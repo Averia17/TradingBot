@@ -169,7 +169,11 @@ func TestMigrateLegacyFullFillAndReplayItsOriginalRequest(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	createFixture(t, ctx, &Store{pool: pool}, "20")
+	creation, err := json.Marshal(CreateAccount{ID: testAccountID, InitialCashUSD: "20"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	creationHash := sha256.Sum256(creation)
 	buy := reserveFixture(1, 1)
 	buy.QuantityRaw, buy.GrossUSD, buy.MaxFeeUSD = "3", "12", "0.01"
 	buy.ExpiresAt = buy.ExpiresAt.Truncate(time.Microsecond)
@@ -188,6 +192,12 @@ func TestMigrateLegacyFullFillAndReplayItsOriginalRequest(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer rollback(tx)
+	if _, err := tx.Exec(ctx, `INSERT INTO paper_accounts (account_id, creation_hash, cash_usd) VALUES ($1,$2,20)`, buy.AccountID, creationHash[:]); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeEvent(ctx, tx, buy.AccountID, buy.AccountID, 1, "paper_account.created", creationHash[:], creation); err != nil {
+		t.Fatal(err)
+	}
 	if err := writeEvent(ctx, tx, buy.AccountID, buy.OrderID, 2, "paper_order.reserved", bookingHash[:], booking); err != nil {
 		t.Fatal(err)
 	}
@@ -223,6 +233,11 @@ func TestMigrateLegacyFullFillAndReplayItsOriginalRequest(t *testing.T) {
 	var outboxCount int
 	if err := store.pool.QueryRow(ctx, `SELECT count(*) FROM paper_fill_outbox`).Scan(&outboxCount); err != nil || outboxCount != 0 {
 		t.Fatalf("migrated execution was silently queued: count=%d err=%v", outboxCount, err)
+	}
+	var migratedQuantity string
+	if err := store.pool.QueryRow(ctx, `SELECT payload #>> '{fill,quantity_raw}' FROM paper_account_outbox WHERE account_id=$1 AND account_version=3`,
+		buy.AccountID).Scan(&migratedQuantity); err != nil || migratedQuantity != "3" {
+		t.Fatalf("legacy booked quantity missing from analytics history: quantity=%s err=%v", migratedQuantity, err)
 	}
 	account, err := store.GetAccount(ctx, buy.AccountID)
 	if err != nil || account.Version != 3 || account.CashUSD != "8.99" || len(account.Positions) != 1 || account.Positions[0].QuantityRaw != "3" {

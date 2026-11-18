@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tradingbot.local/contracts/paper-memory-lesson.schema.json",
+  "title": "Paper memory lesson event",
+  "description": "One immutable record, retraction or reinstatement emitted by paper-memory. The fact always refers to the original simulated SELL fill. The lessons command returns an array of these events.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "source_mode", "method", "lesson_id", "event_id", "revision", "action", "created_at", "available_at", "fact"],
+  "properties": {
+    "schema_version": {"const": "0.1"},
+    "source_mode": {"const": "paper_simulated_ledger"},
+    "method": {"const": "fifo_sale_exit_fee_v1"},
+    "lesson_id": {"$ref": "#/$defs/digest"},
+    "event_id": {"$ref": "#/$defs/uuid"},
+    "revision": {"type": "integer", "minimum": 1, "maximum": 2147483647},
+    "action": {"enum": ["record", "retract", "reinstate"]},
+    "created_at": {"type": "string", "format": "date-time"},
+    "available_at": {"type": "string", "format": "date-time"},
+    "fact": {"$ref": "#/$defs/fact"}
+  },
+  "if": {"properties": {"revision": {"const": 1}}},
+  "then": {"properties": {"action": {"const": "record"}}},
+  "else": {"properties": {"action": {"enum": ["retract", "reinstate"]}}},
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "uuid": {"type": "string", "pattern": "^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$"},
+    "identity": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9:._-]{0,127}$"},
+    "usd": {"type": "string", "pattern": "^(?:0|[1-9][0-9]{0,29})(?:\\.[0-9]{1,8})?$"},
+    "instrument": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["instrument_id", "registry_version", "decimals"],
+      "properties": {
+        "instrument_id": {"$ref": "#/$defs/identity"},
+        "registry_version": {"$ref": "#/$defs/identity"},
+        "decimals": {"type": "integer", "minimum": 0, "maximum": 18}
+      }
+    },
+    "fact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["account_id", "source_fill_event_id", "source_decision_id", "source_account_version", "source_outcome_sha256", "source_available_at", "label_end", "instrument", "quantity_raw", "gross_usd", "recorded_exit_fee_usd", "cost_basis_usd", "net_pnl_usd", "realized_outcome", "exit_fee_erased_positive_pre_fee_pnl"],
+      "properties": {
+        "account_id": {"$ref": "#/$defs/uuid"},
+        "source_fill_event_id": {"$ref": "#/$defs/uuid"},
+        "source_decision_id": {"$ref": "#/$defs/uuid"},
+        "source_account_version": {"type": "integer", "minimum": 2, "maximum": 9223372036854775807},
+        "source_outcome_sha256": {"$ref": "#/$defs/digest"},
+        "source_available_at": {"type": "string", "format": "date-time"},
+        "label_end": {"type": "string", "format": "date-time"},
+        "instrument": {"$ref": "#/$defs/instrument"},
+        "quantity_raw": {"type": "string", "pattern": "^[1-9][0-9]{0,37}$"},
+        "gross_usd": {"$ref": "#/$defs/usd"},
+        "recorded_exit_fee_usd": {"$ref": "#/$defs/usd"},
+        "cost_basis_usd": {"type": "string", "pattern": "^(?:0|[1-9][0-9]{0,59})(?:\\.[0-9]{1,8})?$"},
+        "net_pnl_usd": {"type": "string", "pattern": "^-?(?:0|[1-9][0-9]{0,59})(?:\\.[0-9]{1,8})?$"},
+        "realized_outcome": {"enum": ["gain", "break_even", "loss"]},
+        "exit_fee_erased_positive_pre_fee_pnl": {"type": "boolean"}
+      }
+    }
+  }
+}

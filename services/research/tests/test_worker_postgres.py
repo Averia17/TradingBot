@@ -17,6 +17,7 @@ from uuid import uuid4
 import pytest
 
 from tradingbot.paper_memory import build_contexts
+from tradingbot.security_identity import load_identity_snapshot
 from tradingbot.selection import plan_research
 from tradingbot.snapshots import load_snapshot
 
@@ -37,7 +38,8 @@ class LoopbackConnection(HTTPConnection):
 
 
 def request(port, path, body=None):
-    with closing(LoopbackConnection("127.0.0.1", port, timeout=2)) as conn:
+    # Let Control return its own three-second database timeout to the caller.
+    with closing(LoopbackConnection("127.0.0.1", port, timeout=5)) as conn:
         if body is None:
             conn.request("GET", path)
         else:
@@ -74,6 +76,101 @@ def wait_for_resource(port, path, *children, timeout=45):
             return body
         time.sleep(0.05)
     pytest.fail(f"timed out waiting for {path}")
+
+
+def test_bound_research_reuses_selected_issuer_through_real_postgres(tmp_path):
+    examples = ROOT / "services/research/examples/selection"
+    request_doc = json.loads((examples / "identity-request.json").read_bytes())
+    cutoff = datetime.now(UTC) - timedelta(seconds=10)
+    shift = cutoff - datetime.fromisoformat(request_doc["portfolio"]["as_of"])
+
+    def rebase(value):
+        if isinstance(value, list):
+            return [rebase(item) for item in value]
+        if isinstance(value, dict):
+            return {
+                key: (
+                    (datetime.fromisoformat(item) + shift).isoformat()
+                    if key in {"event_time", "available_at", "ingested_at", "effective_at", "expires_at"}
+                    and isinstance(item, str)
+                    else rebase(item)
+                )
+                for key, item in value.items()
+            }
+        return value
+
+    for field in ("data_manifest", "identity_registry"):
+        ref = request_doc[field]["ref"]
+        raw = json.dumps(rebase(json.loads((examples / ref).read_bytes()))).encode()
+        (tmp_path / ref).write_bytes(raw)
+        request_doc[field]["sha256"] = hashlib.sha256(raw).hexdigest()
+
+    request_doc["job_id"] = str(uuid4())
+    request_doc["portfolio"].update(snapshot_id=str(uuid4()), as_of=cutoff.isoformat())
+    registry = request_doc["identity_registry"]
+    selected = plan_research(tmp_path, request_doc, trusted_identity_registry=registry)
+    job = selected["job"]
+    assert job["job_schema_version"] == "0.2"
+    control = build_go_command(tmp_path, "control")
+    env = os.environ | {
+        "TRADINGBOT_DATABASE_URL": DATABASE_URL,
+        "TRADINGBOT_RESEARCH_IDENTITY_REGISTRY_SHA256": registry["sha256"],
+    }
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.bind(("127.0.0.1", 0))
+        port = listener.getsockname()[1]
+    with process([control, "--listen", f"127.0.0.1:{port}"], env) as control_process:
+        wait_for_resource(port, "/readyz", control_process)
+        assert request(port, "/v1/research/jobs", job)[0] == 201
+        with closing(LoopbackConnection("127.0.0.1", port, timeout=5)) as connection:
+            connection.request(
+                "POST", "/v1/research/jobs/claim",
+                json.dumps({"worker_id": "fixture-legacy", "claim_id": str(uuid4())}),
+                {"Content-Type": "application/json"},
+            )
+            assert connection.getresponse().status == 204
+        route = f"/v1/research/jobs/{job['job_id']}"
+        command = [
+            sys.executable, "-m", "tradingbot", "worker",
+            "--control-url", f"http://127.0.0.1:{port}", "--archive-root", str(tmp_path),
+            "--identity-registry-ref", registry["ref"],
+            "--identity-registry-sha256", registry["sha256"],
+        ]
+        with process(command, research_environment()) as running:
+            receipt = wait_for_resource(port, route + "/result", control_process, running)
+        assert request(port, route + "/result") == (200, receipt)
+        saved_job = request(port, route)[1]["request"]
+
+    result = receipt["result"]
+    assert result["result_schema_version"] == "0.3"
+    assert result["metadata"]["source_mode"] == "tradingagents_offline"
+    assert 0 < result["metadata"]["llm_calls"] <= job["max_llm_calls"]
+    assert result["metadata"]["usd_cost"] is None
+    proof = result["metadata"]["provenance"]
+    assert proof["identity_registry"] == saved_job["identity_registry"] == registry
+    assert proof["security_bindings"] == saved_job["security_bindings"] == job["security_bindings"]
+    independently_projected = load_identity_snapshot(
+        tmp_path, saved_job["data_manifest"], registry, cutoff, saved_job["security_bindings"]
+    )
+    assert proof["projected_snapshot_sha256"] == selected["snapshot_sha256"] == independently_projected.sha256
+    assert all(intent["action"] == "HOLD" for intent in result["batch"]["intents"])
+    assert "fixture-previous" not in json.dumps(result["reports"])
+
+    exporter = build_go_command(tmp_path, "research-replay-export")
+    exported = subprocess.check_output([exporter, "--job", saved_job["job_id"]], env=env, timeout=20)
+    export_path = tmp_path / "identity-export.json"
+    export_path.write_bytes(exported)
+    independently_audited = json.loads(subprocess.check_output(
+        [
+            sys.executable, "-m", "tradingbot", "verify-identity-export",
+            "--input", str(export_path), "--input-sha256", hashlib.sha256(exported).hexdigest(),
+            "--archive-root", str(tmp_path), "--identity-registry-ref", registry["ref"],
+            "--identity-registry-sha256", registry["sha256"],
+        ],
+        cwd=ROOT / "services/research", env=research_environment(), timeout=20,
+    ))
+    assert independently_audited["status"] == "verified"
+    assert independently_audited["jobs"][0]["projected_snapshot_sha256"] == selected["snapshot_sha256"]
 
 
 def build_go_command(tmp_path, name):

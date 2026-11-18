@@ -13,6 +13,7 @@ import msgspec
 from tradingbot_evaluation.ablation_evidence import derive_ablation_evidence
 from tradingbot_evaluation.benchmarks import run_benchmarks
 from tradingbot_evaluation.checkpoint_history import CheckpointReceipt
+from tradingbot_evaluation.equal_weight import EqualWeightSchedule, parse_rebalance_at
 from tradingbot_evaluation.forward_freeze import (
     forward_configuration_sha256,
     forward_freeze_sha256,
@@ -37,7 +38,11 @@ from tradingbot_evaluation.replay import (
     run_replay,
     synthetic_probe,
 )
-from tradingbot_evaluation.replay_evidence import derive_replay_evidence
+from tradingbot_evaluation.replay_evidence import (
+    derive_identity_replay_evidence,
+    derive_replay_evidence,
+)
+from tradingbot_evaluation.replay_identity import MAX_IDENTITY_REGISTRY_BYTES
 from tradingbot_evaluation.research_costs import (
     ResearchPermitArchive,
     ResearchRates,
@@ -53,7 +58,12 @@ from tradingbot_evaluation.statistics import (
     protocol_sha256,
 )
 from tradingbot_evaluation.trend import TrendConfig
-from tradingbot_evaluation.walk_forward import WalkForwardPlan, local_research, run_walk_forward
+from tradingbot_evaluation.walk_forward import (
+    load_walk_forward_plan,
+    local_research,
+    run_walk_forward,
+    walk_forward_plan_schema,
+)
 from tradingbot_evaluation.walk_forward_evidence import derive_walk_forward_evidence
 
 
@@ -74,6 +84,8 @@ def main(argv: list[str] | None = None) -> int:
     research_replay.add_argument("tape", type=Path)
     research_replay.add_argument("--export-sha256", required=True)
     research_replay.add_argument("--tape-sha256", required=True)
+    research_replay.add_argument("--identity-registry", type=Path)
+    research_replay.add_argument("--identity-registry-sha256")
     research_replay.add_argument(
         "--require-snapshot-continuity",
         action="store_true",
@@ -92,11 +104,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     walk_evidence.add_argument("protocol", type=Path)
     walk_evidence.add_argument("--protocol-sha256", required=True)
+    walk_evidence.add_argument("--identity-registry", type=Path)
     ablation = commands.add_parser(
         "ablation-evidence", help="Compare frozen offline strategy variants on paired NAV dates"
     )
     ablation.add_argument("protocol", type=Path)
     ablation.add_argument("--protocol-sha256", required=True)
+    ablation.add_argument("--identity-registry", type=Path)
     for study in (walk, walk_evidence, ablation):
         study.add_argument("plan", type=Path)
         study.add_argument("tape", type=Path)
@@ -104,6 +118,8 @@ def main(argv: list[str] | None = None) -> int:
         study.add_argument("--archive-root", required=True, type=Path)
     walk.add_argument("--plan-sha256", required=True)
     walk.add_argument("--tape-sha256", required=True)
+    walk.add_argument("--identity-registry", type=Path)
+    walk.add_argument("--identity-registry-sha256")
     walk.add_argument(
         "--include-replay-input",
         action="store_true",
@@ -116,6 +132,9 @@ def main(argv: list[str] | None = None) -> int:
     benchmark.add_argument("--trend-symbol")
     benchmark.add_argument("--trend-lookback-quotes", type=int)
     benchmark.add_argument("--trend-max-gap-seconds", type=int)
+    benchmark.add_argument("--rebalance-at", action="append", type=parse_rebalance_at)
+    benchmark.add_argument("--rebalance-phase-seconds", type=int)
+    benchmark.add_argument("--rebalance-max-mark-age-seconds", type=int)
     statistics_schema = commands.add_parser(
         "statistics-schema", help="Write a statistics JSON schema"
     )
@@ -199,6 +218,8 @@ def main(argv: list[str] | None = None) -> int:
     replay_evidence.add_argument("protocol", type=Path)
     replay_evidence.add_argument("input", type=Path)
     replay_evidence.add_argument("--protocol-sha256", required=True)
+    replay_evidence.add_argument("--research-export", type=Path)
+    replay_evidence.add_argument("--identity-registry", type=Path)
     paper_evidence = commands.add_parser(
         "paper-evidence", help="Derive statistics evidence from a pinned paper NAV report"
     )
@@ -282,9 +303,15 @@ def main(argv: list[str] | None = None) -> int:
                 "expected_tape_sha256": args.tape_sha256,
                 "require_snapshot_continuity": args.require_snapshot_continuity,
             }
+            if (args.identity_registry is None) != (args.identity_registry_sha256 is None):
+                raise ValueError("Pass both the identity registry and its independently pinned SHA-256")
+            if args.identity_registry is not None:
+                with args.identity_registry.open("rb") as source:
+                    pins["identity_registry_raw"] = source.read(MAX_IDENTITY_REGISTRY_BYTES + 1)
+                pins["expected_identity_registry_sha256"] = args.identity_registry_sha256
             if args.emit_replay_input:
                 prepared = prepare_research_replay(export_raw, tape_raw, **pins)
-                result = json.loads(msgspec.json.encode(prepared.replay))
+                result = prepared.native_input()
             else:
                 result = run_research_replay(export_raw, tape_raw, **pins)
         elif args.command in {"walk-forward", "walk-forward-evidence", "ablation-evidence"}:
@@ -293,25 +320,54 @@ def main(argv: list[str] | None = None) -> int:
             with args.tape.open("rb") as source:
                 tape_raw = source.read(MAX_INPUT_BYTES + 1)
             if args.command == "walk-forward":
+                if (args.identity_registry is None) != (args.identity_registry_sha256 is None):
+                    raise ValueError("Pass both the identity registry and its independently pinned SHA-256")
+                registry_raw, registry = None, None
+                if args.identity_registry is not None:
+                    with args.identity_registry.open("rb") as source:
+                        registry_raw = source.read(MAX_IDENTITY_REGISTRY_BYTES + 1)
+                    plan = load_walk_forward_plan(plan_raw, args.plan_sha256)
+                    if plan.identity_registry is not msgspec.UNSET:
+                        registry = plan.identity_registry
                 result = run_walk_forward(
                     plan_raw,
                     tape_raw,
-                    infer=local_research(args.research_python, args.archive_root),
+                    infer=local_research(
+                        args.research_python, args.archive_root, identity_registry=registry,
+                    ),
                     expected_plan_sha256=args.plan_sha256,
                     expected_tape_sha256=args.tape_sha256,
+                    identity_registry_raw=registry_raw,
+                    expected_identity_registry_sha256=args.identity_registry_sha256,
                     include_replay_input=args.include_replay_input,
                 )
             else:
                 with args.protocol.open("rb") as source:
                     protocol = load_protocol(source.read(MAX_INPUT_BYTES + 1))
-                if args.command == "ablation-evidence":
+                is_ablation = args.command == "ablation-evidence"
+                registry_raw, registry = None, None
+                if args.identity_registry is not None:
+                    with args.identity_registry.open("rb") as source:
+                        registry_raw = source.read(MAX_IDENTITY_REGISTRY_BYTES + 1)
+                    study_source = (
+                        protocol.ablation_source if is_ablation else protocol.walk_forward_source
+                    )
+                    if study_source is not msgspec.UNSET:
+                        plan = load_walk_forward_plan(plan_raw, study_source.plan_sha256)
+                        if plan.identity_registry is not msgspec.UNSET:
+                            registry = plan.identity_registry
+                if is_ablation:
                     evidence = derive_ablation_evidence(
                         protocol,
                         plan_raw,
                         tape_raw,
                         expected_protocol_sha256=args.protocol_sha256,
+                        identity_registry_raw=registry_raw,
                         infer_for=lambda variant: local_research(
-                            args.research_python, args.archive_root, variant=variant
+                            args.research_python,
+                            args.archive_root,
+                            variant=variant,
+                            identity_registry=registry,
                         ),
                     )
                 else:
@@ -319,14 +375,15 @@ def main(argv: list[str] | None = None) -> int:
                         protocol,
                         plan_raw,
                         tape_raw,
-                        infer=local_research(args.research_python, args.archive_root),
+                        infer=local_research(
+                            args.research_python, args.archive_root, identity_registry=registry,
+                        ),
                         expected_protocol_sha256=args.protocol_sha256,
+                        identity_registry_raw=registry_raw,
                     )
                 result = msgspec.to_builtins(evidence)
         elif args.command == "walk-forward-schema":
-            result = {"$schema": "https://json-schema.org/draft/2020-12/schema"} | (
-                msgspec.json.schema(WalkForwardPlan)
-            )
+            result = walk_forward_plan_schema()
         elif args.command in {
             "schema",
             "statistics-schema",
@@ -396,9 +453,28 @@ def main(argv: list[str] | None = None) -> int:
                 with args.input.open("rb") as source:
                     raw = source.read(MAX_INPUT_BYTES + 1)
                 if args.command == "replay-evidence":
-                    evidence = derive_replay_evidence(
-                        protocol, load_replay(raw), expected_protocol_sha256=args.protocol_sha256
+                    has_identity_inputs = args.research_export is not None or args.identity_registry is not None
+                    stable_source = (
+                        protocol.replay_source is not msgspec.UNSET
+                        and protocol.replay_source.identity is not msgspec.UNSET
                     )
+                    if stable_source or has_identity_inputs:
+                        from tradingbot_evaluation.research_replay import MAX_RESEARCH_EXPORT_BYTES
+
+                        if args.research_export is None or args.identity_registry is None:
+                            raise ValueError("Stable replay evidence requires --research-export and --identity-registry")
+                        with args.research_export.open("rb") as source:
+                            export_raw = source.read(MAX_RESEARCH_EXPORT_BYTES + 1)
+                        with args.identity_registry.open("rb") as source:
+                            registry_raw = source.read(MAX_IDENTITY_REGISTRY_BYTES + 1)
+                        evidence = derive_identity_replay_evidence(
+                            protocol, raw, export_raw, registry_raw,
+                            expected_protocol_sha256=args.protocol_sha256,
+                        )
+                    else:
+                        evidence = derive_replay_evidence(
+                            protocol, load_replay(raw), expected_protocol_sha256=args.protocol_sha256
+                        )
                 else:
                     benchmark = None
                     if args.benchmark_input is not None:
@@ -448,11 +524,24 @@ def main(argv: list[str] | None = None) -> int:
                             "Trend benchmark requires symbol, lookback quotes and max gap seconds"
                         )
                     trend = TrendConfig(*trend_args)
+                rebalance_args = (
+                    args.rebalance_at,
+                    args.rebalance_phase_seconds,
+                    args.rebalance_max_mark_age_seconds,
+                )
+                schedule = None
+                if any(value is not None for value in rebalance_args):
+                    if any(value is None for value in rebalance_args):
+                        raise ValueError(
+                            "Scheduled equal weight requires cutoff, phase seconds and max mark age"
+                        )
+                    schedule = EqualWeightSchedule(tuple(args.rebalance_at), *rebalance_args[1:])
                 result = run_benchmarks(
                     fixture,
                     start_at=args.start_at,
                     buy_and_hold_symbol=args.buy_and_hold_symbol,
                     trend=trend,
+                    equal_weight_schedule=schedule,
                 )
             else:
                 result = run_replay(fixture, through=args.through)

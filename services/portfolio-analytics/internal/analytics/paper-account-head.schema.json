@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Observed paper ledger account head 1.0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "account_id", "account_version", "observed_at"],
+  "properties": {
+    "version": {"const": "1.0"},
+    "account_id": {"type": "string", "pattern": "^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$"},
+    "account_version": {"type": "integer", "minimum": 1, "maximum": 9223372036854775807},
+    "observed_at": {"type": "string", "format": "date-time", "pattern": "Z$"}
+  }
+}

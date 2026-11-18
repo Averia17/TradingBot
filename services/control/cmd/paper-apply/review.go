@@ -11,6 +11,7 @@ import (
 
 	"tradingbot/control/internal/jobs"
 	"tradingbot/control/internal/ledger"
+	"tradingbot/control/internal/paperapply"
 	"tradingbot/control/internal/paperthesis"
 	"tradingbot/control/internal/researchscheduler"
 )
@@ -71,6 +72,12 @@ func review(ctx context.Context, dsn string, args []string, output io.Writer, no
 		event, err := snapshot.VerifyEvent(*archiveRoot, *provider, *record)
 		if err != nil {
 			return err
+		}
+		if opening := view.OpeningIdentity; opening != nil {
+			binding := paperapply.ResearchSecurityBinding{Symbol: opening.Symbol, SecurityID: opening.SecurityID}
+			if err := paperapply.VerifyIdentityEvent(*archiveRoot, opening.Registry, binding, opening.Instrument, view.AsOf, event); err != nil {
+				return err
+			}
 		}
 		trigger, err := paperthesis.CatalystReview(view, event)
 		if err != nil {

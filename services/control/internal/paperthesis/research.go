@@ -10,18 +10,47 @@ import (
 	"tradingbot/control/internal/contract"
 	"tradingbot/control/internal/jobs"
 	"tradingbot/control/internal/ledger"
+	"tradingbot/control/internal/paperapply"
 )
 
-func openingDecision(ctx context.Context, research ResearchSource, order ledger.ReservationRequest, reservedAt time.Time) (contract.Intent, error) {
+func openingDecision(ctx context.Context, research ResearchSource, source openingSource, order ledger.Order,
+	reservedAt time.Time) (contract.Intent, *paperapply.OpeningIdentity, error) {
 	job, err := research.Get(ctx, order.ResearchJobID)
 	if err != nil {
-		return contract.Intent{}, fmt.Errorf("read opening research job: %w", err)
+		return contract.Intent{}, nil, fmt.Errorf("read opening research job: %w", err)
+	}
+	var header struct {
+		Version string `json:"job_schema_version"`
+	}
+	if json.Unmarshal(job.Request, &header) != nil {
+		return contract.Intent{}, nil, ErrInvalid
+	}
+	if header.Version == paperapply.IdentityVersion {
+		withDispatch, ok := research.(interface {
+			ResearchSource
+			GetPaperDispatch(context.Context, string) (jobs.PaperDispatchTask, error)
+		})
+		withApplication, haveApplication := source.(interface {
+			GetApplication(context.Context, string) (ledger.ApplicationRecord, error)
+		})
+		if !ok || !haveApplication {
+			return contract.Intent{}, nil, ErrUnlinked
+		}
+		identity, err := paperapply.ReadOpeningIdentity(ctx, withDispatch, withApplication, order, reservedAt)
+		if err != nil {
+			return contract.Intent{}, nil, err
+		}
+		if !supportedHorizon(identity.Decision) {
+			return contract.Intent{}, nil, ErrInvalid
+		}
+		return identity.Decision, &identity, nil
 	}
 	receipt, err := research.GetResult(ctx, order.ResearchJobID)
 	if err != nil {
-		return contract.Intent{}, fmt.Errorf("read opening research result: %w", err)
+		return contract.Intent{}, nil, fmt.Errorf("read opening research result: %w", err)
 	}
-	return checkOpeningDecision(job, receipt, order, reservedAt)
+	decision, err := checkOpeningDecision(job, receipt, order.ReservationRequest, reservedAt)
+	return decision, nil, err
 }
 
 func checkOpeningDecision(job jobs.Job, receipt jobs.Result, order ledger.ReservationRequest, reservedAt time.Time) (contract.Intent, error) {
@@ -61,11 +90,15 @@ func checkOpeningDecision(job jobs.Job, receipt jobs.Result, order ledger.Reserv
 		if strings.EqualFold(intent.ID, order.DecisionID) && (intent.Action == "BUY" || intent.Action == "ADD") {
 			// The research wire contract allows positive integers. Reject values
 			// that would overflow when converted to hours for the review clock.
-			if intent.Horizon.Min > 0 && int64(intent.Horizon.Max) <= int64((1<<63-1)/time.Hour) {
+			if supportedHorizon(intent) {
 				return intent, nil
 			}
 			break
 		}
 	}
 	return contract.Intent{}, fmt.Errorf("%w: no opening decision with a supported horizon", ErrInvalid)
+}
+
+func supportedHorizon(intent contract.Intent) bool {
+	return intent.Horizon.Min > 0 && int64(intent.Horizon.Max) <= int64((1<<63-1)/time.Hour)
 }

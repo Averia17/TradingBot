@@ -22,6 +22,96 @@
       "title": "ArchiveReference",
       "type": "object"
     },
+    "EntryCyclePlan": {
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": "0.1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "account_id": {
+          "pattern": "^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$",
+          "title": "Account Id",
+          "type": "string"
+        },
+        "schedule_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+          "title": "Schedule Id",
+          "type": "string"
+        },
+        "policy": {
+          "$ref": "#/$defs/ArchiveReference"
+        },
+        "occurrences": {
+          "items": {
+            "$ref": "#/$defs/Occurrence"
+          },
+          "maxItems": 32,
+          "minItems": 1,
+          "title": "Occurrences",
+          "type": "array"
+        }
+      },
+      "required": [
+        "schema_version",
+        "account_id",
+        "schedule_id",
+        "policy",
+        "occurrences"
+      ],
+      "title": "EntryCyclePlan",
+      "type": "object"
+    },
+    "IdentityEntryCyclePlan": {
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": "0.2",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "account_id": {
+          "pattern": "^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$",
+          "title": "Account Id",
+          "type": "string"
+        },
+        "schedule_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+          "title": "Schedule Id",
+          "type": "string"
+        },
+        "policy": {
+          "$ref": "#/$defs/ArchiveReference"
+        },
+        "occurrences": {
+          "items": {
+            "$ref": "#/$defs/Occurrence"
+          },
+          "maxItems": 32,
+          "minItems": 1,
+          "title": "Occurrences",
+          "type": "array"
+        },
+        "identity_registry": {
+          "$ref": "#/$defs/ArchiveReference"
+        },
+        "quote_tape": {
+          "$ref": "#/$defs/ArchiveReference"
+        }
+      },
+      "required": [
+        "schema_version",
+        "account_id",
+        "schedule_id",
+        "policy",
+        "occurrences",
+        "identity_registry",
+        "quote_tape"
+      ],
+      "title": "IdentityEntryCyclePlan",
+      "type": "object"
+    },
     "Occurrence": {
       "additionalProperties": false,
       "properties": {
@@ -54,43 +144,19 @@
       "type": "object"
     }
   },
-  "additionalProperties": false,
-  "properties": {
-    "schema_version": {
-      "const": "0.1",
-      "title": "Schema Version",
-      "type": "string"
+  "discriminator": {
+    "mapping": {
+      "0.1": "#/$defs/EntryCyclePlan",
+      "0.2": "#/$defs/IdentityEntryCyclePlan"
     },
-    "account_id": {
-      "pattern": "^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$",
-      "title": "Account Id",
-      "type": "string"
-    },
-    "schedule_id": {
-      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
-      "title": "Schedule Id",
-      "type": "string"
-    },
-    "policy": {
-      "$ref": "#/$defs/ArchiveReference"
-    },
-    "occurrences": {
-      "items": {
-        "$ref": "#/$defs/Occurrence"
-      },
-      "maxItems": 32,
-      "minItems": 1,
-      "title": "Occurrences",
-      "type": "array"
-    }
+    "propertyName": "schema_version"
   },
-  "required": [
-    "schema_version",
-    "account_id",
-    "schedule_id",
-    "policy",
-    "occurrences"
-  ],
-  "title": "EntryCyclePlan",
-  "type": "object"
+  "oneOf": [
+    {
+      "$ref": "#/$defs/EntryCyclePlan"
+    },
+    {
+      "$ref": "#/$defs/IdentityEntryCyclePlan"
+    }
+  ]
 }

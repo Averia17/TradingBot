@@ -7,6 +7,8 @@ import pytest
 
 from tradingbot.paper_memory import (
     PAPER_CONTEXT_BYTES,
+    PAPER_REFLECTION_METHOD,
+    DurablePaperOutcome,
     PaperOutcome,
     PaperReflection,
     build_contexts,
@@ -166,6 +168,88 @@ def test_legacy_archive_does_not_admit_a_new_record_type(tmp_path):
         load_snapshot(tmp_path, manifest, datetime.fromisoformat("2026-10-03T00:00:00Z"))
 
 
+def durable_record():
+    record = paper_record()
+    payload = record["payload"]
+    identity = f"{PAPER_REFLECTION_METHOD}:{payload['account_id']}:{payload['fill_event_id']}"
+    payload["schema_version"] = "0.2"
+    payload["durable_memory"] = {
+        "as_of": "2026-10-01T17:00:03Z",
+        "active": {
+            "lesson_id": hashlib.sha256(identity.encode()).hexdigest(),
+            "event_id": uuid(55),
+            "revision": 3,
+            "action": "reinstate",
+            "available_at": "2026-10-01T17:00:02Z",
+            "source_outcome_sha256": "a" * 64,
+        },
+    }
+    return record
+
+
+def test_durable_reflection_uses_recorded_identity_only_at_matching_cutoff(tmp_path):
+    record = durable_record()
+    memory = record["payload"]["durable_memory"]
+    manifest = archive(tmp_path, record)
+
+    def observe(cutoff, *, reflect=True):
+        snapshot = load_snapshot(tmp_path, manifest, datetime.fromisoformat(cutoff))
+        contexts = build_contexts(snapshot, ["TSLA"], "policy-v1", include_reflections=reflect)
+        return json.loads(contexts["TSLA"].split("\n", 1)[1])["records"][0]
+
+    observed = observe(memory["as_of"])
+    lesson = observed["factual_reflection"]
+    assert lesson["schema_version"] == "0.2"
+    assert lesson["lesson_id"] == memory["active"]["lesson_id"]
+    assert lesson["lesson_event_id"] == uuid(55)
+    assert lesson["lesson_revision"] == 3
+    assert lesson["available_at"] == memory["active"]["available_at"]
+    assert lesson["source_outcome_sha256"] == "a" * 64
+    assert lesson["realized_outcome"] == "loss"
+    assert "durable_memory" not in observed["payload"]
+    for cutoff in ("2026-10-01T17:00:01Z", "2026-10-01T17:00:04Z"):
+        factual = observe(cutoff)
+        assert "factual_reflection" not in factual
+        assert factual["payload"]["net_pnl_usd"] == "-0.00000008"
+    assert "factual_reflection" not in observe(memory["as_of"], reflect=False)
+
+    memory["active"] = None
+    manifest = archive(tmp_path, record)
+    assert "factual_reflection" not in observe(memory["as_of"])
+
+
+@pytest.mark.parametrize(
+    ("attribute", "value"),
+    [
+        ("lesson_id", "0" * 64),
+        ("available_at", "2026-10-01T17:00:04Z"),
+        ("available_at", "2026-10-01T17:00:00Z"),
+        ("available_at", "2026-10-01T17:00:03.0000001Z"),
+        ("available_at", 1790874002),
+        ("revision", 2),
+        ("action", "retract"),
+    ],
+)
+def test_invalid_durable_lesson_fails_before_prompt(tmp_path, attribute, value):
+    record = durable_record()
+    record["payload"]["durable_memory"]["active"][attribute] = value
+    with pytest.raises(ValueError):
+        load_snapshot(
+            tmp_path,
+            archive(tmp_path, record),
+            datetime.fromisoformat("2026-10-01T17:00:03Z"),
+        )
+
+
+def test_durable_archive_rejects_cutoff_with_submicrosecond_precision(tmp_path):
+    record = durable_record()
+    record["payload"]["durable_memory"]["as_of"] = "2026-10-01T17:00:03.0000001Z"
+    with pytest.raises(ValueError, match="requires an ISO timestamp"):
+        load_snapshot(
+            tmp_path, archive(tmp_path, record), datetime.fromisoformat("2026-10-01T17:00:03Z")
+        )
+
+
 def test_reflection_is_linked_to_the_exact_receipted_sale_and_policy(tmp_path):
     sale = paper_record()
     sale["payload"].update(
@@ -204,14 +288,21 @@ def test_reflection_is_linked_to_the_exact_receipted_sale_and_policy(tmp_path):
     assert len(context.encode("utf-8")) <= PAPER_CONTEXT_BYTES
 
 
-def test_published_outcome_schema_matches_consumer():
+@pytest.mark.parametrize(
+    ("filename", "model"),
+    [
+        ("paper-outcome.schema.json", PaperOutcome),
+        ("paper-durable-outcome.schema.json", DurablePaperOutcome),
+    ],
+)
+def test_published_outcome_schema_matches_consumer(filename, model):
     root = Path(__file__).resolve().parents[3]
     published = json.loads(
-        (root / "contracts/paper-outcome.schema.json").read_text(encoding="utf-8")
+        (root / "contracts" / filename).read_text(encoding="utf-8")
     )
     assert published == {
         "$schema": "https://json-schema.org/draft/2020-12/schema"
-    } | PaperOutcome.model_json_schema(mode="serialization")
+    } | model.model_json_schema(mode="serialization")
 
 
 def test_published_reflection_schema_and_fixture_match_the_derived_label():

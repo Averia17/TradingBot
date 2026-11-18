@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "Local paper application contract 0.1",
+  "title": "Local paper application contracts",
   "$ref": "#/$defs/Request",
   "$defs": {
     "Identifier": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9:._-]{0,127}$"},
@@ -74,13 +74,69 @@
         "portfolio": {"$ref": "portfolio.schema.json"}
       }
     },
+    "OwnerIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["identity_registry", "quote_tape"],
+      "properties": {
+        "identity_registry": {"$ref": "research-job.schema.json#/$defs/PinnedLocalReference"},
+        "quote_tape": {"$ref": "research-job.schema.json#/$defs/PinnedLocalReference"}
+      }
+    },
+    "ReviewIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["identity_registry", "quote_tape", "projected_snapshot_sha256"],
+      "properties": {
+        "identity_registry": {"$ref": "research-job.schema.json#/$defs/PinnedLocalReference"},
+        "quote_tape": {"$ref": "research-job.schema.json#/$defs/PinnedLocalReference"},
+        "projected_snapshot_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    },
+    "ReviewOrigin": {
+      "description": "Immutable opening order and application proof retained by a stable review approval.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["opening_order_id", "opening_application_sha256"],
+      "properties": {
+        "opening_order_id": {"$ref": "paper-account.schema.json#/$defs/AccountID"},
+        "opening_application_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    },
+    "IdentityBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["identity_registry", "quote_tape", "projected_snapshot_sha256", "security_bindings"],
+      "properties": {
+        "identity_registry": {"$ref": "research-job.schema.json#/$defs/PinnedLocalReference"},
+        "quote_tape": {"$ref": "research-job.schema.json#/$defs/PinnedLocalReference"},
+        "projected_snapshot_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "security_bindings": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 100,
+          "uniqueItems": true,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["symbol", "security_id", "instrument"],
+            "properties": {
+              "symbol": {"$ref": "research-job.schema.json#/$defs/JobRequest/properties/requested_symbols/items"},
+              "security_id": {"$ref": "#/$defs/Identifier"},
+              "instrument": {"$ref": "paper-account.schema.json#/$defs/Instrument"},
+              "expires_at": {"type": "string", "format": "date-time"}
+            }
+          }
+        }
+      }
+    },
     "ReviewScheduleRequest": {
       "description": "Submit a due paper thesis review to the ordinary research queue. If portfolio is omitted, derive the snapshot at the database clock and reuse the first accepted input on an identical configuration replay.",
       "type": "object",
       "additionalProperties": false,
       "required": ["review_schedule_schema_version", "opening_order_id", "snapshot_context", "data_manifest", "max_llm_calls"],
       "properties": {
-        "review_schedule_schema_version": {"const": "0.1"},
+        "review_schedule_schema_version": {"enum": ["0.1", "0.2"]},
         "opening_order_id": {"$ref": "paper-account.schema.json#/$defs/AccountID"},
         "snapshot_context": {
           "type": "object",
@@ -104,6 +160,7 @@
           }
         },
         "max_llm_calls": {"type": "integer", "minimum": 1, "maximum": 64},
+        "identity_binding": {"$ref": "#/$defs/ReviewIdentity"},
         "event": {
           "type": "object",
           "additionalProperties": false,
@@ -117,27 +174,42 @@
       },
       "if": {"required": ["portfolio"]},
       "then": {"properties": {"snapshot_context": {"required": ["snapshot_version"], "properties": {"snapshot_version": {"minimum": 1}}}}},
-      "else": {"properties": {"snapshot_context": {"properties": {"snapshot_version": {"const": 0}}}}}
+      "else": {"properties": {"snapshot_context": {"properties": {"snapshot_version": {"const": 0}}}}},
+      "allOf": [{
+        "if": {"properties": {"review_schedule_schema_version": {"const": "0.2"}}},
+        "then": {"required": ["identity_binding", "portfolio"]},
+        "else": {"not": {"required": ["identity_binding"]}}
+      }]
     },
     "ReviewScheduleReceipt": {
       "type": "object",
       "additionalProperties": false,
       "required": ["review_schedule_schema_version", "status", "created"],
       "properties": {
-        "review_schedule_schema_version": {"const": "0.1"},
-        "status": {"enum": ["not_due", "queued", "leased", "failed", "expired", "completed"]},
+        "review_schedule_schema_version": {"enum": ["0.1", "0.2"]},
+        "status": {"enum": ["not_due", "missed", "already_scheduled", "queued", "leased", "failed", "expired", "completed"]},
         "created": {"type": "boolean"},
         "trigger": {"$ref": "paper-thesis.schema.json#/$defs/Trigger"},
         "job_id": {"$ref": "paper-account.schema.json#/$defs/AccountID"},
         "created_at": {"type": "string", "format": "date-time"},
         "snapshot": {"$ref": "#/$defs/SnapshotBundle"}
       },
-      "if": {"properties": {"status": {"const": "not_due"}}},
+      "if": {"properties": {"status": {"enum": ["not_due", "missed"]}}},
       "then": {
         "properties": {"created": {"const": false}},
-        "not": {"anyOf": [{"required": ["trigger"]}, {"required": ["job_id"]}, {"required": ["created_at"]}, {"required": ["snapshot"]}]}
+        "not": {"anyOf": [{"required": ["trigger"]}, {"required": ["job_id"]}, {"required": ["created_at"]}, {"required": ["snapshot"]}]},
+        "if": {"properties": {"status": {"const": "missed"}}},
+        "then": {"properties": {"review_schedule_schema_version": {"const": "0.2"}}}
       },
-      "else": {"required": ["trigger", "job_id", "created_at", "snapshot"]}
+      "else": {
+        "if": {"properties": {"status": {"const": "already_scheduled"}}},
+        "then": {
+          "properties": {"review_schedule_schema_version": {"const": "0.2"}, "created": {"const": false}},
+          "required": ["job_id", "created_at"],
+          "not": {"anyOf": [{"required": ["trigger"]}, {"required": ["snapshot"]}]}
+        },
+        "else": {"required": ["trigger", "job_id", "created_at", "snapshot"]}
+      }
     },
     "EntryScheduleRequest": {
       "description": "One owner-authorized calendar occurrence over a SHA-256-pinned selection receipt. Account ID, schedule ID and scheduled UTC instant determine the durable job ID.",
@@ -145,14 +217,18 @@
       "additionalProperties": false,
       "required": ["entry_schedule_schema_version", "schedule_id", "scheduled_at", "max_lateness_seconds", "max_job_llm_calls", "snapshot_context", "selection_sha256"],
       "properties": {
-        "entry_schedule_schema_version": {"const": "0.1"},
+        "entry_schedule_schema_version": {"enum": ["0.1", "0.2"]},
         "schedule_id": {"$ref": "research-job.schema.json#/$defs/Identifier"},
         "scheduled_at": {"type": "string", "format": "date-time"},
         "max_lateness_seconds": {"type": "integer", "minimum": 1, "maximum": 3600},
         "max_job_llm_calls": {"type": "integer", "minimum": 1, "maximum": 64},
         "snapshot_context": {"$ref": "#/$defs/SnapshotContext"},
-        "selection_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
-      }
+        "selection_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "identity_binding": {"$ref": "#/$defs/OwnerIdentity"}
+      },
+      "if": {"properties": {"entry_schedule_schema_version": {"const": "0.2"}}},
+      "then": {"required": ["identity_binding"]},
+      "else": {"not": {"required": ["identity_binding"]}}
     },
     "EntrySelection": {
       "description": "Selection receipt as emitted by tradingbot.selection. Candidate diagnostics and the suggested job ID are informational.",
@@ -160,20 +236,23 @@
       "additionalProperties": false,
       "required": ["selection_schema_version", "source_mode", "snapshot_sha256", "stockstats_version", "job", "candidates"],
       "properties": {
-        "selection_schema_version": {"const": "0.1"},
+        "selection_schema_version": {"enum": ["0.1", "0.2"]},
         "source_mode": {"enum": ["synthetic_fixture", "local_archive"]},
         "snapshot_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
         "stockstats_version": {"type": "string", "minLength": 1, "maxLength": 128},
-        "job": {"anyOf": [{"$ref": "research-job.schema.json#/$defs/JobRequest"}, {"type": "null"}]},
+        "job": {},
         "candidates": {"type": "array", "maxItems": 100, "items": {"type": "object"}}
-      }
+      },
+      "if": {"properties": {"selection_schema_version": {"const": "0.2"}}},
+      "then": {"properties": {"job": {"anyOf": [{"$ref": "research-job.schema.json#/$defs/IdentityJobRequest"}, {"type": "null"}]}}},
+      "else": {"properties": {"job": {"anyOf": [{"$ref": "research-job.schema.json#/$defs/JobRequest"}, {"type": "null"}]}}}
     },
     "EntryScheduleReceipt": {
       "type": "object",
       "additionalProperties": false,
       "required": ["entry_schedule_schema_version", "status", "created"],
       "properties": {
-        "entry_schedule_schema_version": {"const": "0.1"},
+        "entry_schedule_schema_version": {"enum": ["0.1", "0.2"]},
         "status": {"enum": ["not_due", "not_selected", "missed", "queued", "leased", "failed", "expired", "completed"]},
         "created": {"type": "boolean"},
         "job_id": {"$ref": "paper-account.schema.json#/$defs/AccountID"},
@@ -191,12 +270,25 @@
       "additionalProperties": false,
       "required": ["paper_apply_schema_version", "job_id", "snapshot_context"],
       "properties": {
-        "paper_apply_schema_version": {"const": "0.1"},
+        "paper_apply_schema_version": {"enum": ["0.1", "0.2"]},
         "job_id": {"$ref": "paper-account.schema.json#/$defs/AccountID"},
         "snapshot_context": {"$ref": "#/$defs/SnapshotContext"},
         "entry_schedule_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-        "intent": {"anyOf": [{"$ref": "paper-replay.schema.json#/$defs/Intent"}, {"type": "null"}]}
-      }
+        "review_schedule_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "review_origin": {"$ref": "#/$defs/ReviewOrigin"},
+        "intent": {"anyOf": [{"$ref": "paper-replay.schema.json#/$defs/Intent"}, {"type": "null"}]},
+        "identity_binding": {"$ref": "#/$defs/IdentityBinding"}
+      },
+      "if": {"properties": {"paper_apply_schema_version": {"const": "0.2"}}},
+      "then": {
+        "required": ["identity_binding"],
+        "not": {"required": ["intent"]},
+        "oneOf": [
+          {"required": ["entry_schedule_sha256"], "not": {"anyOf": [{"required": ["review_origin"]}, {"required": ["review_schedule_sha256"]}]}},
+          {"required": ["review_schedule_sha256"], "not": {"required": ["entry_schedule_sha256"]}}
+        ]
+      },
+      "else": {"not": {"anyOf": [{"required": ["identity_binding"]}, {"required": ["review_schedule_sha256"]}, {"required": ["review_origin"]}]}}
     },
     "QuotePin": {
       "type": "object",

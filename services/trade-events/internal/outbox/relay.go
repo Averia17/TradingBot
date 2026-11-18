@@ -40,9 +40,13 @@ func (r *relay) RunTask(ctx context.Context, job *pgqueue.Job[fill_event.Event])
 }
 
 func (r *relay) publish(ctx context.Context, taskID int64, id string, payload []byte) pgqueue.Result {
+	return r.publishKeyed(ctx, taskID, id, id, payload)
+}
+
+func (r *relay) publishKeyed(ctx context.Context, taskID int64, id, key string, payload []byte) pgqueue.Result {
 	ctx, cancel := context.WithTimeout(ctx, 12*time.Second)
 	defer cancel()
-	record := &kgo.Record{Topic: r.topic, Key: []byte(id), Value: payload}
+	record := &kgo.Record{Topic: r.topic, Key: []byte(key), Value: payload}
 	if err := r.producer.ProduceSync(ctx, record).FirstErr(); err != nil {
 		return pgqueue.Retry(fmt.Errorf("publish fill %s to Kafka: %w", id, err))
 	}

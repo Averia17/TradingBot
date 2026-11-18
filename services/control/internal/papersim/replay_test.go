@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -162,5 +163,43 @@ func TestReplayRejectsBeforeReservation(t *testing.T) {
 	raw := bindQuote(t, &intent, quote)
 	if _, err := Run(context.Background(), &recordingLedger{}, intent, append(raw, '\n'), now); err == nil {
 		t.Fatal("modified fixture bytes accepted")
+	}
+}
+
+func TestIdentityQuoteRequiresMatchingBoundIntent(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	intent, quote := fixture(now)
+	registry := strings.Repeat("d", 64)
+	quote.Version, quote.SecurityID, quote.IdentityRegistrySHA256 = IdentityQuoteVersion, "fixture-nvidia", registry
+	raw := bindQuote(t, &intent, quote)
+	if _, err := Preview(intent, raw, now); err == nil {
+		t.Fatal("legacy intent accepted a security-bound quote")
+	}
+	intent.Version, intent.SecurityID, intent.IdentityRegistrySHA256 = IdentityIntentVersion, "fixture-nvidia", registry
+	for _, mismatch := range []func(*Intent){
+		func(in *Intent) { in.SecurityID = "different-security" },
+		func(in *Intent) { in.IdentityRegistrySHA256 = strings.Repeat("a", 64) },
+		func(in *Intent) { in.Instrument.RegistryVersion = "different-version" },
+		func(in *Intent) { in.Instrument.Decimals = 2 },
+	} {
+		changed := intent
+		mismatch(&changed)
+		if _, err := Preview(changed, raw, now); err == nil {
+			t.Fatal("security-bound simulator accepted a different exact identity")
+		}
+	}
+	store := &recordingLedger{created: now}
+	result, err := Run(t.Context(), store, intent, raw, now)
+	if err != nil || result.Order.Status != "filled" || result.Version != IdentityQuoteVersion ||
+		result.SecurityID != quote.SecurityID || result.IdentityRegistrySHA256 != registry ||
+		result.QuoteSHA256 != intent.QuoteSHA256 {
+		t.Fatalf("identity quote result = %+v, %v", result, err)
+	}
+	encoded, err := json.Marshal(intent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ParseIntent(encoded); err == nil {
+		t.Fatal("standalone replay accepted a security-bound intent")
 	}
 }

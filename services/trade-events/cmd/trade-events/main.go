@@ -25,19 +25,25 @@ import (
 func main() {
 	requeue := flag.Int64("requeue-task", 0, "requeue a failed trade outbox task by ID and exit")
 	paperLedger := flag.Bool("paper-ledger", false, "relay authoritative virtual paper fills from Control's PostgreSQL database")
+	paperAccount := flag.Bool("paper-account", false, "relay authoritative paper account events and publish account heads")
+	replayAccount := flag.String("replay-paper-account", "", "republish the retained source events of one paper account and exit")
 	flag.Parse()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	if err := run(ctx, *requeue, *paperLedger); err != nil && ctx.Err() == nil {
+	if err := run(ctx, *requeue, *paperLedger, *paperAccount, *replayAccount); err != nil && ctx.Err() == nil {
 		slog.Error("trade events stopped", "error", err)
 		os.Exit(1)
 	}
 }
 
-func run(ctx context.Context, requeue int64, paperLedger bool) error {
+func run(ctx context.Context, requeue int64, paperLedger, paperAccount bool, replayAccount string) error {
 	dsn := os.Getenv("TRADINGBOT_DATABASE_URL")
 	if dsn == "" {
 		return errors.New("TRADINGBOT_DATABASE_URL is required")
+	}
+	accountMode := paperAccount || replayAccount != ""
+	if accountMode && (paperLedger || requeue != 0 || paperAccount && replayAccount != "") {
+		return errors.New("trade-events relay and maintenance modes are mutually exclusive")
 	}
 	if requeue != 0 {
 		if requeue < 0 {
@@ -56,6 +62,19 @@ func run(ctx context.Context, requeue int64, paperLedger bool) error {
 	if !paperLedger && kafkaConfig.Topic == fill_event.PaperTopic {
 		return errors.New("dedicated paper topic requires -paper-ledger")
 	}
+	if accountMode && (address != "" || kafkaConfig.Topic != outbox.PaperAccountTopic) {
+		return errors.New("paper account relay and replay require the dedicated portfolio account topic and an unset TRADINGBOT_TEST_EXCHANGE_ADDR")
+	}
+	if !accountMode && (kafkaConfig.Topic == outbox.PaperAccountTopic || kafkaConfig.Topic == outbox.PaperAccountHeadTopic) {
+		return errors.New("dedicated portfolio account topics require -paper-account or -replay-paper-account")
+	}
+	headInterval := 20 * time.Second
+	if value := os.Getenv("TRADINGBOT_PAPER_ACCOUNT_HEAD_INTERVAL"); paperAccount && value != "" {
+		headInterval, err = time.ParseDuration(value)
+		if err != nil || headInterval <= 0 {
+			return errors.New("TRADINGBOT_PAPER_ACCOUNT_HEAD_INTERVAL must contain a positive duration")
+		}
+	}
 	producer, err := kgo.NewClient(kgo.SeedBrokers(kafkaConfig.Brokers...), kgo.RequiredAcks(kgo.AllISRAcks()),
 		kgo.RecordDeliveryTimeout(10*time.Second))
 	if err != nil {
@@ -72,7 +91,18 @@ func run(ctx context.Context, requeue int64, paperLedger bool) error {
 	if err := producer.Ping(startup); err != nil {
 		return errors.New("Kafka unreachable at startup")
 	}
+	if replayAccount != "" {
+		count, err := queue.ReplayPaperAccount(ctx, producer, replayAccount)
+		if err != nil {
+			return err
+		}
+		slog.Info("paper account replay published", "account_id", replayAccount, "events", count)
+		return nil
+	}
 	slog.Info("trade relay started", "topic", kafkaConfig.Topic)
+	if paperAccount {
+		return queue.RelayPaperAccounts(ctx, producer, headInterval)
+	}
 	if paperLedger {
 		return queue.RelayPaper(ctx, producer)
 	}

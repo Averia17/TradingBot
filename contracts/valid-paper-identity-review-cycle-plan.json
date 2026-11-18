@@ -1,0 +1,54 @@
+{
+  "schema_version": "0.1",
+  "account_id": "11111111-1111-4111-8111-111111111111",
+  "schedule_id": "synthetic-holding-review",
+  "policy": {
+    "ref": "contracts/valid-paper-policy.json",
+    "sha256": "23fbc7d65c08429ca69b0456aaa4ebf7d93eb2a92b1650ea6e94f1b72354e745"
+  },
+  "identity_registry": {
+    "ref": "services/research/examples/selection/identity-registry.json",
+    "sha256": "aa3d6dc48790eb7d7e549f684ffb0cdfa855625c4dd6d76c3fe2220c35a86f5c"
+  },
+  "quote_tape": {
+    "ref": "services/research/examples/entry-cycles/identity-tape.json",
+    "sha256": "f4109ff7a1cac86f17ee6df3d395fec3dd5b0c8028ab96eaec6c3e39c9589a36"
+  },
+  "occurrences": [
+    {
+      "opening_order_id": "22222222-2222-4222-8222-222222222222",
+      "as_of": "2026-11-18T10:00:00Z",
+      "release_at": "2026-11-18T10:00:00Z",
+      "max_lateness_seconds": 15,
+      "data_manifest": {
+        "ref": "services/research/examples/selection/identity-market.json",
+        "sha256": "7015cfad25251d66832f7db2d84739a5e9ee0558406932509e544ecffab38046"
+      },
+      "marks": {
+        "ref": "services/research/examples/entry-cycles/marks.json",
+        "sha256": "6f37f5aded1c3fa682e327e1af0f92de95424a4e95a50a0ca221187253da08bf"
+      },
+      "max_llm_calls": 20
+    },
+    {
+      "opening_order_id": "22222222-2222-4222-8222-222222222222",
+      "as_of": "2026-11-18T10:00:10Z",
+      "release_at": "2026-11-18T10:00:15Z",
+      "max_lateness_seconds": 15,
+      "data_manifest": {
+        "ref": "services/research/examples/selection/identity-market.json",
+        "sha256": "7015cfad25251d66832f7db2d84739a5e9ee0558406932509e544ecffab38046"
+      },
+      "marks": {
+        "ref": "services/research/examples/entry-cycles/marks.json",
+        "sha256": "6f37f5aded1c3fa682e327e1af0f92de95424a4e95a50a0ca221187253da08bf"
+      },
+      "max_llm_calls": 20,
+      "event": {
+        "kind": "report",
+        "provider": "selection-fixture",
+        "record_id": "filing-1"
+      }
+    }
+  ]
+}

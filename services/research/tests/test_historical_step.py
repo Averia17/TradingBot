@@ -11,6 +11,7 @@ from tradingbot.budget import CallBudgetExceeded
 from tradingbot.cli import main
 from tradingbot.historical_step import MAX_STEP_BYTES, run_historical_step
 from tradingbot.llm_usage import LLMUsageReport
+from tradingbot.selection import plan_research
 
 ROOT = Path(__file__).resolve().parents[3]
 
@@ -72,6 +73,47 @@ def test_historical_step_runs_the_scripted_graph_with_a_pinned_clock(step, tmp_p
     assert metadata["alpha_measured"] is False and metadata["intraday_pit_verified"] is False
     assert 1 < metadata["llm_calls"] <= document["job"]["max_llm_calls"]
     assert metadata["provenance"]["job_id"] == document["job"]["job_id"]
+
+
+def test_historical_identity_cli_preserves_historical_projection(monkeypatch, capsys):
+    archive = ROOT / "services/research/examples/selection"
+    selection = json.loads((archive / "identity-request.json").read_bytes())
+    registry = selection["identity_registry"]
+    screened = plan_research(archive, selection, trusted_identity_registry=registry)
+    request = screened["job"]
+    completion = datetime.fromisoformat(request["portfolio"]["as_of"]) + timedelta(minutes=1)
+    encoded = json.dumps({"job": request, "completed_at": completion.isoformat()}).encode()
+    monkeypatch.setattr("tradingbot.cli.sys.stdin", io.TextIOWrapper(io.BytesIO(encoded)))
+    assert main([
+        "historical-step", "--archive-root", str(archive),
+        "--identity-registry-ref", registry["ref"], "--identity-registry-sha256", registry["sha256"],
+    ]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result == run_historical_step(encoded, archive, owner_identity_registry=registry)
+    assert result["result_schema_version"] == "0.3"
+    assert datetime.fromisoformat(result["batch"]["created_at"]) == completion
+    assert result["metadata"]["provenance"]["projected_snapshot_sha256"] == screened["snapshot_sha256"]
+    assert result["metadata"]["provenance"]["security_bindings"] == request["security_bindings"]
+    assert "fixture-previous" not in json.dumps(result["reports"])
+    assert all(intent["action"] == "HOLD" for intent in result["batch"]["intents"])
+
+
+def test_historical_identity_validates_owner_before_starting_the_graph(monkeypatch):
+    archive = ROOT / "services/research/examples/selection"
+    selection = json.loads((archive / "identity-request.json").read_bytes())
+    registry = selection["identity_registry"]
+    request = plan_research(archive, selection, trusted_identity_registry=registry)["job"]
+    encoded = json.dumps({
+        "job": request, "completed_at": datetime.fromisoformat(request["portfolio"]["as_of"]).isoformat(),
+    }).encode()
+
+    def graph_must_not_start(*args, **kwargs):
+        pytest.fail("unbound historical input reached the research graph")
+
+    monkeypatch.setattr(offline, "_verified_upstream", graph_must_not_start)
+    for pin in (None, registry | {"sha256": "e" * 64}):
+        with pytest.raises(ValueError, match="owner-approved identity registry"):
+            run_historical_step(encoded, archive, owner_identity_registry=pin)
 
 
 def test_budget_is_enforced_by_the_graph(step, tmp_path):

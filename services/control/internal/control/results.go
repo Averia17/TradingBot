@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -157,14 +158,29 @@ func parseResultDocument(fields map[string]json.RawMessage) (resultDocument, err
 
 func (d resultDocument) validate(job jobs.Job, dbNow time.Time, maxAge time.Duration) error {
 	var request jobRequest
-	if err := contract.Decode(job.Request, nil, &request); err != nil || request.ID != job.ID || request.Version != jobSchemaVersion ||
+	if err := contract.Decode(job.Request, nil, &request); err != nil || request.ID != job.ID ||
 		contract.CheckSymbols(request.RequestedSymbols) != nil {
 		return errInvalidStoredJob
+	}
+	bound := request.Version == identityJobSchemaVersion
+	if bound {
+		if !request.hasIdentityBindings() {
+			return errInvalidStoredJob
+		}
+	} else if request.Version != jobSchemaVersion || request.IdentityRegistry != nil || len(request.SecurityBindings) != 0 {
+		return errInvalidStoredJob
+	}
+	if bound != (d.SchemaVersion == identityResultVersion) {
+		return errInvalidResult
 	}
 	if metadata, ok := d.Metadata.(offlineResultMetadata); ok {
 		provenance := metadata.Provenance
 		if provenance.JobID != job.ID || provenance.PolicyVersion != request.PolicyVersion ||
 			provenance.DataManifest != request.DataManifest || metadata.LLMCalls > request.MaxLLMCalls {
+			return errInvalidResult
+		}
+		if bound && (*provenance.IdentityRegistry != *request.IdentityRegistry ||
+			!slices.Equal(provenance.SecurityBindings, request.SecurityBindings)) {
 			return errInvalidResult
 		}
 	}

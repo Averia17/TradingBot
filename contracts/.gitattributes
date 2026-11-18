@@ -9,3 +9,4 @@ valid-research-permit-archive.json text eol=lf
 valid-evaluation-replay-calendar.json text eol=lf
 valid-paper-quote-study-plan.json text eol=lf
 valid-paper-quote-study-observations.json text eol=lf
+valid-paper-account-quote-tape.json text eol=lf

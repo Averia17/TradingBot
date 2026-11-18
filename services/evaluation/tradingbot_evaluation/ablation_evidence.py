@@ -17,7 +17,7 @@ from tradingbot_evaluation.statistics import (
     load_evidence,
     protocol_sha256,
 )
-from tradingbot_evaluation.walk_forward_evidence import reproduce_study, study_plan
+from tradingbot_evaluation.walk_forward_evidence import reproduce_study, study_identity, study_plan
 
 
 def derive_ablation_evidence(
@@ -27,6 +27,7 @@ def derive_ablation_evidence(
     *,
     expected_protocol_sha256: str,
     infer_for: Callable[[ResearchVariant], Callable[[bytes], bytes]],
+    identity_registry_raw: bytes | None = None,
 ) -> EvaluationEvidence:
     frozen = protocol_sha256(protocol)
     if frozen != expected_protocol_sha256:
@@ -39,6 +40,7 @@ def derive_ablation_evidence(
     planned_calls = sum(step.max_llm_calls for step in plan.steps) * len(source.variants)
     if planned_calls > source.max_total_llm_calls:
         raise ValueError("Ablation variants exceed the aggregate planned call budget")
+    identity = study_identity(source, plan, tape_raw, identity_registry_raw)
 
     marks = {day: {} for day in protocol.expected_nav_dates}
     arms = {}
@@ -49,6 +51,8 @@ def derive_ablation_evidence(
             tape_raw,
             plan_sha256=source.plan_sha256,
             tape_sha256=source.tape_sha256,
+            identity_registry_raw=identity_registry_raw,
+            identity_registry_sha256=source.identity_registry_sha256,
             infer=infer_for(variant),
         )
         arms[name] = AblationArm(variant=variant, walk=walk, research_config_sha256_by_step=configs)
@@ -58,6 +62,7 @@ def derive_ablation_evidence(
             (),
             strategy=name,
             mark_max_age_seconds=source.mark_max_age_seconds,
+            identity=identity,
         ):
             marks[row.day].update(row.nav_usd)
 

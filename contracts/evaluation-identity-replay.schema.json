@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Owner-pinned stable identity tape for synthetic research replay 0.2",
+  "$ref": "#/$defs/ResearchTape",
+  "$defs": {
+    "ResearchTape": {
+      "allOf": [{"$ref": "#/$defs/NativeInput"}],
+      "properties": {"replay": {"properties": {"orders": {"maxItems": 0}}}}
+    },
+    "NativeInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "identity_registry", "instruments", "replay"],
+      "properties": {
+        "schema_version": {"const": "0.2"},
+        "identity_registry": {"$ref": "research-job.schema.json#/$defs/PinnedLocalReference"},
+        "instruments": {"$ref": "#/$defs/Instruments"},
+        "replay": {
+          "description": "In the native fixture, every symbol in the quotes, orders, actions and calendar is an instrument key. Orders are derived from the durable export. Native quantities are whole shares.",
+          "$ref": "evaluation-replay.schema.json"
+        }
+      }
+    },
+    "Instruments": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 8,
+      "description": "Keys, security IDs and instrument IDs are independently unique. Each exact instrument tuple must match the independently pinned registry.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["key", "security_id", "instrument"],
+        "properties": {
+          "key": {"type": "string", "pattern": "^[A-Z][A-Z0-9.]{0,11}$"},
+          "security_id": {"$ref": "research-job.schema.json#/$defs/Identifier"},
+          "instrument": {"$ref": "research-identity-registry.schema.json#/$defs/PaperInstrument"}
+        }
+      }
+    }
+  }
+}

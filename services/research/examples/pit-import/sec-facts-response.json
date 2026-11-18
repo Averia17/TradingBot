@@ -1,0 +1,30 @@
+{
+  "cik": 123456,
+  "entityName": "Synthetic Equity Example",
+  "facts": {
+    "us-gaap": {
+      "EarningsPerShareDiluted": {
+        "units": {
+          "USD/shares": [
+            {
+              "start": "2024-07-01",
+              "end": "2024-09-30",
+              "val": 0.123456789123456789,
+              "accn": "0000123456-24-000001",
+              "form": "10-Q",
+              "filed": "2024-11-14"
+            },
+            {
+              "start": "2024-07-01",
+              "end": "2024-09-30",
+              "val": 0.123456789123456788,
+              "accn": "0000123456-24-000002",
+              "form": "10-Q/A",
+              "filed": "2024-11-15"
+            }
+          ]
+        }
+      }
+    }
+  }
+}

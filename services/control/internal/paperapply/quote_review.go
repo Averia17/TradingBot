@@ -12,33 +12,33 @@ import (
 // result and bound snapshot before publication. Follow makes the final
 // account-version and risk checks at reservation.
 type QuoteReview struct {
-	snapshot    SnapshotContext
+	request     Request
 	portfolio   contract.Portfolio
 	batch       contract.Batch
 	completedAt time.Time
 }
 
 func ReviewQuotes(req Request, job jobs.Job, receipt jobs.Result, now time.Time) (QuoteReview, error) {
-	if req.Version != Version || req.Intent != nil || job.ID != req.JobID || job.Status != "completed" ||
-		job.CreatedAt.IsZero() || !uuidPattern.MatchString(req.JobID) || now.IsZero() {
+	if !req.validFollow() || job.ID != req.JobID || job.Status != "completed" ||
+		job.CreatedAt.IsZero() || now.IsZero() {
 		return QuoteReview{}, ErrInvalid
 	}
-	portfolio, batch, err := loadResearch(job, receipt, req.SnapshotContext, now)
+	portfolio, batch, err := loadResearch(job, receipt, req, now)
 	if err != nil {
 		return QuoteReview{}, err
 	}
-	return QuoteReview{req.SnapshotContext, portfolio, batch, receipt.CompletedAt}, nil
+	return QuoteReview{req, portfolio, batch, receipt.CompletedAt}, nil
 }
 
 func (r QuoteReview) IsHold() bool { return allHold(r.batch.Intents) }
 
-func (r QuoteReview) ExpiresAt() time.Time { return applicationDeadline(r.snapshot, r.batch.Expires) }
+func (r QuoteReview) ExpiresAt() time.Time { return r.request.deadline(r.batch.Expires) }
 
 func (r QuoteReview) Authorize(rawQuote []byte, at time.Time) error {
-	if err := r.snapshot.CheckMarks(at); err != nil {
+	if err := r.request.SnapshotContext.CheckMarks(at); err != nil {
 		return err
 	}
-	in, err := fromQuote(r.snapshot, r.batch, r.completedAt, rawQuote)
+	in, err := fromQuote(r.request, r.batch, r.completedAt, rawQuote)
 	if err != nil {
 		return err
 	}
@@ -46,5 +46,5 @@ func (r QuoteReview) Authorize(rawQuote []byte, at time.Time) error {
 	if err != nil {
 		return err
 	}
-	return authorize(in, preview, r.snapshot, r.portfolio, r.batch)
+	return authorize(in, preview, r.request.SnapshotContext, r.portfolio, r.batch)
 }

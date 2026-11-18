@@ -1,9 +1,12 @@
 package jobs
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestPaperDispatchRegistrationRollsBackAndNeverArmsOldJobs(t *testing.T) {
@@ -41,5 +44,62 @@ func TestPaperDispatchRegistrationRollsBackAndNeverArmsOldJobs(t *testing.T) {
 	input.PaperDispatch.Request = json.RawMessage(`{"changed":true}`)
 	if _, created, err := store.Create(ctx, input, nil); !errors.Is(err, ErrConflict) || created {
 		t.Fatalf("changed paper dispatch reused a job ID: %t, %v", created, err)
+	}
+}
+
+func TestOwnerBoundPaperEntryCannotArmExistingResearch(t *testing.T) {
+	ctx, dsn, db := testDatabase(t)
+	store := openTestStore(t, ctx, dsn)
+	ownerPin := strings.Repeat("a", 64)
+	now := databaseNow(t, ctx, db)
+	job := func(index int) CreateJob {
+		input := queueInput(t, index, now.Add(-time.Minute))
+		var wire map[string]any
+		if err := json.Unmarshal(input.Request, &wire); err != nil {
+			t.Fatal(err)
+		}
+		wire["job_schema_version"] = "0.2"
+		wire["identity_registry"] = map[string]string{"ref": "identity.json", "sha256": ownerPin}
+		input.Request, _ = json.Marshal(wire)
+		return input
+	}
+	dispatch := &PaperDispatchInput{AccountID: testIdentity(500), Request: json.RawMessage(`{"enrolled":true}`)}
+	plain := job(1)
+	if _, created, err := store.Create(ctx, plain, nil); err != nil || !created {
+		t.Fatalf("could not queue the plain research job: %t %v", created, err)
+	}
+	plain.PaperDispatch = dispatch
+	bound := BoundPaperEntry{Job: plain, OwnerRegistrySHA256: ownerPin}
+	if _, created, err := store.CreateBoundPaperEntry(ctx, bound, nil); !errors.Is(err, ErrConflict) || created {
+		t.Fatalf("existing research became dispatchable: %t %v", created, err)
+	}
+	if _, err := store.GetPaperDispatch(ctx, plain.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("existing research gained a dispatch row: %v", err)
+	}
+	bound.Job = job(2)
+	bound.Job.PaperDispatch = dispatch
+	bound.OwnerRegistrySHA256 = strings.Repeat("b", 64)
+	if _, created, err := store.CreateBoundPaperEntry(ctx, bound, nil); !errors.Is(err, ErrConflict) || created {
+		t.Fatalf("wrong owner registry accepted: %t %v", created, err)
+	}
+	bound.OwnerRegistrySHA256 = ownerPin
+	refused := errors.New("owner admission check denied")
+	if _, created, err := store.CreateBoundPaperEntry(ctx, bound, func() error { return refused }); !errors.Is(err, refused) || created {
+		t.Fatalf("failed owner admission was not rolled back: %t %v", created, err)
+	}
+	if _, err := store.Get(ctx, bound.Job.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("failed admission left a research row: %v", err)
+	}
+	queued, created, err := store.CreateBoundPaperEntry(ctx, bound, nil)
+	if err != nil || !created || queued.ID != bound.Job.ID {
+		t.Fatalf("authorized owner did not create bound job: %+v %t %v", queued, created, err)
+	}
+	task, err := store.GetPaperDispatch(ctx, queued.ID)
+	if err != nil || task.AccountID != dispatch.AccountID || !bytes.Equal(task.Request, dispatch.Request) {
+		t.Fatalf("bound job lacks its exact durable dispatch: %+v %v", task, err)
+	}
+	replayed, created, err := store.CreateBoundPaperEntry(ctx, bound, func() error { return refused })
+	if err != nil || created || !replayed.CreatedAt.Equal(queued.CreatedAt) {
+		t.Fatalf("bound replay did not return original admission: %+v %t %v", replayed, created, err)
 	}
 }

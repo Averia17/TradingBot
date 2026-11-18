@@ -72,6 +72,14 @@ def analyze(args):
     return batch
 
 
+def _identity_pin(args) -> dict[str, str] | None:
+    if (args.identity_registry_ref is None) != (args.identity_registry_sha256 is None):
+        raise ValueError("provide both identity registry reference and SHA-256")
+    if args.identity_registry_ref is None:
+        return None
+    return {"ref": args.identity_registry_ref, "sha256": args.identity_registry_sha256}
+
+
 def _serve_worker(args) -> None:
     import logging
     import signal
@@ -79,6 +87,7 @@ def _serve_worker(args) -> None:
 
     from tradingbot.worker import run_worker
 
+    registry = _identity_pin(args)
     stop = Event()
 
     def request_stop(_signum, _frame):
@@ -97,6 +106,7 @@ def _serve_worker(args) -> None:
             heartbeat_interval=args.heartbeat_interval,
             request_timeout=args.request_timeout,
             archive_root=args.archive_root,
+            identity_registry=registry,
         )
     finally:
         for signum, handler in handlers.items():
@@ -129,6 +139,8 @@ def main(argv=None) -> int:
         type=Path,
         help="Require verified local data manifests under this directory",
     )
+    worker.add_argument("--identity-registry-ref", help="Owner-approved archive-relative registry")
+    worker.add_argument("--identity-registry-sha256", help="Owner-approved registry SHA-256")
     worker.add_argument(
         "--poll-interval", type=float, default=1, help="Polling interval in seconds"
     )
@@ -143,6 +155,30 @@ def main(argv=None) -> int:
     )
     historical.add_argument("--archive-root", type=Path, required=True)
     historical.add_argument("--usage-output", type=Path, help="Write local model-callback evidence")
+    historical.add_argument("--identity-registry-ref", help="Owner-approved archive-relative registry")
+    historical.add_argument("--identity-registry-sha256", help="Owner-approved registry SHA-256")
+    identity_audit = commands.add_parser(
+        "verify-identity-export", help="Recompute the stable identity projection from a Go export"
+    )
+    identity_audit.add_argument("--input", type=Path, required=True)
+    identity_audit.add_argument("--input-sha256", required=True)
+    identity_audit.add_argument("--archive-root", type=Path, required=True)
+    identity_audit.add_argument("--identity-registry-ref", required=True)
+    identity_audit.add_argument("--identity-registry-sha256", required=True)
+    identity_review = commands.add_parser(
+        "prepare-identity-review", help="Prepare a frozen stable paper review from local Go receipts"
+    )
+    identity_review.add_argument("--paper-apply", type=Path, required=True)
+    identity_review.add_argument("--archive-root", type=Path, required=True)
+    identity_review.add_argument("--account", required=True)
+    identity_review.add_argument("--order", required=True)
+    identity_review.add_argument("--as-of", required=True, help="Frozen RFC 3339 cutoff")
+    identity_review.add_argument("--policy", type=Path, required=True)
+    identity_review.add_argument("--marks", type=Path, required=True)
+    for reference in ("data-manifest", "identity-registry", "quote-tape"):
+        identity_review.add_argument(f"--{reference}-ref", required=True)
+        identity_review.add_argument(f"--{reference}-sha256", required=True)
+    identity_review.add_argument("--max-llm-calls", type=int, required=True)
     real = commands.add_parser(
         "analyze", help="Run actual TradingAgents; requires provider API credentials"
     )
@@ -182,8 +218,23 @@ def main(argv=None) -> int:
             from tradingbot.historical_step import MAX_STEP_BYTES, run_historical_step
 
             data = sys.stdin.buffer.read(MAX_STEP_BYTES + 1)
-            result = run_historical_step(data, args.archive_root, usage_output=args.usage_output)
+            result = run_historical_step(
+                data, args.archive_root, usage_output=args.usage_output,
+                owner_identity_registry=_identity_pin(args),
+            )
             print(json.dumps(result, sort_keys=True, separators=(",", ":")))
+        elif args.command == "verify-identity-export":
+            from tradingbot.identity_audit import MAX_IDENTITY_EXPORT_BYTES, audit_identity_export
+
+            with args.input.open("rb") as stream:
+                data = stream.read(MAX_IDENTITY_EXPORT_BYTES + 1)
+            registry = {"ref": args.identity_registry_ref, "sha256": args.identity_registry_sha256}
+            result = audit_identity_export(data, args.input_sha256, args.archive_root, registry)
+            print(json.dumps(result, sort_keys=True, separators=(",", ":")))
+        elif args.command == "prepare-identity-review":
+            from tradingbot.prepare_identity_review import prepare_from_args
+
+            print(json.dumps(prepare_from_args(args), separators=(",", ":")))
         else:
             if args.command == "demo":
                 from tradingbot.demo import demo_batch

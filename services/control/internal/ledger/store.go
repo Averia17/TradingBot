@@ -39,6 +39,14 @@ var riskRefusalsMigration string
 //go:embed 007_risk_execution_cost.sql
 var riskExecutionCostMigration string
 
+//go:embed 008_paper_memory_lessons.sql
+var memoryLessonsMigration string
+
+//go:embed 009_account_outbox.sql
+var accountOutboxMigration string
+
+const accountOutboxMigrationVersion = 9
+
 type Store struct {
 	pool *pgxpool.Pool
 }
@@ -115,13 +123,18 @@ func (s *Store) migrate(ctx context.Context) error {
 	if err := tx.QueryRow(ctx, `SELECT coalesce(max(version), 0) FROM paper_schema_migrations`).Scan(&version); err != nil {
 		return fmt.Errorf("read paper schema version: %w", err)
 	}
-	migrations := []string{accountsMigration, ordersMigration, partialFillsMigration, fillOutboxMigration, applicationsMigration, riskRefusalsMigration, riskExecutionCostMigration}
+	migrations := []string{accountsMigration, ordersMigration, partialFillsMigration, fillOutboxMigration, applicationsMigration, riskRefusalsMigration, riskExecutionCostMigration, memoryLessonsMigration, accountOutboxMigration}
 	if version < 0 || version > len(migrations) {
 		return fmt.Errorf("unsupported paper schema version %d", version)
 	}
 	for index := version; index < len(migrations); index++ {
 		if _, err := tx.Exec(ctx, migrations[index], pgx.QueryExecModeSimpleProtocol); err != nil {
 			return fmt.Errorf("apply paper migration %d: %w", index+1, err)
+		}
+		if index+1 == accountOutboxMigrationVersion {
+			if err := backfillAccountOutbox(ctx, tx); err != nil {
+				return fmt.Errorf("backfill paper account analytics: %w", err)
+			}
 		}
 		if _, err := tx.Exec(ctx, `INSERT INTO paper_schema_migrations (version) VALUES ($1)`, index+1); err != nil {
 			return fmt.Errorf("record paper migration %d: %w", index+1, err)

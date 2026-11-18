@@ -21,6 +21,8 @@ func compilePaperQuoteTape() (*jsonschema.Schema, *jsonschema.Schema) {
 		"paper-replay.schema.json":     paperReplaySchema,
 		"paper-account.schema.json":    paperSchema,
 		"paper-apply.schema.json":      paperApplySchema,
+		"portfolio.schema.json":        portfolioSchema,
+		"research-job.schema.json":     researchJobSchema,
 	} {
 		value, err := jsonschema.UnmarshalJSON(bytes.NewReader(body))
 		if err != nil {

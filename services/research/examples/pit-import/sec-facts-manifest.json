@@ -1,0 +1,46 @@
+{
+  "schema_version": "0.1",
+  "source_mode": "synthetic_fixture",
+  "captures": [
+    {
+      "kind": "sec_submissions",
+      "source": {
+        "ref": "sec-response.json",
+        "sha256": "c26a18e81b2c20731b2735133b83c70982ebee12aa4631171f7d1e7d02d16b69"
+      },
+      "captured_at": "2024-11-15T19:25:00Z",
+      "cik": "0000123456",
+      "symbol": "TEST",
+      "accessions": [
+        "0000123456-24-000001",
+        "0000123456-24-000002"
+      ]
+    },
+    {
+      "kind": "sec_company_facts",
+      "source": {
+        "ref": "sec-facts-response.json",
+        "sha256": "ed54e80a7b22e122b435b5f894ee5bb25a68348988ad0372c02135add4d07831"
+      },
+      "captured_at": "2024-11-15T19:35:00Z",
+      "cik": "0000123456",
+      "symbol": "TEST",
+      "selectors": [
+        {
+          "accession": "0000123456-24-000001",
+          "concept": "EarningsPerShareDiluted",
+          "unit": "USD/shares",
+          "period_start": "2024-07-01",
+          "period_end": "2024-09-30"
+        },
+        {
+          "accession": "0000123456-24-000002",
+          "concept": "EarningsPerShareDiluted",
+          "unit": "USD/shares",
+          "period_start": "2024-07-01",
+          "period_end": "2024-09-30"
+        }
+      ]
+    }
+  ]
+}

@@ -205,6 +205,36 @@
       "title": "EvaluationEvidence",
       "type": "object"
     },
+    "IdentityReplayInputs": {
+      "additionalProperties": false,
+      "properties": {
+        "identity_registry_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "type": "string"
+        },
+        "mark_max_age_seconds": {
+          "maximum": 604800,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "research_export_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "type": "string"
+        },
+        "tape_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "research_export_sha256",
+        "tape_sha256",
+        "identity_registry_sha256",
+        "mark_max_age_seconds"
+      ],
+      "title": "IdentityReplayInputs",
+      "type": "object"
+    },
     "PaperNavProvenance": {
       "additionalProperties": false,
       "properties": {
@@ -249,6 +279,9 @@
         "external_costs_usd": {
           "type": "null"
         },
+        "identity": {
+          "$ref": "#/$defs/IdentityReplayInputs"
+        },
         "mark_policy": {
           "enum": [
             "last_known_bid_at_utc_day_end"
@@ -283,6 +316,10 @@
     "WalkForwardProvenance": {
       "additionalProperties": false,
       "properties": {
+        "identity_registry_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "type": "string"
+        },
         "llm_calls_used": {
           "maximum": 2048,
           "minimum": 1,

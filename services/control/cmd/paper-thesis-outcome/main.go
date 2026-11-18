@@ -33,6 +33,7 @@ func run(ctx context.Context, dsn string, args []string, output io.Writer) error
 	flags := flag.NewFlagSet("paper-thesis-outcome", flag.ContinueOnError)
 	path := flags.String("input", "", "local thesis outcome request file")
 	digest := flags.String("sha256", "", "SHA-256 of the exact request bytes")
+	archiveRoot := flags.String("archive-root", "", "root of the pinned local horizon quote tape")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -60,7 +61,7 @@ func run(ctx context.Context, dsn string, args []string, output io.Writer) error
 	err = ledger.WithReadSnapshot(ctx, dsn, func(snapshot ledger.ReadSnapshot) error {
 		// Research completions read here are immutable and the projection
 		// checks that their durable receipt predates the opening reservation.
-		report, err = paperthesis.BuildOutcome(ctx, &researchReceipt{dsn: dsn}, snapshot, input, snapshot.Cutoff())
+		report, err = paperthesis.BuildOutcomeFromArchive(ctx, &researchReceipt{dsn: dsn}, snapshot, input, snapshot.Cutoff(), *archiveRoot)
 		return err
 	})
 	if err != nil {
@@ -71,24 +72,41 @@ func run(ctx context.Context, dsn string, args []string, output io.Writer) error
 
 type researchReceipt struct {
 	dsn    string
-	stored jobs.CompletedResearch
+	stored jobs.CompletedPaperResearch
+}
+
+func (r *researchReceipt) load(ctx context.Context, id string) error {
+	if id != "" && r.stored.Job.ID == id {
+		return nil
+	}
+	completed, err := jobs.ReadCompletedPaperResearch(ctx, r.dsn, id)
+	if err != nil {
+		return err
+	}
+	r.stored = completed
+	return nil
 }
 
 func (r *researchReceipt) Get(ctx context.Context, id string) (jobs.Job, error) {
-	if r.stored.Job.ID == id {
-		return r.stored.Job, nil
-	}
-	completed, err := jobs.ReadCompletedResearch(ctx, r.dsn, []string{id})
-	if err != nil {
+	if err := r.load(ctx, id); err != nil {
 		return jobs.Job{}, err
 	}
-	r.stored = completed[0]
 	return r.stored.Job, nil
 }
 
-func (r *researchReceipt) GetResult(_ context.Context, id string) (jobs.Result, error) {
-	if r.stored.Result.JobID != id {
-		return jobs.Result{}, jobs.ErrNotFound
+func (r *researchReceipt) GetResult(ctx context.Context, id string) (jobs.Result, error) {
+	if err := r.load(ctx, id); err != nil {
+		return jobs.Result{}, err
 	}
 	return r.stored.Result, nil
+}
+
+func (r *researchReceipt) GetPaperDispatch(ctx context.Context, id string) (jobs.PaperDispatchTask, error) {
+	if err := r.load(ctx, id); err != nil {
+		return jobs.PaperDispatchTask{}, err
+	}
+	if r.stored.Dispatch == nil {
+		return jobs.PaperDispatchTask{}, jobs.ErrNotFound
+	}
+	return *r.stored.Dispatch, nil
 }

@@ -206,7 +206,7 @@ def decode_pinned_json(raw: bytes) -> JsonValue:
     )
 
 
-def read_pinned_json(root: Path, reference: ArchiveReference) -> JsonValue:
+def read_pinned_bytes(root: Path, reference: ArchiveReference) -> bytes:
     root = root.resolve(strict=True)
     path = (root / reference.ref).resolve(strict=True)
     if not path.is_relative_to(root):
@@ -219,7 +219,11 @@ def read_pinned_json(root: Path, reference: ArchiveReference) -> JsonValue:
         raise ValueError("archive exceeds the per-document byte limit")
     if hashlib.sha256(raw).hexdigest() != reference.sha256:
         raise ValueError("archive SHA-256 mismatch")
-    return decode_pinned_json(raw)
+    return raw
+
+
+def read_pinned_json(root: Path, reference: ArchiveReference) -> JsonValue:
+    return decode_pinned_json(read_pinned_bytes(root, reference))
 
 
 def load_snapshot(

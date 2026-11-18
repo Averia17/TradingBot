@@ -13,6 +13,7 @@ import (
 	"github.com/santhosh-tekuri/jsonschema/v6"
 
 	"tradingbot/control/internal/contract"
+	"tradingbot/control/internal/ledger"
 	"tradingbot/control/internal/paperrisk"
 )
 
@@ -147,5 +148,25 @@ func TestExportUsesTheExactRegistryIdentity(t *testing.T) {
 	body, err := ExportArchive(context.Background(), history, testAccount, testTime.Add(time.Hour), policy, raw, archiveDigest(raw))
 	if err != nil || string(body) != string(raw) {
 		t.Fatalf("a mismatched registry version must not publish memory, got %s / %v", body, err)
+	}
+}
+
+func TestDurableArchiveRejectsALessonWithDifferentFIFOAccounting(t *testing.T) {
+	history := eventHistory{
+		account(t), reserve(t, 2, 2, "BUY", "1", "12", "0"), fill(t, 3, 2, 3, "12", "0", testTime.Add(2*time.Minute)),
+		reserve(t, 4, 4, "SELL", "1", "14", "0"), fill(t, 5, 4, 5, "14", "0", testTime.Add(4*time.Minute)),
+	}
+	asOf := testTime.Add(time.Hour)
+	fact, err := BuildLesson(context.Background(), history, testAccount, eventID(5), asOf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fact.CostBasisUSD, fact.NetPnLUSD = "13", "1"
+	lookup := func(_ context.Context, _, _ string, _ time.Time) (ledger.LessonEvent, error) {
+		return ledger.LessonEvent{Action: "record", AvailableAt: asOf, Fact: fact}, nil
+	}
+	base := []byte(baseArchive)
+	if _, err := exportArchive(context.Background(), history, lookup, testAccount, asOf, archivePolicy(), base, archiveDigest(base)); err == nil {
+		t.Fatal("archive accepted a different net amount and cost basis for the same fill")
 	}
 }

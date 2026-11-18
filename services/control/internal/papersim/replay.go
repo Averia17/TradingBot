@@ -18,10 +18,12 @@ import (
 )
 
 const (
-	Version        = "0.1"
-	PartialVersion = "0.2"
-	Source         = "synthetic_fixture"
-	MaxInputBytes  = 256 * 1024
+	Version               = "0.1"
+	PartialVersion        = "0.2"
+	IdentityIntentVersion = "0.2"
+	IdentityQuoteVersion  = "0.3"
+	Source                = "synthetic_fixture"
+	MaxInputBytes         = 256 * 1024
 )
 
 var (
@@ -32,33 +34,37 @@ var (
 )
 
 type Intent struct {
-	Version         string            `json:"paper_intent_schema_version"`
-	AccountID       string            `json:"account_id"`
-	DecisionID      string            `json:"decision_id"`
-	SnapshotVersion int64             `json:"snapshot_version"`
-	Instrument      ledger.Instrument `json:"instrument"`
-	Side            string            `json:"side"`
-	QuantityRaw     string            `json:"quantity_raw"`
-	GrossLimitUSD   string            `json:"gross_limit_usd"`
-	MaxFeeUSD       string            `json:"max_fee_usd"`
-	DecidedAt       time.Time         `json:"decided_at"`
-	ExpiresAt       time.Time         `json:"expires_at"`
-	QuoteSHA256     string            `json:"quote_sha256"`
+	Version                string            `json:"paper_intent_schema_version"`
+	AccountID              string            `json:"account_id"`
+	DecisionID             string            `json:"decision_id"`
+	SnapshotVersion        int64             `json:"snapshot_version"`
+	Instrument             ledger.Instrument `json:"instrument"`
+	Side                   string            `json:"side"`
+	QuantityRaw            string            `json:"quantity_raw"`
+	GrossLimitUSD          string            `json:"gross_limit_usd"`
+	MaxFeeUSD              string            `json:"max_fee_usd"`
+	DecidedAt              time.Time         `json:"decided_at"`
+	ExpiresAt              time.Time         `json:"expires_at"`
+	QuoteSHA256            string            `json:"quote_sha256"`
+	SecurityID             string            `json:"security_id,omitempty"`
+	IdentityRegistrySHA256 string            `json:"identity_registry_sha256,omitempty"`
 }
 
 type Quote struct {
-	Version             string            `json:"paper_quote_schema_version"`
-	Source              string            `json:"source_mode"`
-	Instrument          ledger.Instrument `json:"instrument"`
-	Side                string            `json:"side"`
-	QuantityRaw         string            `json:"quantity_raw"`
-	ExecutedQuantityRaw string            `json:"executed_quantity_raw,omitempty"`
-	GrossUSD            string            `json:"gross_usd"`
-	FeeBPS              *int              `json:"fee_bps"`
-	FixedFeeUSD         string            `json:"fixed_fee_usd"`
-	ObservedAt          time.Time         `json:"observed_at"`
-	ExpiresAt           time.Time         `json:"expires_at"`
-	Execution           string            `json:"execution"`
+	Version                string            `json:"paper_quote_schema_version"`
+	Source                 string            `json:"source_mode"`
+	Instrument             ledger.Instrument `json:"instrument"`
+	Side                   string            `json:"side"`
+	QuantityRaw            string            `json:"quantity_raw"`
+	ExecutedQuantityRaw    string            `json:"executed_quantity_raw,omitempty"`
+	GrossUSD               string            `json:"gross_usd"`
+	FeeBPS                 *int              `json:"fee_bps"`
+	FixedFeeUSD            string            `json:"fixed_fee_usd"`
+	ObservedAt             time.Time         `json:"observed_at"`
+	ExpiresAt              time.Time         `json:"expires_at"`
+	Execution              string            `json:"execution"`
+	SecurityID             string            `json:"security_id,omitempty"`
+	IdentityRegistrySHA256 string            `json:"identity_registry_sha256,omitempty"`
 }
 
 type Store interface {
@@ -67,13 +73,15 @@ type Store interface {
 }
 
 type Result struct {
-	Version             string       `json:"paper_replay_schema_version"`
-	Source              string       `json:"source_mode"`
-	QuoteSHA256         string       `json:"quote_sha256"`
-	SimulatedExecution  string       `json:"simulated_execution"`
-	ReservationRecorded bool         `json:"reservation_recorded"`
-	OutcomeRecorded     bool         `json:"outcome_recorded"`
-	Order               ledger.Order `json:"order"`
+	Version                string       `json:"paper_replay_schema_version"`
+	Source                 string       `json:"source_mode"`
+	QuoteSHA256            string       `json:"quote_sha256"`
+	SimulatedExecution     string       `json:"simulated_execution"`
+	ReservationRecorded    bool         `json:"reservation_recorded"`
+	OutcomeRecorded        bool         `json:"outcome_recorded"`
+	Order                  ledger.Order `json:"order"`
+	SecurityID             string       `json:"security_id,omitempty"`
+	IdentityRegistrySHA256 string       `json:"identity_registry_sha256,omitempty"`
 }
 
 // FixturePreview describes the exact quote and deterministic order identity versioned by Run.
@@ -190,6 +198,7 @@ func Run(ctx context.Context, store Store, in Intent, rawQuote []byte, now time.
 	return Result{
 		Version: quote.Version, Source: Source, QuoteSHA256: in.QuoteSHA256, SimulatedExecution: quote.Execution,
 		ReservationRecorded: reserved, OutcomeRecorded: resolved, Order: order,
+		SecurityID: quote.SecurityID, IdentityRegistrySHA256: quote.IdentityRegistrySHA256,
 	}, nil
 }
 
@@ -199,7 +208,16 @@ func OutcomeEventID(orderID string) string {
 }
 
 func validate(in Intent, q Quote, now time.Time) (string, error) {
-	if in.Version != Version {
+	switch in.Version {
+	case Version:
+		if q.Version == IdentityQuoteVersion || in.SecurityID != "" || in.IdentityRegistrySHA256 != "" {
+			return "", errors.New("legacy paper intent cannot authorize a security-bound quote")
+		}
+	case IdentityIntentVersion:
+		if q.Version != IdentityQuoteVersion || in.SecurityID != q.SecurityID || in.IdentityRegistrySHA256 != q.IdentityRegistrySHA256 {
+			return "", errors.New("paper quote does not match the authorized security and registry")
+		}
+	default:
 		return "", errors.New("unsupported paper fixture version or source")
 	}
 	if !idPattern.MatchString(in.AccountID) || !idPattern.MatchString(in.DecisionID) || in.SnapshotVersion < 1 ||

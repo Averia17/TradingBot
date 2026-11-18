@@ -56,11 +56,42 @@ type archivedOutcome struct {
 	FeeUSD           string            `json:"fee_usd"`
 	CostBasisUSD     string            `json:"cost_basis_usd"`
 	NetPnLUSD        string            `json:"net_pnl_usd"`
+	DurableMemory    *durableMemory    `json:"durable_memory,omitempty"`
+}
+
+type durableMemory struct {
+	AsOf   time.Time      `json:"as_of"`
+	Active *durableLesson `json:"active"`
+}
+
+type durableLesson struct {
+	LessonID            string    `json:"lesson_id"`
+	EventID             string    `json:"event_id"`
+	Revision            int       `json:"revision"`
+	Action              string    `json:"action"`
+	AvailableAt         time.Time `json:"available_at"`
+	SourceOutcomeSHA256 string    `json:"source_outcome_sha256"`
 }
 
 // ExportArchive appends recent realized outcomes from the ledger prefix to a
 // hash-verified local archive. An existing archive cannot supply ledger records.
 func ExportArchive(ctx context.Context, reader EventReader, accountID string, asOf time.Time, policy paperrisk.Policy, raw []byte, expectedDigest string) ([]byte, error) {
+	return exportArchive(ctx, reader, nil, accountID, asOf, policy, raw, expectedDigest)
+}
+
+// ExportArchiveWithLessons attaches the latest visible lesson from the same
+// consistent SQL snapshot as the economic facts. The frozen cutoff belongs
+// to the lesson selection and does not delay the underlying accounting.
+func ExportArchiveWithLessons(ctx context.Context, snapshot ledger.ReadSnapshot, accountID string, asOf time.Time, policy paperrisk.Policy, raw []byte, expectedDigest string) ([]byte, error) {
+	if asOf.IsZero() || asOf.After(snapshot.Cutoff()) || asOf.Nanosecond()%1_000 != 0 {
+		return nil, ledger.ErrInvalid
+	}
+	return exportArchive(ctx, snapshot, snapshot.LessonForFill, accountID, asOf, policy, raw, expectedDigest)
+}
+
+type lessonLookup func(context.Context, string, string, time.Time) (ledger.LessonEvent, error)
+
+func exportArchive(ctx context.Context, reader EventReader, lessons lessonLookup, accountID string, asOf time.Time, policy paperrisk.Policy, raw []byte, expectedDigest string) ([]byte, error) {
 	if err := policy.Validate(); err != nil {
 		return nil, err
 	}
@@ -98,6 +129,14 @@ func ExportArchive(ctx context.Context, reader EventReader, accountID string, as
 				CostBasisUSD: outcome.CostBasisUSD, NetPnLUSD: outcome.NetPnLUSD,
 			},
 		}
+		if lessons != nil {
+			memory, err := selectLesson(ctx, lessons, accountID, asOf, outcome)
+			if err != nil {
+				return nil, err
+			}
+			record.Payload.SchemaVersion = "0.2"
+			record.Payload.DurableMemory = &memory
+		}
 		encoded, err := json.Marshal(record)
 		if err != nil {
 			return nil, err
@@ -117,6 +156,36 @@ func ExportArchive(ctx context.Context, reader EventReader, accountID string, as
 		return nil, errors.New("research archive with paper outcomes exceeds the byte limit")
 	}
 	return output, nil
+}
+
+func selectLesson(ctx context.Context, lookup lessonLookup, accountID string, asOf time.Time, outcome Outcome) (durableMemory, error) {
+	memory := durableMemory{AsOf: asOf.UTC()}
+	event, err := lookup(ctx, accountID, outcome.FillEventID, asOf)
+	if errors.Is(err, ledger.ErrNotFound) {
+		return memory, nil
+	}
+	if err != nil {
+		return memory, err
+	}
+	expected, err := lessonFact(accountID, outcome)
+	if err != nil {
+		return memory, err
+	}
+	if event.Fact != expected || event.AvailableAt.Before(outcome.AvailableAt) || event.AvailableAt.After(asOf) {
+		return memory, errors.New("stored paper lesson differs from its verified FIFO outcome or cutoff")
+	}
+	switch event.Action {
+	case "retract":
+		return memory, nil
+	case "record", "reinstate":
+		memory.Active = &durableLesson{
+			LessonID: event.LessonID, EventID: event.EventID, Revision: event.Revision, Action: event.Action,
+			AvailableAt: event.AvailableAt.UTC(), SourceOutcomeSHA256: event.Fact.SourceOutcomeSHA256,
+		}
+		return memory, nil
+	default:
+		return memory, errors.New("invalid paper lesson activation")
+	}
 }
 
 func readMarketArchive(raw []byte, expectedDigest string) (archiveDocument, error) {

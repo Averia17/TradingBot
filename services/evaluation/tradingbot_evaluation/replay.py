@@ -337,7 +337,10 @@ class _SplitUnits:
         return self._epochs[symbol][epoch - 1][1] if epoch else Fraction(1)
 
     def quote_is_current(self, quote: Quote, at: datetime) -> bool:
-        return self._epoch(quote.symbol, quote.observed_at) == self._epoch(quote.symbol, at)
+        return self.observation_is_current(quote.symbol, quote.observed_at, at)
+
+    def observation_is_current(self, symbol: str, observed_at: datetime, at: datetime) -> bool:
+        return self._epoch(symbol, observed_at) == self._epoch(symbol, at)
 
 
 def _whole_shares(value: Fraction) -> int:
@@ -515,15 +518,22 @@ class _ReplayStrategy(Strategy):
                 break
             queue.popleft()
             factor = self.units.factor_at(symbol, order.ready_at)
+            quantity = self.execution_quantity(order, tick, factor)
+            if quantity == 0:
+                self.statuses[order.intent_id] = "unaffordable_at_execution"
+                continue
             market_order = self.order_factory.market(
                 instrument_id=tick.instrument_id,
                 order_side=OrderSide.BUY if order.side == "BUY" else OrderSide.SELL,
-                quantity=_native_quantity(order.quantity, factor),
+                quantity=_native_quantity(quantity, factor),
                 time_in_force=TimeInForce.IOC,
                 reduce_only=order.side == "SELL",
             )
             self.submitted[market_order.client_order_id] = (order.intent_id, tick.ts_init, factor)
             self.submit_order(market_order)
+
+    def execution_quantity(self, order: Order, tick, factor: Fraction) -> int:
+        return order.quantity
 
     def on_order_filled(self, event):
         intent_id, quote_available_ns, factor = self.submitted[event.client_order_id]
@@ -551,6 +561,7 @@ def _run_replay(
     strategy_factory: Callable[
         [dict[str, Equity], tuple[Order, ...], _SplitUnits], _ReplayStrategy
     ] = _ReplayStrategy,
+    strategy_data: tuple[list[CustomData], ClientId] | None = None,
 ) -> dict:
     venue = Venue("PAPER")
     starting_cash = Decimal(replay.starting_cash_usd)
@@ -619,8 +630,13 @@ def _run_replay(
             engine.add_data(boundaries, client_id=ClientId("CORPORATE-ACTIONS"))
         if ticks:
             engine.add_data(ticks)
+        if strategy_data is not None:
+            data, client_id = strategy_data
+            # A phase may use quotes available exactly at its cutoff. Their
+            # ticks precede equal-time strategy data in the stable sort.
+            engine.add_data(data, client_id=client_id)
         engine.add_strategy(strategy)
-        if ticks or boundaries:
+        if ticks or boundaries or strategy_data is not None:
             engine.run()
         if actions.timeline:
             raise RuntimeError("Nautilus did not settle all corporate action boundaries")
@@ -641,7 +657,7 @@ def _run_replay(
 
         cash = (
             engine.portfolio.account(venue).balance_total(USD).as_decimal()
-            if ticks or boundaries
+            if ticks or boundaries or strategy_data is not None
             else starting_cash
         )
         positions = {

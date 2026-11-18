@@ -106,6 +106,9 @@ func (s *Store) CreateAccount(ctx context.Context, input CreateAccount) (Account
 		if err := writeEvent(ctx, tx, input.ID, input.ID, 1, "paper_account.created", hash[:], payload); err != nil {
 			return Account{}, false, err
 		}
+		if err := captureAccountOutbox(ctx, tx, input.ID, input.ID, 1, nil, nil); err != nil {
+			return Account{}, false, err
+		}
 	} else {
 		var storedHash []byte
 		if err := tx.QueryRow(ctx, `SELECT creation_hash FROM paper_accounts WHERE account_id=$1`, input.ID).Scan(&storedHash); err != nil {

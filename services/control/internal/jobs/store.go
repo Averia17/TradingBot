@@ -39,6 +39,9 @@ var researchPaperDispatchMigration string
 //go:embed 006_research_daily_call_budget.sql
 var researchDailyCallBudgetMigration string
 
+//go:embed 009_research_identity_registry.sql
+var researchIdentityRegistryMigration string
+
 type Store struct {
 	pool *pgxpool.Pool
 }
@@ -58,6 +61,13 @@ type CreateJob struct {
 	SnapshotID    string
 	Snapshot      json.RawMessage
 	PaperDispatch *PaperDispatchInput
+}
+
+// BoundPaperEntry is the owner scheduler's explicit admission of a research
+// job and its paper dispatch in a single durable transaction.
+type BoundPaperEntry struct {
+	Job                 CreateJob
+	OwnerRegistrySHA256 string
 }
 
 // Open connects to PostgreSQL and applies the schema before returning a store.
@@ -134,6 +144,7 @@ func (s *Store) migrate(ctx context.Context) error {
 		researchJobsMigration, researchLeasesMigration, researchResultsMigration,
 		researchCallBudgetMigration, researchPaperDispatchMigration, researchDailyCallBudgetMigration,
 		researchCalendarMigration, researchCallUsageMigration,
+		researchIdentityRegistryMigration,
 	}
 	if version < 0 || version > len(migrations) {
 		return fmt.Errorf("unsupported research database schema version %d", version)
@@ -181,6 +192,26 @@ func (s *Store) Get(ctx context.Context, id string) (Job, error) {
 // admit must be a short local check. It runs only before committing a new job.
 // A duplicate is resolved against committed data without reapplying admission.
 func (s *Store) Create(ctx context.Context, input CreateJob, admit func() error) (Job, bool, error) {
+	registrySHA, err := jobRegistryPin(input.Request)
+	if err != nil || registrySHA != "" && input.PaperDispatch != nil {
+		return Job{}, false, ErrConflict
+	}
+	return s.create(ctx, input, registrySHA, false, admit)
+}
+
+// CreateBoundPaperEntry admits only a matching registry-bound job and its
+// owner dispatch. An identical research-only job is a conflict, including
+// when another transaction won the concurrent insertion.
+func (s *Store) CreateBoundPaperEntry(ctx context.Context, bound BoundPaperEntry, admit func() error) (Job, bool, error) {
+	input := bound.Job
+	registrySHA, err := jobRegistryPin(input.Request)
+	if err != nil || registrySHA == "" || registrySHA != bound.OwnerRegistrySHA256 || input.PaperDispatch == nil {
+		return Job{}, false, ErrConflict
+	}
+	return s.create(ctx, input, registrySHA, true, admit)
+}
+
+func (s *Store) create(ctx context.Context, input CreateJob, registrySHA string, requireBoundDispatch bool, admit func() error) (Job, bool, error) {
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		return Job{}, false, fmt.Errorf("begin research job transaction: %w", err)
@@ -188,7 +219,7 @@ func (s *Store) Create(ctx context.Context, input CreateJob, admit func() error)
 	defer rollback(tx)
 	requestHash := sha256.Sum256(input.Request)
 	snapshotHash := sha256.Sum256(input.Snapshot)
-	if job, err := existingJob(ctx, tx, input, requestHash[:], snapshotHash[:]); !errors.Is(err, ErrNotFound) {
+	if job, err := existingJob(ctx, tx, input, requestHash[:], snapshotHash[:], requireBoundDispatch); !errors.Is(err, ErrNotFound) {
 		return job, false, err
 	}
 	if _, err := tx.Exec(ctx, `SET LOCAL synchronous_commit = 'on'`); err != nil {
@@ -207,12 +238,13 @@ func (s *Store) Create(ctx context.Context, input CreateJob, admit func() error)
 		return Job{}, false, ErrConflict
 	}
 	job := Job{ID: input.ID, Request: input.Request}
-	err = tx.QueryRow(ctx, `INSERT INTO research_jobs (id, snapshot_id, request, request_sha256) VALUES ($1, $2, $3, $4)
-		ON CONFLICT (id) DO NOTHING RETURNING status, created_at`, input.ID, input.SnapshotID, []byte(input.Request), requestHash[:]).Scan(&job.Status, &job.CreatedAt)
+	err = tx.QueryRow(ctx, `INSERT INTO research_jobs (id, snapshot_id, request, request_sha256, identity_registry_sha256)
+		VALUES ($1, $2, $3, $4, $5) ON CONFLICT (id) DO NOTHING RETURNING status, created_at`,
+		input.ID, input.SnapshotID, []byte(input.Request), requestHash[:], registrySHA).Scan(&job.Status, &job.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		// Another transaction committed this ID after our first read. Use a new
 		// READ COMMITTED statement before the deferred rollback of our writes.
-		job, err := existingJob(ctx, tx, input, requestHash[:], snapshotHash[:])
+		job, err := existingJob(ctx, tx, input, requestHash[:], snapshotHash[:], requireBoundDispatch)
 		return job, false, err
 	}
 	if err != nil {
@@ -239,7 +271,7 @@ func (s *Store) Create(ctx context.Context, input CreateJob, admit func() error)
 	return job, true, nil
 }
 
-func existingJob(ctx context.Context, tx pgx.Tx, input CreateJob, requestHash, snapshotHash []byte) (Job, error) {
+func existingJob(ctx context.Context, tx pgx.Tx, input CreateJob, requestHash, snapshotHash []byte, requireBoundDispatch bool) (Job, error) {
 	var job Job
 	var matched bool
 	err := tx.QueryRow(ctx, `SELECT j.id::text, j.request, j.status, j.created_at,
@@ -257,6 +289,9 @@ func existingJob(ctx context.Context, tx pgx.Tx, input CreateJob, requestHash, s
 	}
 	if input.PaperDispatch != nil {
 		dispatch, err := readPaperDispatch(tx.QueryRow(ctx, selectPaperDispatch, input.ID))
+		if requireBoundDispatch && errors.Is(err, ErrNotFound) {
+			return Job{}, ErrConflict
+		}
 		if err != nil && !errors.Is(err, ErrNotFound) {
 			return Job{}, err
 		}

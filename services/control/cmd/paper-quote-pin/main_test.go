@@ -4,8 +4,11 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -20,6 +23,7 @@ import (
 	"tradingbot/control/internal/jobs"
 	"tradingbot/control/internal/ledger"
 	"tradingbot/control/internal/paperapply"
+	"tradingbot/control/internal/paperquotes"
 	"tradingbot/control/internal/paperrisk"
 	"tradingbot/control/internal/papersim"
 )
@@ -30,20 +34,45 @@ const (
 	testDecision  = "33333333-3333-4333-8333-333333333333"
 )
 
+type quoteTape struct {
+	Version      string        `json:"paper_quote_tape_schema_version"`
+	Source       string        `json:"source_mode"`
+	JobID        string        `json:"job_id,omitempty"`
+	AccountID    string        `json:"account_id,omitempty"`
+	Scope        *tapeScope    `json:"scope,omitempty"`
+	Observations []observation `json:"observations"`
+}
+
+type tapeScope struct {
+	Instrument  ledger.Instrument `json:"instrument"`
+	Side        string            `json:"side"`
+	QuantityRaw string            `json:"quantity_raw"`
+}
+
+type observation struct {
+	Available time.Time       `json:"available_at"`
+	Firmness  string          `json:"firmness"`
+	Raw       json.RawMessage `json:"quote"`
+}
+
 func TestPublishedTapeAndStrictPostCompletionWindow(t *testing.T) {
 	contracts := filepath.Join("..", "..", "..", "..", "contracts")
 	raw, err := os.ReadFile(filepath.Join(contracts, "valid-paper-quote-tape.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := decodeTape(raw, strings.Repeat("a", 64), testJobID); err == nil {
+	if _, err := paperquotes.DecodeTape(raw, strings.Repeat("a", 64), testJobID, ""); err == nil {
 		t.Fatal("expected digest mismatch")
 	}
-	tape, err := decodeTape(raw, sha256Hex(raw), testJobID)
+	tape, err := paperquotes.DecodeTape(raw, sha256Hex(raw), testJobID, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	obs := tape.Observations[0]
+	var document quoteTape
+	if err := json.Unmarshal(raw, &document); err != nil {
+		t.Fatal(err)
+	}
+	obs := document.Observations[0]
 	quote, err := papersim.ParseQuote(obs.Raw)
 	if err != nil {
 		t.Fatal(err)
@@ -63,15 +92,87 @@ func TestPublishedTapeAndStrictPostCompletionWindow(t *testing.T) {
 		{"available at expiry", before, after, obs.Available, false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			_, got, err := tape.eligible(obs, test.completion, test.now, test.deadline)
-			if err != nil || got != test.want {
-				t.Fatalf("eligible = %v, %v", got, err)
+			_, err := tape.Verify(obs.Raw, test.completion, test.now, test.deadline)
+			if (err == nil) != test.want || err != nil && !errors.Is(err, paperquotes.ErrQuoteUnavailable) {
+				t.Fatalf("eligibility error = %v", err)
 			}
 		})
 	}
 }
 
+func TestAccountTapeRejectsWrongHashAndBinding(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "..", "contracts", "valid-paper-account-quote-tape.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256Hex(raw)
+	tape, err := paperquotes.DecodeTape(raw, digest, "", testAccountID)
+	if err != nil || tape.AccountID() != testAccountID || tape.IdentityRegistrySHA256() != "" {
+		t.Fatalf("account tape = %+v, %v", tape, err)
+	}
+	if _, err := paperquotes.DecodeTape(raw, digest, "", "77777777-7777-4777-8777-777777777777"); err == nil {
+		t.Fatal("accepted tape for a different account")
+	}
+	if _, err := paperquotes.DecodeTape(raw, digest, testJobID, ""); err == nil {
+		t.Fatal("accepted an account tape in single-job mode")
+	}
+	if _, err := paperquotes.DecodeTape(append(raw, '\n'), digest, "", testAccountID); err == nil {
+		t.Fatal("accepted changed archive bytes")
+	}
+	var document quoteTape
+	if err := json.Unmarshal(raw, &document); err != nil {
+		t.Fatal(err)
+	}
+	document.JobID = testJobID
+	mixed := testJSON(t, document)
+	if _, err := paperquotes.DecodeTape(mixed, sha256Hex(mixed), testJobID, testAccountID); err == nil {
+		t.Fatal("accepted a tape with mixed account and job bindings")
+	}
+}
+
+func TestIdentityTapeRequiresExactDurableApplicationPins(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "..", "contracts", "valid-paper-identity-quote-tape.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tape, err := paperquotes.DecodeTape(raw, sha256Hex(raw), "", testAccountID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := paperapply.Request{
+		SnapshotContext: paperapply.SnapshotContext{AccountID: testAccountID},
+		Identity: &paperapply.IdentityBinding{
+			OwnerIdentity: paperapply.OwnerIdentity{
+				Registry:  paperapply.ArchiveReference{SHA256: tape.IdentityRegistrySHA256()},
+				QuoteTape: paperapply.ArchiveReference{SHA256: tape.SHA256()},
+			},
+		},
+	}
+	if err := checkTapeBinding(tape, request); err != nil {
+		t.Fatal(err)
+	}
+	for _, alter := range []func(*paperapply.Request){
+		func(r *paperapply.Request) { r.Identity = nil },
+		func(r *paperapply.Request) { r.Identity.Registry.SHA256 = strings.Repeat("0", 64) },
+		func(r *paperapply.Request) { r.Identity.QuoteTape.SHA256 = strings.Repeat("1", 64) },
+		func(r *paperapply.Request) { r.SnapshotContext.AccountID = testJobID },
+	} {
+		changed, identity := request, *request.Identity
+		changed.Identity = &identity
+		alter(&changed)
+		if err := checkTapeBinding(tape, changed); err == nil {
+			t.Fatal("identity tape accepted a different durable application binding")
+		}
+	}
+}
+
 func TestLocalTapeCLIUsesDurableResultAndPublishesForFollow(t *testing.T) {
+	t.Run("job tape", func(t *testing.T) { checkLocalTapeCLI(t, false) })
+	t.Run("account archive", func(t *testing.T) { checkLocalTapeCLI(t, true) })
+}
+
+func checkLocalTapeCLI(t *testing.T, accountArchive bool) {
+	t.Helper()
 	ctx, dsn := quoteTestDB(t)
 	research, err := jobs.Open(ctx, dsn)
 	if err != nil {
@@ -119,7 +220,7 @@ func TestLocalTapeCLIUsesDurableResultAndPublishesForFollow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tape := quoteTape{Version: "0.1", Source: papersim.Source, JobID: testJobID, Scope: tapeScope{instrument, "BUY", "500"}, Observations: []observation{}}
+	tape := quoteTape{Version: "0.1", Source: papersim.Source, JobID: testJobID, Scope: &tapeScope{instrument, "BUY", "500"}, Observations: []observation{}}
 	dir := t.TempDir()
 	quoteDir := filepath.Join(dir, "quotes")
 	if err := os.Mkdir(quoteDir, 0700); err != nil {
@@ -130,17 +231,49 @@ func TestLocalTapeCLIUsesDurableResultAndPublishesForFollow(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer root.Close()
-	invoke := func(tape quoteTape) (pinResult, string, error) {
+	scanAccountID := account.ID
+	invokeWithPoll := func(tape quoteTape, poll bool) (pinResult, string, error) {
 		raw := testJSON(t, tape)
+		binding := []string{"--job", testJobID}
+		if accountArchive {
+			raw = testJSON(t, map[string]any{
+				"paper_quote_tape_schema_version": "0.2", "source_mode": papersim.Source,
+				"account_id": scanAccountID, "observations": tape.Observations,
+			})
+			binding = []string{"--account", scanAccountID}
+		}
 		digest := sha256Hex(raw)
 		path := filepath.Join(dir, "tape.json")
 		if err := os.WriteFile(path, raw, 0600); err != nil {
 			t.Fatal(err)
 		}
-		args := []string{"--job", testJobID, "--tape", path, "--sha256", digest, "--quote-root", quoteDir}
+		args := append(binding, "--tape", path, "--sha256", digest, "--quote-root", quoteDir)
 		var output bytes.Buffer
-		if err := run(ctx, dsn, args, &output); err != nil {
+		if poll {
+			pollCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+			defer cancel()
+			lines := make(receiptWriter, jobs.MaxPaperDispatchPage)
+			finished := make(chan error, 1)
+			go func() {
+				finished <- run(pollCtx, dsn, append(args, "--poll-interval", "1s"), lines)
+			}()
+			select {
+			case line := <-lines:
+				output.Write(line)
+			case err := <-finished:
+				return pinResult{}, digest, fmt.Errorf("quote poller exited before publishing: %v", err)
+			case <-pollCtx.Done():
+				return pinResult{}, digest, pollCtx.Err()
+			}
+			cancel()
+			if err := <-finished; err != nil {
+				return pinResult{}, digest, err
+			}
+		} else if err := run(ctx, dsn, args, &output); err != nil {
 			return pinResult{}, digest, err
+		}
+		if output.Len() == 0 {
+			return pinResult{}, digest, nil
 		}
 		var result pinResult
 		if err := contract.Decode(output.Bytes(), contract.PaperQuoteTapeReceipt, &result); err != nil {
@@ -148,7 +281,12 @@ func TestLocalTapeCLIUsesDurableResultAndPublishesForFollow(t *testing.T) {
 		}
 		return result, digest, nil
 	}
-	if pending, _, err := invoke(tape); err != nil || pending.Status != "awaiting_research" {
+	invoke := func(tape quoteTape) (pinResult, string, error) { return invokeWithPoll(tape, false) }
+	pendingStatus := "awaiting_research"
+	if accountArchive {
+		pendingStatus = ""
+	}
+	if pending, _, err := invoke(tape); err != nil || pending.Status != pendingStatus {
 		t.Fatalf("pending = %+v, %v", pending, err)
 	}
 	assertNoPin(t, root)
@@ -207,15 +345,37 @@ func TestLocalTapeCLIUsesDurableResultAndPublishesForFollow(t *testing.T) {
 	}
 	assertNoPin(t, root)
 	earliest := makeObservation(base, 6*time.Microsecond, time.Microsecond, "firm")
-	tape.Observations = append(tape.Observations, makeObservation(base, 5*time.Microsecond, 5*time.Microsecond, "firm"), earliest)
-	first, digest, err := invoke(tape)
-	if err != nil || first.Status != "pinned" || first.CompletedAt == nil || first.CheckedAt == nil || first.AvailableAt == nil ||
+	later := makeObservation(base, 5*time.Microsecond, 5*time.Microsecond, "firm")
+	if accountArchive {
+		clock, err := research.Now(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		lag := clock.Sub(at) + 1200*time.Millisecond
+		earliest = makeObservation(base, 6*time.Microsecond, lag, "firm")
+		later = makeObservation(base, 5*time.Microsecond, lag+500*time.Millisecond, "firm")
+	}
+	tape.Observations = append(tape.Observations, later, earliest)
+	if accountArchive {
+		scanAccountID = "77777777-7777-4777-8777-777777777777"
+		if excluded, _, err := invoke(tape); err != nil || excluded.Status != "" {
+			t.Fatalf("different account saw the durable job: %+v, %v", excluded, err)
+		}
+		scanAccountID = account.ID
+		assertNoPin(t, root)
+	}
+	first, digest, err := invokeWithPoll(tape, accountArchive)
+	if err != nil || first.Status != "pinned" || first.JobID != testJobID || first.CompletedAt == nil || first.CheckedAt == nil || first.AvailableAt == nil ||
 		first.ObservedAt == nil || !first.CompletedAt.Equal(at) || !first.AvailableAt.Equal(earliest.Available) ||
 		!first.ObservedAt.After(at) || !first.AvailableAt.Before(*first.CheckedAt) || first.Quote == nil {
 		t.Fatalf("first pin = %+v, %v", first, err)
 	}
 	pin, err := readPin(root, testJobID)
-	if err != nil || pin.Quote != *first.Quote || pin.Quote.Ref != quoteFilename(digest, sha256Hex(earliest.Raw)) {
+	ref := quoteFilename(digest, sha256Hex(earliest.Raw))
+	if accountArchive {
+		ref = testJobID + "-" + ref
+	}
+	if err != nil || pin.Quote != *first.Quote || pin.Quote.Ref != ref {
 		t.Fatalf("published pin = %+v, %v", pin, err)
 	}
 	loaded, err := readRoot(root, pin.Quote.Ref, papersim.MaxInputBytes)
@@ -225,8 +385,14 @@ func TestLocalTapeCLIUsesDurableResultAndPublishesForFollow(t *testing.T) {
 	if replay, _, err := invoke(tape); err != nil || replay.Status != "replayed" || replay.Quote == nil || *replay.Quote != pin.Quote {
 		t.Fatalf("replayed pin = %+v, %v", replay, err)
 	}
-	if expiredReplay, err := pinCompleted(ctx, testClock{research, batch.Expires.Add(time.Minute)}, root, tape, digest, nil); err != nil || expiredReplay.Status != "replayed" {
-		t.Fatalf("replay after expiry = %+v, %v", expiredReplay, err)
+	if !accountArchive {
+		verifiedTape, err := paperquotes.DecodeTape(testJSON(t, tape), digest, testJobID, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if expiredReplay, err := pinCompleted(ctx, testClock{research, batch.Expires.Add(time.Minute)}, root, verifiedTape, testJobID, nil); err != nil || expiredReplay.Status != "replayed" {
+			t.Fatalf("replay after expiry = %+v, %v", expiredReplay, err)
+		}
 	}
 	tape.Observations = tape.Observations[1:]
 	if _, _, err := invoke(tape); !errors.Is(err, ledger.ErrConflict) {
@@ -247,6 +413,25 @@ func TestLocalTapeCLIUsesDurableResultAndPublishesForFollow(t *testing.T) {
 		followed.Application.Execution.QuoteSHA256 != pin.Quote.SHA256 || followed.Application.Execution.Order.Status != "filled" {
 		t.Fatalf("Follow pinned tape = %+v, %v", followed, err)
 	}
+	if accountArchive {
+		task, err := research.GetPaperDispatch(ctx, testJobID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := research.FinishPaperDispatch(ctx, task, followed.Status); err != nil {
+			t.Fatal(err)
+		}
+		if excluded, _, err := invoke(tape); err != nil || excluded.Status != "" {
+			t.Fatalf("acknowledged dispatch was still eligible: %+v, %v", excluded, err)
+		}
+	}
+}
+
+type receiptWriter chan []byte
+
+func (w receiptWriter) Write(body []byte) (int, error) {
+	w <- bytes.Clone(body)
+	return len(body), nil
 }
 
 func TestConcurrentPublicationKeepsOneImmutablePin(t *testing.T) {
@@ -315,6 +500,11 @@ func testJSON(t *testing.T, value any) []byte {
 		t.Fatal(err)
 	}
 	return raw
+}
+
+func sha256Hex(raw []byte) string {
+	digest := sha256.Sum256(raw)
+	return hex.EncodeToString(digest[:])
 }
 
 func quoteTestDB(t *testing.T) (context.Context, string) {

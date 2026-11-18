@@ -289,6 +289,136 @@ def check_paper_order(origin):
     return account_path, account
 
 
+def write_paper_entry_plan(root, account_id, first):
+    def put(name, value):
+        path = root / name
+        raw = json.dumps(value).encode()
+        path.write_bytes(raw)
+        path.chmod(0o644)
+        return {"ref": name, "sha256": hashlib.sha256(raw).hexdigest()}
+
+    entry = json.loads((ROOT / "contracts/valid-paper-entry-schedule.json").read_bytes())
+    context = entry["snapshot_context"]
+    original = datetime.fromisoformat(entry["scheduled_at"])
+    selection_root = ROOT / "services/research/examples/selection"
+    selection = json.loads((selection_root / "request.json").read_bytes())
+    for field in ("job_id", "policy_version", "portfolio"):
+        del selection[field]
+    occurrences = []
+    for number, at in enumerate((first, first + timedelta(seconds=20)), 1):
+        market = json.loads((selection_root / "market.json").read_bytes())
+        for record in market["records"]:
+            for field in ("event_time", "available_at", "ingested_at"):
+                recorded = datetime.fromisoformat(record[field])
+                record[field] = (at - (original - recorded)).isoformat()
+        manifest = put(f"entry-market-{number}.json", market)
+        observed = (at - timedelta(seconds=5)).isoformat()
+        marks = [
+            mark | {"at": observed, "available_at": observed} for mark in context["marks"]
+        ]
+        occurrences.append(
+            {
+                "scheduled_at": at.isoformat(),
+                "max_lateness_seconds": 60,
+                "marks": put(f"entry-marks-{number}.json", marks),
+                "screening": put(
+                    f"entry-screening-{number}.json", selection | {"data_manifest": manifest}
+                ),
+            }
+        )
+    tape = json.loads((ROOT / "contracts/valid-paper-quote-tape.json").read_bytes())
+    del tape["scope"], tape["job_id"]
+    tape.update(paper_quote_tape_schema_version="0.2", account_id=account_id)
+    for observation in tape["observations"]:
+        observation["available_at"] = observation["quote"]["observed_at"] = first.isoformat()
+        observation["quote"]["expires_at"] = (first + timedelta(seconds=30)).isoformat()
+    return (
+        put(
+            "entry-plan.json",
+            {
+                "schema_version": "0.1",
+                "account_id": account_id,
+                "schedule_id": entry["schedule_id"],
+                "policy": put("policy.json", context["policy"]),
+                "occurrences": occurrences,
+            },
+        ),
+        put("quote-tape.json", tape),
+    )
+
+
+def check_scheduled_paper(compose, origin, root, env):
+    def sql(query):
+        return compose(
+            "exec", "-T", "postgres", "psql", "-U", "research_control", "-d", "tradingbot",
+            "-v", "ON_ERROR_STOP=1", "-tAc", query, capture=True,
+        ).strip()
+
+    def await_dispatch(ready):
+        deadline = time.monotonic() + 80
+        rows = []
+        while time.monotonic() < deadline:
+            rows = json.loads(sql(f"""
+                SELECT coalesce(json_agg(json_build_object(
+                    'job_id', d.job_id, 'status', d.finished_status
+                ) ORDER BY j.created_at, d.job_id), '[]')
+                FROM research_paper_dispatch d JOIN research_jobs j ON j.id = d.job_id
+                WHERE d.account_id = '{account_id}'
+                """))
+            if ready(rows):
+                return rows
+            time.sleep(0.5)
+        raise RuntimeError(f"timed out waiting for scheduled paper dispatch: {rows}")
+
+    account_id = str(uuid4())
+    account_path = "/v1/paper/accounts/" + account_id
+    account = request(
+        origin, "/v1/paper/accounts", 201, {"account_id": account_id, "initial_cash_usd": "1000"}
+    )
+    # Use the same clock as durable job admission.
+    first = datetime.fromisoformat(sql("SELECT clock_timestamp()::text")) + timedelta(seconds=12)
+    plan, tape = write_paper_entry_plan(root, account_id, first)
+    quote_root = root / "quotes"
+    quote_root.mkdir()
+    quote_root.chmod(0o777)
+    env.update(
+        TRADINGBOT_PAPER_ACCOUNT_ID=account_id,
+        TRADINGBOT_PAPER_CONFIG_DIR=str(root),
+        TRADINGBOT_PAPER_QUOTES_DIR=str(quote_root),
+        TRADINGBOT_PAPER_ENTRY_PLAN_REF=plan["ref"],
+        TRADINGBOT_PAPER_ENTRY_PLAN_SHA256=plan["sha256"],
+        TRADINGBOT_PAPER_QUOTE_TAPE_SHA256=tape["sha256"],
+    )
+    compose(
+        "--profile", "paper-entry", "--profile", "paper-quote", "--profile", "paper",
+        "up", "-d", "--no-build", "paper-entry", "paper-quote", "paper-dispatch",
+    )
+    initial = await_dispatch(lambda rows: bool(rows))
+    checked(len(initial) == 1, "did not observe first admission before the second window")
+    compose(
+        "--profile", "paper-entry", "up", "-d", "--no-build", "--no-deps", "--force-recreate",
+        "paper-entry",
+    )
+    finished = await_dispatch(lambda rows: len(rows) == 2 and all(row["status"] for row in rows))
+    checked(finished[0]["job_id"] == initial[0]["job_id"], "entry restart changed the first job")
+    for number, row in enumerate(finished, 1):
+        job = request(origin, f"{JOBS}/{row['job_id']}", 200)["request"]
+        receipt = completed_result(origin, job)
+        checked(
+            row["status"] == "hold"
+            and receipt["result"]["metadata"]["provenance"]["data_manifest"]["ref"]
+            == f"entry-market-{number}.json",
+            "scheduled paper result did not acknowledge HOLD from the pinned archive",
+        )
+    checked(request(origin, account_path, 200) == account, "scheduled HOLD changed paper balances")
+    checked(not list(quote_root.iterdir()), "quote producer published a pin for a HOLD")
+    quote_process = compose(
+        "--profile", "paper-quote", "ps", "-q", "--status", "running", "paper-quote", capture=True
+    ).strip()
+    checked(quote_process, "packaged account quote producer is not running")
+    return finished
+
+
 def free_port():
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("127.0.0.1", 0))
@@ -317,10 +447,10 @@ def main():
     env = os.environ | {"TRADINGBOT_CONTROL_PORT": str(free_port())}
     images = {
         name: env.setdefault(
-            f"TRADINGBOT_{name.upper()}_IMAGE",
+            f"TRADINGBOT_{name.upper().replace('-', '_')}_IMAGE",
             f"tradingbot-{name}:local" if args.skip_build else f"tradingbot-{name}:{project}",
         )
-        for name in ("control", "research", "evaluation")
+        for name in ("control", "research", "evaluation", "paper-entry")
     }
     original = images["research"]
     candidate = f"tradingbot-research:{project}-candidate"
@@ -336,12 +466,20 @@ def main():
 
     try:
         if not args.skip_build:
-            compose("--profile", "evaluation", "build")
-        compose("--profile", "paper", "config", "--quiet")
+            compose("--profile", "evaluation", "--profile", "paper-entry", "build")
+        compose(
+            "--profile", "paper", "--profile", "paper-entry", "--profile", "paper-quote",
+            "--profile", "paper-review-cycles",
+            "config", "--quiet",
+        )
         for binary, arguments in (
             ("paper-apply", ("dispatch", "--help")),
             ("paper-apply", ("schedule-entry", "--help")),
+            ("paper-apply", ("schedule-review", "--help")),
             ("paper-check", ("--help",)),
+            ("paper-memory", ("record-lesson", "--help")),
+            ("paper-memory", ("correct-lesson", "--help")),
+            ("paper-memory", ("lessons", "--help")),
             ("paper-nav", ("--help",)),
             ("paper-quote-pin", ("--help",)),
             ("paper-quote-study", ("--help",)),
@@ -362,6 +500,15 @@ def main():
                 images["control"],
                 *arguments,
             )
+        review_plan_schema = ROOT / "contracts/paper-review-cycle-plan.schema.json"
+        packaged_review_schema = json.loads(docker(
+            "run", "--rm", "--network", "none", "--entrypoint", "python", images["paper-entry"],
+            "-m", "tradingbot.review_cycles", "--schema", capture=True,
+        ))
+        checked(
+            packaged_review_schema == json.loads(review_plan_schema.read_text(encoding="utf-8")),
+            "packaged review cycle schema differs from the published contract",
+        )
         compose("up", "-d", "--wait", "--wait-timeout", "60", "--no-build", "postgres", "control")
         capabilities = request(origin, "/v1/capabilities", 200)
         checked(capabilities["research_job_call_budget"], "missing durable budget capability")
@@ -460,8 +607,12 @@ def main():
                 recorded_calls = check_research_call_usage(
                     compose, archive_root, archive_job, archive_receipt
                 )
+                scheduled_paper = check_scheduled_paper(compose, origin, archive_root, env)
             finally:
-                compose("--profile", "paper", "stop", "paper-research")
+                compose(
+                    "--profile", "paper", "--profile", "paper-entry", "--profile", "paper-quote",
+                    "stop", "paper-research", "paper-dispatch", "paper-entry", "paper-quote",
+                )
         compose("--profile", "evaluation", "run", "--rm", "--pull", "never", "evaluation")
         evaluation = json.loads(
             compose(
@@ -510,12 +661,16 @@ def main():
                     "control_capabilities": capabilities,
                     "paper_profile_archive_job_completed": archive_job["job_id"],
                     "paper_profile_call_observations": recorded_calls,
+                    "scheduled_paper_dispatch": scheduled_paper,
                 },
                 indent=2,
             )
         )
     finally:
-        compose("--profile", "evaluation", "--profile", "paper", "down", "--volumes")
+        compose(
+            "--profile", "evaluation", "--profile", "paper", "--profile", "paper-entry",
+            "--profile", "paper-quote", "--profile", "paper-review-cycles", "down", "--volumes",
+        )
 
 
 if __name__ == "__main__":

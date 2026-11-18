@@ -45,10 +45,24 @@ func NewTelegram(token, chatID string) (*Telegram, error) {
 }
 
 func (t *Telegram) Send(ctx context.Context, message string) error {
+	return t.sendMessage(ctx, message, nil)
+}
+
+type telegramButton struct {
+	Text         string `json:"text"`
+	CallbackData string `json:"callback_data"`
+}
+
+type telegramKeyboard struct {
+	Rows [][]telegramButton `json:"inline_keyboard"`
+}
+
+func (t *Telegram) sendMessage(ctx context.Context, message string, keyboard *telegramKeyboard) error {
 	payload, err := json.Marshal(struct {
-		ChatID int64  `json:"chat_id"`
-		Text   string `json:"text"`
-	}{t.chatID, message})
+		ChatID   int64             `json:"chat_id"`
+		Text     string            `json:"text"`
+		Keyboard *telegramKeyboard `json:"reply_markup,omitempty"`
+	}{t.chatID, message, keyboard})
 	if err != nil {
 		return fmt.Errorf("encode Telegram request: %w", err)
 	}

@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "Synthetic paper fixture replay 0.1 and 0.2",
+  "title": "Synthetic paper fixture replay 0.1, 0.2 and 0.3",
   "$ref": "#/$defs/Result",
   "$defs": {
     "SHA256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
@@ -31,7 +31,7 @@
       "additionalProperties": false,
       "required": ["paper_quote_schema_version", "source_mode", "instrument", "side", "quantity_raw", "gross_usd", "fee_bps", "fixed_fee_usd", "observed_at", "expires_at", "execution"],
       "properties": {
-        "paper_quote_schema_version": {"enum": ["0.1", "0.2"]},
+        "paper_quote_schema_version": {"enum": ["0.1", "0.2", "0.3"]},
         "source_mode": {"const": "synthetic_fixture"},
         "instrument": {"$ref": "paper-account.schema.json#/$defs/Instrument"},
         "side": {"$ref": "#/$defs/Side"},
@@ -42,28 +42,51 @@
         "fixed_fee_usd": {"$ref": "paper-account.schema.json#/$defs/USD"},
         "observed_at": {"type": "string", "format": "date-time"},
         "expires_at": {"type": "string", "format": "date-time"},
-        "execution": {"$ref": "#/$defs/Execution"}
+        "execution": {"$ref": "#/$defs/Execution"},
+        "security_id": {"$ref": "#/$defs/SecurityID"},
+        "identity_registry_sha256": {"$ref": "#/$defs/SHA256"}
       },
-      "if": {"properties": {"paper_quote_schema_version": {"const": "0.2"}}},
-      "then": {"required": ["executed_quantity_raw"], "properties": {"execution": {"const": "partial"}}},
-      "else": {"not": {"required": ["executed_quantity_raw"]}, "properties": {"execution": {"enum": ["fill", "reject", "timeout"]}}}
+      "allOf": [
+        {
+          "if": {"properties": {"paper_quote_schema_version": {"const": "0.3"}}},
+          "then": {"required": ["security_id", "identity_registry_sha256"]},
+          "else": {"not": {"anyOf": [{"required": ["security_id"]}, {"required": ["identity_registry_sha256"]}]}}
+        },
+        {
+          "if": {"properties": {"execution": {"const": "partial"}}},
+          "then": {"required": ["executed_quantity_raw"], "properties": {"paper_quote_schema_version": {"enum": ["0.2", "0.3"]}}},
+          "else": {"not": {"required": ["executed_quantity_raw"]}, "properties": {"paper_quote_schema_version": {"enum": ["0.1", "0.3"]}}}
+        }
+      ]
     },
+    "SecurityID": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"},
     "Result": {
       "type": "object",
       "additionalProperties": false,
       "required": ["paper_replay_schema_version", "source_mode", "quote_sha256", "simulated_execution", "reservation_recorded", "outcome_recorded", "order"],
       "properties": {
-        "paper_replay_schema_version": {"enum": ["0.1", "0.2"]},
+        "paper_replay_schema_version": {"enum": ["0.1", "0.2", "0.3"]},
         "source_mode": {"const": "synthetic_fixture"},
         "quote_sha256": {"$ref": "#/$defs/SHA256"},
         "simulated_execution": {"$ref": "#/$defs/Execution"},
         "reservation_recorded": {"type": "boolean"},
         "outcome_recorded": {"type": "boolean"},
-        "order": {"$ref": "paper-account.schema.json#/$defs/Order"}
+        "order": {"$ref": "paper-account.schema.json#/$defs/Order"},
+        "security_id": {"$ref": "#/$defs/SecurityID"},
+        "identity_registry_sha256": {"$ref": "#/$defs/SHA256"}
       },
-      "if": {"properties": {"paper_replay_schema_version": {"const": "0.2"}}},
-      "then": {"properties": {"simulated_execution": {"const": "partial"}}},
-      "else": {"properties": {"simulated_execution": {"enum": ["fill", "reject", "timeout"]}}}
+      "allOf": [
+        {
+          "if": {"properties": {"paper_replay_schema_version": {"const": "0.3"}}},
+          "then": {"required": ["security_id", "identity_registry_sha256"]},
+          "else": {"not": {"anyOf": [{"required": ["security_id"]}, {"required": ["identity_registry_sha256"]}]}}
+        },
+        {
+          "if": {"properties": {"simulated_execution": {"const": "partial"}}},
+          "then": {"properties": {"paper_replay_schema_version": {"enum": ["0.2", "0.3"]}}},
+          "else": {"properties": {"paper_replay_schema_version": {"enum": ["0.1", "0.3"]}}}
+        }
+      ]
     }
   }
 }

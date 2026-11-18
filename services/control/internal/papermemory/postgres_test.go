@@ -3,6 +3,7 @@ package papermemory
 import (
 	"context"
 	"crypto/rand"
+	"errors"
 	"net/url"
 	"os"
 	"strings"
@@ -126,5 +127,128 @@ func TestOutcomeProjectionMatchesPostgresLedger(t *testing.T) {
 	if err != nil || account.Version != final.AccountVersion || account.CashUSD != final.CashUSD || account.ReservedCashUSD != "0" ||
 		len(account.Positions) != 1 || account.Positions[0].QuantityRaw != "5" || final.RecordedFeesUSD != "0.02000003" {
 		t.Fatalf("final projection diverged from ledger: account %+v, view %+v, %v", account, final, err)
+	}
+
+	settle(20, account.Version, "SELL", "1", "1", "0")
+	assertLessonJournal(t, ctx, parsed.String(), store, base, quoted)
+}
+
+func assertLessonJournal(t *testing.T, ctx context.Context, dsn string, store *ledger.Store, base *pgx.Conn, schema string) {
+	t.Helper()
+	account, err := store.GetAccount(ctx, testAccount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var first, second ledger.LessonFact
+	err = ledger.WithReadSnapshot(ctx, dsn, func(snapshot ledger.ReadSnapshot) error {
+		if _, err := BuildLesson(ctx, snapshot, testAccount, eventID(3), snapshot.Cutoff()); !errors.Is(err, ledger.ErrNotFound) {
+			t.Fatalf("BUY fill available as a realized sale: %v", err)
+		}
+		var err error
+		first, err = BuildLesson(ctx, snapshot, testAccount, eventID(5), snapshot.Cutoff())
+		if err != nil {
+			return err
+		}
+		second, err = BuildLesson(ctx, snapshot, testAccount, eventID(21), snapshot.Cutoff())
+		return err
+	})
+	if err != nil || first.NetPnLUSD != "5.33333331" || first.SourceDecisionID != eventID(104) || first.SourceAccountVersion != 5 ||
+		second.RealizedOutcome != "loss" || second.SourceOutcomeSHA256 == first.SourceOutcomeSHA256 {
+		t.Fatalf("invalid derived lessons: %+v / %+v, %v", first, second, err)
+	}
+	for _, invalid := range []func(*ledger.LessonFact){
+		func(f *ledger.LessonFact) { f.NetPnLUSD = "5.33333332" },
+		func(f *ledger.LessonFact) { f.RealizedOutcome = "loss" },
+		func(f *ledger.LessonFact) { f.ExitFeeErasedGain = true },
+		func(f *ledger.LessonFact) { f.SourceAccountVersion-- },
+		func(f *ledger.LessonFact) { f.SourceFillEventID = eventID(3) },
+	} {
+		tampered := first
+		invalid(&tampered)
+		if _, err := store.RecordLesson(ctx, tampered, eventID(50)); !errors.Is(err, ledger.ErrInvalid) {
+			t.Fatalf("accepted invalid paper memory fact %+v: %v", tampered, err)
+		}
+	}
+	initial, err := store.RecordLesson(ctx, first, eventID(50))
+	if err != nil || initial.Revision != 1 || initial.Action != "record" || initial.AvailableAt.Before(first.SourceAvailableAt) {
+		t.Fatalf("record initial lesson: %+v, %v", initial, err)
+	}
+	repeat, err := store.RecordLesson(ctx, first, eventID(50))
+	if err != nil || repeat != initial {
+		t.Fatalf("retry changed lesson: %+v, %v", repeat, err)
+	}
+	if _, err := store.RecordLesson(ctx, second, eventID(50)); !errors.Is(err, ledger.ErrConflict) {
+		t.Fatalf("reused operation ID did not conflict: %v", err)
+	}
+	if _, err := store.RecordLesson(ctx, first, eventID(54)); !errors.Is(err, ledger.ErrConflict) {
+		t.Fatalf("reused fill with a different operation did not conflict: %v", err)
+	}
+	other, err := store.RecordLesson(ctx, second, eventID(51))
+	if err != nil || other.LessonID == initial.LessonID {
+		t.Fatalf("second same-day lesson lost: %+v, %v", other, err)
+	}
+	if got, err := store.Lessons(ctx, testAccount, "", initial.AvailableAt.Add(-time.Microsecond), false, 100); err != nil || len(got) != 0 {
+		t.Fatalf("future lesson visible: %+v, %v", got, err)
+	}
+	type correctionResult struct {
+		event ledger.LessonEvent
+		err   error
+	}
+	corrections := make(chan correctionResult, 2)
+	for _, operation := range []string{eventID(52), eventID(53)} {
+		go func() {
+			event, err := store.CorrectLesson(ctx, testAccount, initial.LessonID, operation, "retract", 1)
+			corrections <- correctionResult{event, err}
+		}()
+	}
+	var retracted ledger.LessonEvent
+	var conflicts int
+	for range 2 {
+		result := <-corrections
+		if result.err == nil {
+			retracted = result.event
+		} else if errors.Is(result.err, ledger.ErrConflict) {
+			conflicts++
+		}
+	}
+	if conflicts != 1 || retracted.Revision != 2 || retracted.Fact != initial.Fact || !retracted.AvailableAt.After(initial.AvailableAt) {
+		t.Fatalf("expected one immutable correction: %+v; conflicts %d", retracted, conflicts)
+	}
+	kept, err := store.Lessons(ctx, testAccount, initial.LessonID, retracted.AvailableAt.Add(-time.Microsecond), false, 100)
+	if err != nil || len(kept) != 1 || kept[0] != initial {
+		t.Fatalf("retraction changed the earlier cutoff: %+v, %v", kept, err)
+	}
+	readBack, err := ledger.Open(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer readBack.Close()
+	latest, err := readBack.Lessons(ctx, testAccount, initial.LessonID, time.Time{}, false, 1)
+	if err != nil || len(latest) != 1 || latest[0] != retracted {
+		t.Fatalf("latest state after reconnect: %+v, %v", latest, err)
+	}
+	if got, err := readBack.CorrectLesson(ctx, testAccount, initial.LessonID, retracted.EventID, "retract", 1); err != nil || got != retracted {
+		t.Fatalf("retry retraction after reconnect: %+v, %v", got, err)
+	}
+	if _, err := readBack.CorrectLesson(ctx, testAccount, initial.LessonID, retracted.EventID, "reinstate", 2); !errors.Is(err, ledger.ErrConflict) {
+		t.Fatalf("changed correction under same operation ID: %v", err)
+	}
+	reinstated, err := readBack.CorrectLesson(ctx, testAccount, initial.LessonID, eventID(55), "reinstate", 2)
+	if err != nil || reinstated.Revision != 3 || reinstated.Fact != initial.Fact {
+		t.Fatalf("reinstate: %+v, %v", reinstated, err)
+	}
+	history, err := readBack.Lessons(ctx, testAccount, initial.LessonID, time.Time{}, true, 100)
+	if err != nil || len(history) != 3 || history[0] != reinstated || history[1] != retracted || history[2] != initial {
+		t.Fatalf("lesson audit history lost: %+v, %v", history, err)
+	}
+	if _, err := base.Exec(ctx, "UPDATE "+schema+".paper_memory_lessons SET fact=fact WHERE account_id=$1", testAccount); err == nil {
+		t.Fatal("SQL allowed rewriting a lesson")
+	}
+	if _, err := base.Exec(ctx, "DELETE FROM "+schema+".paper_memory_lesson_events WHERE account_id=$1", testAccount); err == nil {
+		t.Fatal("SQL allowed deleting its history")
+	}
+	after, err := store.GetAccount(ctx, testAccount)
+	if err != nil || after.Version != account.Version || after.CashUSD != account.CashUSD {
+		t.Fatalf("lesson changed the economic ledger: %+v, %v", after, err)
 	}
 }

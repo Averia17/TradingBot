@@ -34,5 +34,24 @@ func run(ctx context.Context) error {
 	if group == "" {
 		group = "tradingbot-telegram-v1"
 	}
+	analyticsURL := strings.TrimSpace(os.Getenv("TRADINGBOT_ANALYTICS_URL"))
+	if analyticsURL != "" {
+		owner := strings.TrimSpace(os.Getenv("TRADINGBOT_TELEGRAM_OWNER_USER_ID"))
+		commands, err := notifications.NewPortfolioCommands(telegram, analyticsURL, owner)
+		if err != nil {
+			return err
+		}
+		workerContext, stop := context.WithCancel(ctx)
+		defer stop()
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			commands.Run(workerContext)
+		}()
+		err = notifications.Consume(workerContext, kafkaConfig.Brokers, kafkaConfig.Topic, group, telegram.Send)
+		stop()
+		<-done
+		return err
+	}
 	return notifications.Consume(ctx, kafkaConfig.Brokers, kafkaConfig.Topic, group, telegram.Send)
 }

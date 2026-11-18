@@ -274,6 +274,9 @@ func (s *Store) reserve(ctx context.Context, r ReservationRequest, application *
 	if err := writeEvent(ctx, tx, r.AccountID, r.OrderID, order.AccountVersion, "paper_order.reserved", hash[:], payload); err != nil {
 		return Order{}, false, err
 	}
+	if err := captureAccountOutbox(ctx, tx, r.AccountID, r.OrderID, order.AccountVersion, &order.Instrument, nil); err != nil {
+		return Order{}, false, err
+	}
 	if application != nil {
 		if _, err := bindApplication(ctx, tx, *application, r.OrderID, nil); err != nil {
 			return Order{}, false, err

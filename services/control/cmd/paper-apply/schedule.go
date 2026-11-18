@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"time"
 
 	"tradingbot/control/internal/contract"
@@ -20,6 +21,8 @@ func scheduleReview(ctx context.Context, dsn string, args []string, output io.Wr
 	flags := flag.NewFlagSet("paper-apply schedule-review", flag.ContinueOnError)
 	config := flags.String("config", "", "path to the review schedule request")
 	archiveRoot := flags.String("archive-root", "", "root of the digest-pinned local archive")
+	registrySHA := flags.String("identity-registry-sha256", os.Getenv("TRADINGBOT_RESEARCH_IDENTITY_REGISTRY_SHA256"), "owner-pinned registry SHA-256 for stable paper review")
+	rollForward := flags.Bool("roll-forward", false, "acknowledge a matching durable review in a newer stable window")
 	maxAge := flags.Duration("max-research-age", time.Hour, "maximum age of a new research snapshot, as configured for Control")
 	poll := flags.Duration("poll-interval", 0, "reload the request at this interval (1s to 1h); default is one pass")
 	if err := flags.Parse(args); err != nil {
@@ -47,7 +50,7 @@ func scheduleReview(ctx context.Context, dsn string, args []string, output io.Wr
 
 	encoder := json.NewEncoder(output)
 	for ctx.Err() == nil {
-		receipt, err := reviewSchedulePass(ctx, research, paper, *config, *archiveRoot, *maxAge)
+		receipt, err := reviewSchedulePass(ctx, research, paper, *config, *archiveRoot, *maxAge, *registrySHA, *rollForward)
 		if err == nil {
 			if err := encoder.Encode(receipt); err != nil {
 				return err
@@ -71,7 +74,7 @@ func scheduleReview(ctx context.Context, dsn string, args []string, output io.Wr
 	return ctx.Err()
 }
 
-func reviewSchedulePass(ctx context.Context, research *jobs.Store, paper *ledger.Store, config, root string, maxAge time.Duration) (paperthesis.ScheduleReceipt, error) {
+func reviewSchedulePass(ctx context.Context, research *jobs.Store, paper *ledger.Store, config, root string, maxAge time.Duration, registrySHA string, rollForward bool) (paperthesis.ScheduleReceipt, error) {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	var request paperthesis.ScheduleRequest
@@ -82,5 +85,8 @@ func reviewSchedulePass(ctx context.Context, research *jobs.Store, paper *ledger
 	if err != nil {
 		return paperthesis.ScheduleReceipt{}, err
 	}
-	return paperthesis.ScheduleReview(ctx, research, paper, request, root, now, maxAge)
+	if rollForward {
+		return paperthesis.ScheduleReviewWindow(ctx, research, paper, request, root, now, maxAge, registrySHA)
+	}
+	return paperthesis.ScheduleReviewWithRegistry(ctx, research, paper, request, root, now, maxAge, registrySHA)
 }

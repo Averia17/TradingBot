@@ -1,10 +1,19 @@
 import hashlib
 import json
+import shutil
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID
 
+import pytest
+
+from tradingbot.security_identity import (
+    SecurityBinding,
+    load_identity_registry,
+    project_identity_snapshot,
+)
 from tradingbot.selection import SELECTION_INPUT, plan_research
+from tradingbot.snapshots import load_snapshot
 
 NOW = datetime(2026, 11, 18, 10, tzinfo=UTC)
 
@@ -98,6 +107,8 @@ def test_prioritize_held_fresh_catalyst_filter_and_apply_remaining_budget(tmp_pa
     )
     config = request(tmp_path, records, remaining=2, calls=11)
     result = plan_research(tmp_path, config)
+    assert result["selection_schema_version"] == "0.1"
+    assert result["job"]["job_schema_version"] == "0.1"
     assert result["job"]["requested_symbols"] == ["TSLA"]
     assert result["job"]["max_llm_calls"] == 11
     assert result["job"]["data_manifest"] == config["data_manifest"]
@@ -225,6 +236,8 @@ def test_pinned_roster_excludes_delisted_missing_and_mixed_issuer_history(tmp_pa
     assert mixed["candidates"][0]["status"] == "ambiguous_security_history"
 
     current = plan_research(tmp_path, guarded(roster + new_bars, "id-new"))
+    assert current["selection_schema_version"] == "0.1"
+    assert current["job"]["job_schema_version"] == "0.1"
     assert current["job"]["requested_symbols"] == ["TSLA"]
     assert current["candidates"][0]["security_id"] == "id-new"
     assert current["candidates"][0]["momentum_bps"] == "2000.000000"
@@ -237,6 +250,93 @@ def test_pinned_roster_excludes_delisted_missing_and_mixed_issuer_history(tmp_pa
     ambiguous = plan_research(tmp_path, guarded(two_current, "id-new"))
     assert ambiguous["job"] is None
     assert ambiguous["candidates"][0]["status"] == "ambiguous_universe_symbol"
+
+
+def test_identity_selection_input_is_explicitly_versioned_and_requires_owner_pin(tmp_path):
+    config = request(tmp_path, []) | {
+        "schema_version": "0.3",
+        "universe_provider": "selection-fixture",
+        "identity_registry": {"ref": "registry.json", "sha256": "a" * 64},
+        "candidates": [{"symbol": "TSLA", "allowed": True, "security_id": "id-current"}],
+    }
+    assert SELECTION_INPUT.validate_python(config).identity_registry.ref == "registry.json"
+    with pytest.raises(ValueError, match="owner.*pin"):
+        plan_research(tmp_path, config)
+    with pytest.raises(ValueError, match="owner.*pin"):
+        plan_research(
+            tmp_path,
+            config,
+            trusted_identity_registry=config["identity_registry"] | {"sha256": "b" * 64},
+        )
+
+
+def stable_example():
+    root = Path(__file__).resolve().parents[1] / "examples/selection"
+    return root, json.loads((root / "identity-request.json").read_bytes())
+
+
+def test_stable_selector_ranks_reused_ticker_and_emits_ordered_job_bindings():
+    root, config = stable_example()
+    reference = config["identity_registry"]
+    receipt = plan_research(root, config, trusted_identity_registry=reference)
+    job = receipt["job"]
+    assert receipt["selection_schema_version"] == "0.2"
+    assert job["job_schema_version"] == "0.2"
+    assert job["identity_registry"] == reference
+    assert job["requested_symbols"] == ["NVDA", "TSLA"]
+    assert job["security_bindings"] == [
+        {"symbol": "NVDA", "security_id": "fixture-nvda"},
+        {"symbol": "TSLA", "security_id": "fixture-current"},
+    ]
+    assert job["max_llm_calls"] == 33
+
+    snapshot = load_snapshot(root, job["data_manifest"], NOW, visibility="locally_ingested")
+    registry = load_identity_registry(root, reference)
+    selected = project_identity_snapshot(
+        snapshot,
+        registry,
+        reference,
+        tuple(SecurityBinding(**row) for row in job["security_bindings"]),
+    )
+    assert receipt["snapshot_sha256"] == selected.sha256
+    assert all(
+        record.payload.get("security_id") != "fixture-previous" for record in selected.records
+    )
+    assert all(row["status"] == "selected" for row in receipt["candidates"])
+
+    legacy = {key: value for key, value in config.items() if key != "identity_registry"}
+    legacy["schema_version"] = "0.2"
+    conservative = plan_research(root, legacy)
+    assert conservative["job"]["requested_symbols"] == ["NVDA"]
+    assert conservative["candidates"][1]["status"] == "ambiguous_security_history"
+
+
+def test_stable_selector_rejects_unbound_holding_and_tampered_registry(tmp_path):
+    root, config = stable_example()
+    config["portfolio"]["positions"] = [
+        {
+            "symbol": "TSLA",
+            "instrument_id": "fixture:previous-issuer",
+            "quantity": "1",
+            "mark_price_usd": "100",
+        }
+    ]
+    reference = config["identity_registry"]
+    receipt = plan_research(root, config, trusted_identity_registry=reference)
+    assert receipt["job"]["requested_symbols"] == ["NVDA"]
+    assert receipt["candidates"][1]["status"] == "ambiguous_held_security"
+
+    no_budget = plan_research(
+        root, config | {"remaining_analysis_slots": 0}, trusted_identity_registry=reference
+    )
+    assert no_budget["selection_schema_version"] == "0.2"
+    assert no_budget["job"] is None
+
+    shutil.copytree(root, tmp_path, dirs_exist_ok=True)
+    registry = tmp_path / reference["ref"]
+    registry.write_bytes(registry.read_bytes() + b" ")
+    with pytest.raises(ValueError, match="SHA-256"):
+        plan_research(tmp_path, config, trusted_identity_registry=reference)
 
 
 def test_published_selection_schema_and_example():

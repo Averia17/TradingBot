@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -24,6 +25,8 @@ var (
 	ErrLeaseConflict = errors.New("research lease is expired, superseded, or belongs to another worker")
 )
 
+var registryDigest = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
 type Lease struct {
 	Job       Job
 	WorkerID  string
@@ -37,6 +40,19 @@ type Lease struct {
 // Claim creates one attempt or replays the same still-active claim. A claim ID
 // that found no work is unbound until an attempt is committed.
 func (s *Store) Claim(ctx context.Context, workerID, claimID string, maxSnapshotAge time.Duration) (Lease, error) {
+	return s.claim(ctx, workerID, claimID, maxSnapshotAge, "")
+}
+
+// ClaimWithIdentityRegistry selects jobs whose immutable registry digest
+// the worker is configured to verify.
+func (s *Store) ClaimWithIdentityRegistry(ctx context.Context, workerID, claimID string, maxSnapshotAge time.Duration, registrySHA string) (Lease, error) {
+	if !registryDigest.MatchString(registrySHA) {
+		return Lease{}, errors.New("invalid research claim registry digest")
+	}
+	return s.claim(ctx, workerID, claimID, maxSnapshotAge, registrySHA)
+}
+
+func (s *Store) claim(ctx context.Context, workerID, claimID string, maxSnapshotAge time.Duration, registrySHA string) (Lease, error) {
 	if maxSnapshotAge <= 0 {
 		return Lease{}, errors.New("invalid research snapshot age limit")
 	}
@@ -53,11 +69,11 @@ func (s *Store) Claim(ctx context.Context, workerID, claimID string, maxSnapshot
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 737292))`, claimID); err != nil {
 		return Lease{}, fmt.Errorf("lock research claim identity: %w", err)
 	}
-	if lease, err := replayClaim(ctx, tx, workerID, claimID, maxSnapshotAge); !errors.Is(err, pgx.ErrNoRows) {
+	if lease, err := replayClaim(ctx, tx, workerID, claimID, maxSnapshotAge, registrySHA); !errors.Is(err, pgx.ErrNoRows) {
 		return lease, err
 	}
 	for range maxClaimCandidates {
-		lease, err := claimNext(ctx, tx, workerID, claimID, maxSnapshotAge)
+		lease, err := claimNext(ctx, tx, workerID, claimID, maxSnapshotAge, registrySHA)
 		switch {
 		case errors.Is(err, pgx.ErrNoRows):
 			if err := tx.Commit(ctx); err != nil {
@@ -79,10 +95,11 @@ func (s *Store) Claim(ctx context.Context, workerID, claimID string, maxSnapshot
 	return Lease{}, ErrNoJob
 }
 
-func replayClaim(ctx context.Context, tx pgx.Tx, workerID, claimID string, maxSnapshotAge time.Duration) (Lease, error) {
-	var jobID string
-	err := tx.QueryRow(ctx, `SELECT j.id::text FROM research_job_attempts a JOIN research_jobs j ON a.job_id = j.id
-		WHERE a.claim_id = $1 FOR UPDATE OF j`, claimID).Scan(&jobID)
+func replayClaim(ctx context.Context, tx pgx.Tx, workerID, claimID string, maxSnapshotAge time.Duration, registrySHA string) (Lease, error) {
+	var jobID, priorRegistrySHA string
+	err := tx.QueryRow(ctx, `SELECT j.id::text, a.identity_registry_sha256
+		FROM research_job_attempts a JOIN research_jobs j ON a.job_id = j.id
+		WHERE a.claim_id = $1 FOR UPDATE OF j`, claimID).Scan(&jobID, &priorRegistrySHA)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Lease{}, pgx.ErrNoRows
 	}
@@ -93,7 +110,7 @@ func replayClaim(ctx context.Context, tx pgx.Tx, workerID, claimID string, maxSn
 	if err != nil {
 		return Lease{}, err
 	}
-	if lease.ClaimID != claimID || lease.WorkerID != workerID {
+	if lease.ClaimID != claimID || lease.WorkerID != workerID || priorRegistrySHA != registrySHA {
 		return Lease{}, ErrLeaseConflict
 	}
 	job, asOf, err := claimInputs(ctx, tx, jobID)
@@ -107,23 +124,24 @@ func replayClaim(ctx context.Context, tx pgx.Tx, workerID, claimID string, maxSn
 	return lease, nil
 }
 
-func claimNext(ctx context.Context, tx pgx.Tx, workerID, claimID string, maxSnapshotAge time.Duration) (Lease, error) {
+func claimNext(ctx context.Context, tx pgx.Tx, workerID, claimID string, maxSnapshotAge time.Duration, registrySHA string) (Lease, error) {
 	var jobID, status string
 	var attempts int
 	err := tx.QueryRow(ctx, `SELECT j.id::text, j.status, j.attempt_count FROM research_jobs j
 		LEFT JOIN research_job_attempts a ON a.job_id = j.id AND a.attempt = j.attempt_count
-		WHERE j.status = 'queued' OR (j.status = 'leased' AND a.expires_at <= statement_timestamp())
-		ORDER BY j.created_at, j.id LIMIT 1 FOR UPDATE OF j SKIP LOCKED`).Scan(&jobID, &status, &attempts)
+		WHERE j.identity_registry_sha256 = $1
+			AND (j.status = 'queued' OR (j.status = 'leased' AND a.expires_at <= statement_timestamp()))
+		ORDER BY j.created_at, j.id LIMIT 1 FOR UPDATE OF j SKIP LOCKED`, registrySHA).Scan(&jobID, &status, &attempts)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Lease{}, pgx.ErrNoRows
 	}
 	if err != nil {
 		return Lease{}, fmt.Errorf("select research job for claim: %w", err)
 	}
-	return claimLockedJob(ctx, tx, jobID, status, attempts, workerID, claimID, maxSnapshotAge)
+	return claimLockedJob(ctx, tx, jobID, status, attempts, workerID, claimID, maxSnapshotAge, registrySHA)
 }
 
-func claimLockedJob(ctx context.Context, tx pgx.Tx, jobID, status string, attempts int, workerID, claimID string, maxSnapshotAge time.Duration) (Lease, error) {
+func claimLockedJob(ctx context.Context, tx pgx.Tx, jobID, status string, attempts int, workerID, claimID string, maxSnapshotAge time.Duration, registrySHA string) (Lease, error) {
 	// A heartbeat may commit between the candidate query's statement snapshot
 	// and the job row lock. Re-read the attempt after locking the owning job.
 	if status == "leased" {
@@ -162,9 +180,9 @@ func claimLockedJob(ctx context.Context, tx pgx.Tx, jobID, status string, attemp
 	}
 	lease.ExpiresAt = minTime(now.Add(leaseTTL), lease.Deadline)
 	err = tx.QueryRow(ctx, `INSERT INTO research_job_attempts
-		(job_id, attempt, worker_id, claim_id, lease_token, started_at, expires_at, deadline)
-		VALUES ($1, $2, $3, $4, gen_random_uuid(), $5, $6, $7) RETURNING lease_token::text`,
-		jobID, lease.Attempt, workerID, claimID, now, lease.ExpiresAt, lease.Deadline).Scan(&lease.Token)
+		(job_id, attempt, worker_id, claim_id, lease_token, started_at, expires_at, deadline, identity_registry_sha256)
+		VALUES ($1, $2, $3, $4, gen_random_uuid(), $5, $6, $7, $8) RETURNING lease_token::text`,
+		jobID, lease.Attempt, workerID, claimID, now, lease.ExpiresAt, lease.Deadline, registrySHA).Scan(&lease.Token)
 	if err != nil {
 		return Lease{}, fmt.Errorf("write research attempt: %w", err)
 	}
@@ -184,12 +202,13 @@ func setJobStatus(ctx context.Context, tx pgx.Tx, jobID, status string) error {
 
 func claimInputs(ctx context.Context, tx pgx.Tx, id string) (Job, time.Time, error) {
 	var job Job
-	var snapshotID string
+	var snapshotID, registrySHA string
 	var snapshot, requestDigest, snapshotDigest []byte
 	err := tx.QueryRow(ctx, `SELECT j.id::text, j.request, j.request_sha256, j.status, j.created_at,
-		s.id::text, s.payload, s.payload_sha256 FROM research_jobs j JOIN research_snapshots s ON s.id = j.snapshot_id
+		s.id::text, s.payload, s.payload_sha256, j.identity_registry_sha256
+		FROM research_jobs j JOIN research_snapshots s ON s.id = j.snapshot_id
 		WHERE j.id = $1`, id).Scan(&job.ID, &job.Request, &requestDigest, &job.Status, &job.CreatedAt,
-		&snapshotID, &snapshot, &snapshotDigest)
+		&snapshotID, &snapshot, &snapshotDigest, &registrySHA)
 	if err != nil {
 		return Job{}, time.Time{}, fmt.Errorf("read persisted research inputs: %w", err)
 	}
@@ -207,13 +226,34 @@ func claimInputs(ctx context.Context, tx pgx.Tx, id string) (Job, time.Time, err
 		ID   string    `json:"snapshot_id"`
 		AsOf time.Time `json:"as_of"`
 	}
-	if json.Unmarshal(job.Request, &request) != nil || request.ID != job.ID || request.Version != "0.1" ||
+	boundRegistry, err := jobRegistryPin(job.Request)
+	if json.Unmarshal(job.Request, &request) != nil || request.ID != job.ID ||
+		(request.Version != "0.1" && request.Version != "0.2") || err != nil || boundRegistry != registrySHA ||
 		!bytes.Equal(request.Portfolio, snapshot) || json.Unmarshal(snapshot, &portfolio) != nil ||
 		portfolio.ID != snapshotID || portfolio.AsOf.IsZero() {
 		return Job{}, time.Time{}, errors.New("persisted research inputs have inconsistent identities or version")
 	}
 	job.CreatedAt = job.CreatedAt.UTC()
 	return job, portfolio.AsOf.UTC(), nil
+}
+
+func jobRegistryPin(raw []byte) (string, error) {
+	var job struct {
+		Version  string `json:"job_schema_version"`
+		Registry *struct {
+			SHA256 string `json:"sha256"`
+		} `json:"identity_registry"`
+	}
+	if err := json.Unmarshal(raw, &job); err != nil {
+		return "", err
+	}
+	if job.Version == "0.2" && job.Registry != nil && registryDigest.MatchString(job.Registry.SHA256) {
+		return job.Registry.SHA256, nil
+	}
+	if job.Version == "0.2" || job.Registry != nil {
+		return "", errors.New("invalid research job registry binding")
+	}
+	return "", nil
 }
 
 // Heartbeat extends only the latest unexpired attempt, bounded by its deadline.

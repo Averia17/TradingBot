@@ -1,0 +1,30 @@
+{
+  "schema_version": "0.2",
+  "identity_registry": {
+    "ref": "identity-registry.json",
+    "sha256": "aa3d6dc48790eb7d7e549f684ffb0cdfa855625c4dd6d76c3fe2220c35a86f5c"
+  },
+  "instruments": [
+    {
+      "key": "STABLETSLA",
+      "security_id": "fixture-current",
+      "instrument": {"instrument_id": "fixture:TSLA", "registry_version": "fixture-v1", "decimals": 2}
+    },
+    {
+      "key": "STABLENVDA",
+      "security_id": "fixture-nvda",
+      "instrument": {"instrument_id": "fixture:NVDA", "registry_version": "fixture-v1", "decimals": 2}
+    }
+  ],
+  "replay": {
+    "schema_version": "0.1",
+    "source_mode": "synthetic_fixture",
+    "starting_cash_usd": "1000.00",
+    "commission_bps": 20,
+    "quotes": [
+      {"symbol": "STABLETSLA", "observed_at": "2026-11-18T10:00:00Z", "available_at": "2026-11-18T10:00:00Z", "bid_usd": "99.90", "ask_usd": "100.10", "bid_size": 100, "ask_size": 100},
+      {"symbol": "STABLENVDA", "observed_at": "2026-11-18T10:01:00Z", "available_at": "2026-11-18T10:01:00Z", "bid_usd": "49.90", "ask_usd": "50.10", "bid_size": 100, "ask_size": 100}
+    ],
+    "orders": []
+  }
+}

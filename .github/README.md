@@ -8,7 +8,7 @@ Workflows используют `contents: read` и работают без кл�
 
 Плановый workflow запускается на default branch репозитория. История проверок доступна в [GitHub Actions](https://github.com/Averia17/TradingBot/actions). Правила обязательных проверок перед merge задаются отдельно в GitHub.
 
-`Go Quality (ubuntu-latest)` в `quality.yml` проверяет форматирование, зависимости, `vet`, тесты, гонки данных и сборку `services/control`, `services/trade-events` и `services/notifications`. Версия Go берётся из `services/control/go.mod`. Race gate использует отдельную PostgreSQL 17 для тестов research jobs и outbox. Тесты Kafka и Telegram используют локальные тестовые реализации. Этапы реализации описаны в [service migration](../docs/planning/service-migration.md).
+`Go Quality (ubuntu-latest)` в `quality.yml` проверяет форматирование, зависимости, `vet`, тесты, гонки данных и сборку `services/control`, `services/trade-events`, `services/notifications` и `services/portfolio-analytics`. Версия Go берётся из `services/control/go.mod`. Race gate использует PostgreSQL 17 для тестов research jobs, outbox и аналитики. Тесты Kafka и Telegram используют локальные тестовые реализации. Этапы реализации описаны в [service migration](../docs/planning/service-migration.md).
 
 `Offline research images and compatibility` собирает три образа и проверяет их
 через временный Compose-проект. Smoke проверяет отклонение неподдерживаемой версии

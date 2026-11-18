@@ -1,0 +1,214 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "TradingBot paper portfolio report 1.0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "report_id",
+    "account_id",
+    "mode",
+    "currency",
+    "status",
+    "account_status",
+    "account_version",
+    "as_of",
+    "valuation_at",
+    "ledger_verified_at",
+    "cash_usd",
+    "reserved_cash_usd",
+    "free_cash_usd",
+    "positions_value_usd",
+    "nav_usd",
+    "realized_pnl_usd",
+    "unrealized_pnl_usd",
+    "positions",
+    "performance"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "report_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$"
+    },
+    "account_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$"
+    },
+    "mode": {"const": "paper"},
+    "currency": {"const": "USD"},
+    "status": {
+      "enum": [
+        "complete",
+        "incomplete",
+        "stale"
+      ]
+    },
+    "account_status": {
+      "enum": [
+        "current",
+        "gap",
+        "stale",
+        "missing_head"
+      ]
+    },
+    "account_version": {"type": "integer", "minimum": 1},
+    "as_of": {"$ref": "#/$defs/UTC"},
+    "valuation_at": {"$ref": "#/$defs/DateOrNull"},
+    "ledger_verified_at": {"$ref": "#/$defs/DateOrNull"},
+    "cash_usd": {"$ref": "#/$defs/Decimal"},
+    "reserved_cash_usd": {"$ref": "#/$defs/Decimal"},
+    "free_cash_usd": {"$ref": "#/$defs/Decimal"},
+    "positions_value_usd": {"$ref": "#/$defs/DecimalOrNull"},
+    "nav_usd": {"$ref": "#/$defs/DecimalOrNull"},
+    "realized_pnl_usd": {"$ref": "#/$defs/DecimalOrNull"},
+    "unrealized_pnl_usd": {"$ref": "#/$defs/DecimalOrNull"},
+    "positions": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/Position"}
+    },
+    "performance": {"$ref": "#/$defs/Performance"}
+  },
+  "$defs": {
+    "Decimal": {
+      "type": "string",
+      "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]{1,8})?$"
+    },
+    "DecimalOrNull": {
+      "anyOf": [
+        {"$ref": "#/$defs/Decimal"},
+        {"type": "null"}
+      ]
+    },
+    "UTC": {"type": "string", "format": "date-time", "pattern": "Z$"},
+    "DateOrNull": {
+      "anyOf": [
+        {"$ref": "#/$defs/UTC"},
+        {"type": "null"}
+      ]
+    },
+    "Position": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "instrument_id",
+        "registry_version",
+        "decimals",
+        "quantity_raw",
+        "reserved_quantity_raw",
+        "basis_usd",
+        "price_usd",
+        "mark_observed_at",
+        "mark_available_at",
+        "market_value_usd",
+        "weight_pct",
+        "unrealized_pnl_usd",
+        "status"
+      ],
+      "properties": {
+        "instrument_id": {"type": "string", "minLength": 1, "maxLength": 128},
+        "registry_version": {"type": "string", "minLength": 1, "maxLength": 128},
+        "decimals": {"type": "integer", "minimum": 0, "maximum": 18},
+        "quantity_raw": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]{0,37})$"
+        },
+        "reserved_quantity_raw": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]{0,37})$"
+        },
+        "basis_usd": {"$ref": "#/$defs/Decimal"},
+        "price_usd": {"$ref": "#/$defs/DecimalOrNull"},
+        "mark_observed_at": {"$ref": "#/$defs/DateOrNull"},
+        "mark_available_at": {"$ref": "#/$defs/DateOrNull"},
+        "mark_source_id": {"type": "string", "minLength": 1, "maxLength": 128},
+        "mark_source_kind": {
+          "enum": [
+            "local_archive",
+            "synthetic_fixture"
+          ]
+        },
+        "market_value_usd": {"$ref": "#/$defs/DecimalOrNull"},
+        "weight_pct": {"$ref": "#/$defs/DecimalOrNull"},
+        "unrealized_pnl_usd": {"$ref": "#/$defs/DecimalOrNull"},
+        "status": {
+          "enum": [
+            "priced",
+            "mark_stale",
+            "mark_missing"
+          ]
+        }
+      }
+    },
+    "Performance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "period",
+        "status",
+        "start_at",
+        "end_at",
+        "observations",
+        "pnl_usd",
+        "realized_pnl_usd",
+        "unrealized_change_usd",
+        "return_pct",
+        "benchmark_status",
+        "benchmark_return_pct",
+        "excess_pct_points",
+        "max_drawdown_pct",
+        "execution_fees_usd",
+        "operating_status",
+        "operating_costs_usd",
+        "operating_pnl_usd",
+        "operating_return_pct",
+        "operating_excess_pct_points"
+      ],
+      "properties": {
+        "period": {
+          "enum": [
+            "7d",
+            "30d",
+            "all"
+          ]
+        },
+        "status": {
+          "enum": [
+            "complete",
+            "incomplete",
+            "insufficient_history"
+          ]
+        },
+        "start_at": {"$ref": "#/$defs/DateOrNull"},
+        "end_at": {"$ref": "#/$defs/DateOrNull"},
+        "observations": {"type": "integer", "minimum": 0},
+        "pnl_usd": {"$ref": "#/$defs/DecimalOrNull"},
+        "realized_pnl_usd": {"$ref": "#/$defs/DecimalOrNull"},
+        "unrealized_change_usd": {"$ref": "#/$defs/DecimalOrNull"},
+        "return_pct": {"$ref": "#/$defs/DecimalOrNull"},
+        "benchmark_id": {"type": "string", "minLength": 1, "maxLength": 128},
+        "benchmark_status": {
+          "enum": [
+            "complete",
+            "not_configured",
+            "missing"
+          ]
+        },
+        "benchmark_return_pct": {"$ref": "#/$defs/DecimalOrNull"},
+        "excess_pct_points": {"$ref": "#/$defs/DecimalOrNull"},
+        "max_drawdown_pct": {"$ref": "#/$defs/DecimalOrNull"},
+        "execution_fees_usd": {"$ref": "#/$defs/DecimalOrNull"},
+        "operating_status": {
+          "enum": [
+            "complete",
+            "coverage_missing"
+          ]
+        },
+        "operating_costs_usd": {"$ref": "#/$defs/DecimalOrNull"},
+        "operating_pnl_usd": {"$ref": "#/$defs/DecimalOrNull"},
+        "operating_return_pct": {"$ref": "#/$defs/DecimalOrNull"},
+        "operating_excess_pct_points": {"$ref": "#/$defs/DecimalOrNull"}
+      }
+    }
+  }
+}

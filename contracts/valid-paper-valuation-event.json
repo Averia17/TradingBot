@@ -1,0 +1,16 @@
+{
+  "version": "1.0",
+  "account_id": "7c4d4963-94e7-498b-8869-4e46feacbdd0",
+  "id": "abc-20261116-2200",
+  "kind": "mark",
+  "source_id": "sample-paper-marks",
+  "source_kind": "synthetic_fixture",
+  "observed_at": "2026-11-16T22:00:00Z",
+  "available_at": "2026-11-16T22:00:10Z",
+  "mark": {
+    "instrument_id": "equity:ABC",
+    "registry_version": "v1",
+    "decimals": 0,
+    "price_usd": "22"
+  }
+}

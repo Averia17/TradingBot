@@ -1,6 +1,7 @@
 package paperapply
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -27,6 +28,13 @@ type FollowStore interface {
 
 type QuoteSource func(context.Context, string) ([]byte, error)
 
+type BoundQuoteVerifier func(ctx context.Context, raw []byte, completedAt, now, deadline time.Time) error
+
+type boundResearchStore interface {
+	ResearchStore
+	GetPaperDispatch(context.Context, string) (jobs.PaperDispatchTask, error)
+}
+
 type FollowResult struct {
 	Version     string  `json:"paper_follow_schema_version"`
 	JobID       string  `json:"job_id"`
@@ -42,7 +50,34 @@ func (r FollowResult) Pending() bool {
 // fixes the actionable quote atomically with the reservation, so recovery
 // always resumes the same order even when the fixture file or TTL changed.
 func Follow(ctx context.Context, research ResearchStore, paper FollowStore, req Request, quotes QuoteSource, now time.Time) (FollowResult, error) {
-	if req.Version != Version || req.Intent != nil || !uuidPattern.MatchString(req.JobID) || now.IsZero() {
+	if req.Version != Version {
+		return FollowResult{}, ErrInvalid
+	}
+	return follow(ctx, research, paper, req, quotes, nil, now)
+}
+
+// FollowBound applies only an immutable owner-enrolled dispatch. For a new
+// order it verifies local tape membership; a reserved order reuses its bytes.
+func FollowBound(ctx context.Context, research boundResearchStore, paper FollowStore, req Request,
+	quotes QuoteSource, verify BoundQuoteVerifier, now time.Time) (FollowResult, error) {
+	if req.Version != IdentityVersion || !req.validFollow() {
+		return FollowResult{}, ErrInvalid
+	}
+	task, err := research.GetPaperDispatch(ctx, req.JobID)
+	if err != nil {
+		return FollowResult{}, err
+	}
+	body, err := json.Marshal(req)
+	if err != nil || task.AccountID != req.SnapshotContext.AccountID || task.JobID != req.JobID ||
+		!bytes.Equal(task.Request, body) || task.RequestSHA256 != sha256.Sum256(body) {
+		return FollowResult{}, ledger.ErrConflict
+	}
+	return follow(ctx, research, paper, req, quotes, verify, now)
+}
+
+func follow(ctx context.Context, research ResearchStore, paper FollowStore, req Request,
+	quotes QuoteSource, verify BoundQuoteVerifier, now time.Time) (FollowResult, error) {
+	if !req.validFollow() || now.IsZero() {
 		return FollowResult{}, ErrInvalid
 	}
 	if err := req.SnapshotContext.Policy.Validate(); err != nil {
@@ -57,7 +92,7 @@ func Follow(ctx context.Context, research ResearchStore, paper FollowStore, req 
 		RequestSHA256: sha256.Sum256(body),
 	}
 	status := func(value string) FollowResult {
-		return FollowResult{Version: Version, JobID: req.JobID, Status: value}
+		return FollowResult{Version: req.Version, JobID: req.JobID, Status: value}
 	}
 	pinned, err := paper.GetApplication(ctx, req.JobID)
 	if err != nil && !errors.Is(err, ledger.ErrNotFound) {
@@ -69,7 +104,7 @@ func Follow(ctx context.Context, research ResearchStore, paper FollowStore, req 
 			return FollowResult{}, ledger.ErrConflict
 		}
 		if len(pinned.Result) != 0 {
-			return completedFollow(pinned)
+			return completedFollow(pinned, req.Version)
 		}
 		input.Quote = pinned.Quote
 	}
@@ -97,7 +132,7 @@ func Follow(ctx context.Context, research ResearchStore, paper FollowStore, req 
 	if err != nil {
 		return FollowResult{}, err
 	}
-	portfolio, batch, err := loadResearch(job, receipt, req.SnapshotContext, now)
+	portfolio, batch, err := loadResearch(job, receipt, req, now)
 	if err != nil {
 		return FollowResult{}, err
 	}
@@ -106,6 +141,10 @@ func Follow(ctx context.Context, research ResearchStore, paper FollowStore, req 
 	}
 	if !hasPin && req.SnapshotContext.CheckMarks(now) != nil {
 		return concurrentApplication(ctx, paper, input, status("snapshot_stale"))
+	}
+	input.ReserveBefore = req.deadline(batch.Expires)
+	if !hasPin && req.Identity != nil && !input.ReserveBefore.After(now) {
+		return concurrentApplication(ctx, paper, input, status("expired"))
 	}
 	if !hasPin && !allHold(batch.Intents) {
 		err = ErrQuoteMissing
@@ -127,8 +166,15 @@ func Follow(ctx context.Context, research ResearchStore, paper FollowStore, req 
 		if len(input.Quote) == 0 {
 			return FollowResult{}, ErrInvalid
 		}
+		if req.Identity != nil {
+			if verify == nil {
+				return FollowResult{}, fmt.Errorf("%w: no owner tape verifier configured", ErrInvalid)
+			}
+			if err := verify(ctx, input.Quote, receipt.CompletedAt, now, input.ReserveBefore); err != nil {
+				return FollowResult{}, fmt.Errorf("verify pinned owner quote tape: %w", err)
+			}
+		}
 	}
-	input.ReserveBefore = applicationDeadline(req.SnapshotContext, batch.Expires)
 	application, err := applyCompleted(ctx, followedOrderStore{FollowStore: paper, input: input},
 		req, input.Quote, portfolio, batch, receipt.CompletedAt, now)
 	if errors.Is(err, ledger.ErrExpired) && !hasPin {
@@ -158,7 +204,7 @@ func Follow(ctx context.Context, research ResearchStore, paper FollowStore, req 
 	if err != nil {
 		return FollowResult{}, err
 	}
-	return completedFollow(record)
+	return completedFollow(record, req.Version)
 }
 
 func applicationDeadline(snapshot SnapshotContext, deadline time.Time) time.Time {
@@ -188,7 +234,7 @@ func concurrentApplication(ctx context.Context, paper FollowStore, input ledger.
 		refused.Status = "awaiting_recovery"
 		return refused, nil
 	}
-	return completedFollow(record)
+	return completedFollow(record, refused.Version)
 }
 
 type followedOrderStore struct {
@@ -208,9 +254,9 @@ func (s followedOrderStore) RiskActivity(ctx context.Context, accountID string, 
 	return store.RiskActivity(ctx, accountID, expectedVersion)
 }
 
-func completedFollow(record ledger.ApplicationRecord) (FollowResult, error) {
+func completedFollow(record ledger.ApplicationRecord, version string) (FollowResult, error) {
 	var result Result
-	if err := contract.Decode(record.Result, nil, &result); err != nil || result.Version != Version || result.JobID != record.JobID {
+	if err := contract.Decode(record.Result, nil, &result); err != nil || result.Version != version || result.JobID != record.JobID {
 		return FollowResult{}, errors.New("invalid stored paper application receipt")
 	}
 	switch result.Status {
@@ -227,5 +273,5 @@ func completedFollow(record ledger.ApplicationRecord) (FollowResult, error) {
 	default:
 		return FollowResult{}, errors.New("unknown stored paper application status")
 	}
-	return FollowResult{Version: Version, JobID: result.JobID, Status: result.Status, Application: &result}, nil
+	return FollowResult{Version: version, JobID: result.JobID, Status: result.Status, Application: &result}, nil
 }

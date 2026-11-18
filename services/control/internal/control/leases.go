@@ -16,13 +16,46 @@ import (
 var workerIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 
 func (h jobHTTP) claim(w http.ResponseWriter, r *http.Request) {
-	workerID, claimID, ok := readLeaseIdentity(w, r, "claim_id")
+	body, ok := readJSONBody(w, r)
 	if !ok {
+		return
+	}
+	var fields map[string]string
+	if contract.Decode(body, nil, &fields) != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	registrySHA, scoped := fields["identity_registry_sha256"]
+	if (scoped && (len(fields) != 3 || !sha256Hex.MatchString(registrySHA))) ||
+		(!scoped && len(fields) != 2) {
+		writeError(w, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	workerID, claimID := fields["worker_id"], strings.ToLower(fields["claim_id"])
+	if !workerIDPattern.MatchString(workerID) || !jobUUID.MatchString(claimID) {
+		writeError(w, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	if scoped && registrySHA != h.identityRegistrySHA256 {
+		writeError(w, http.StatusUnprocessableEntity, "identity_registry_mismatch")
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), jobStoreTimeout)
 	defer cancel()
-	lease, err := h.store.Claim(ctx, workerID, claimID, h.maxResearchAge)
+	var lease jobs.Lease
+	var err error
+	if scoped {
+		store, enabled := h.store.(interface {
+			ClaimWithIdentityRegistry(context.Context, string, string, time.Duration, string) (jobs.Lease, error)
+		})
+		if !enabled {
+			writeError(w, http.StatusServiceUnavailable, "storage_unavailable")
+			return
+		}
+		lease, err = store.ClaimWithIdentityRegistry(ctx, workerID, claimID, h.maxResearchAge, registrySHA)
+	} else {
+		lease, err = h.store.Claim(ctx, workerID, claimID, h.maxResearchAge)
+	}
 	switch {
 	case errors.Is(err, jobs.ErrNoJob):
 		// No claim ID was bound. The worker can poll with the same ID.

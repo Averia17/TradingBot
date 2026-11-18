@@ -16,6 +16,7 @@ from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 
 from tradingbot.llm_usage import LLMCall
+from tradingbot.snapshots import ArchiveReference
 
 _LOG = logging.getLogger(__name__)
 _JOBS_PATH = "/v1/research/jobs/"
@@ -224,16 +225,22 @@ class _Worker:
     poll_interval: float
     heartbeat_interval: float
     archive_root: Path | None
+    identity_registry: ArchiveReference | None = None
 
     def run(self) -> None:
         if self.analyze is None and not self.wait_for_call_usage():
             return
+        claim_options = (
+            {"identity_registry_sha256": self.identity_registry.sha256}
+            if self.identity_registry is not None
+            else {}
+        )
         claim_id = str(uuid4())
         while not self.stop.is_set():
             try:
                 claim = self.control.post(
                     "claim",
-                    _encode({"worker_id": self.worker_id, "claim_id": claim_id}),
+                    _encode({"worker_id": self.worker_id, "claim_id": claim_id} | claim_options),
                     (200, 204),
                 )
                 if claim is not None:
@@ -243,7 +250,7 @@ class _Worker:
                         claim.keys() != (_LEASE_KEYS | {"request"})
                         or not isinstance(request, dict)
                         or request.get("job_id") != lease.job_id
-                        or request.get("job_schema_version") != "0.1"
+                        or not self.supports_request(request)
                     ):
                         raise ControlError(retryable=True)
             except ControlError as exc:
@@ -277,6 +284,16 @@ class _Worker:
                     continue
             self.stop.wait(self.poll_interval)
 
+    def supports_request(self, request: dict) -> bool:
+        version = request.get("job_schema_version")
+        if version == "0.1":
+            return self.identity_registry is None
+        return (
+            version == "0.2"
+            and self.identity_registry is not None
+            and request.get("identity_registry") == self.identity_registry.model_dump(mode="json")
+        )
+
     def wait_for_call_usage(self) -> bool:
         while not self.stop.is_set():
             try:
@@ -288,6 +305,14 @@ class _Worker:
                 self.stop.wait(self.poll_interval)
                 continue
             if capabilities is not None and capabilities.get("research_call_usage") is True:
+                if self.identity_registry is not None:
+                    jobs = capabilities.get("research_job_schema_versions")
+                    results = capabilities.get("research_result_schema_versions")
+                    if not (
+                        isinstance(jobs, list) and "0.2" in jobs
+                        and isinstance(results, list) and "0.3" in results
+                    ):
+                        raise RuntimeError("Control does not advertise identity-bound research")
                 return True
             message = "Control does not advertise durable research call usage"
             _LOG.error(message)
@@ -334,6 +359,8 @@ class _Worker:
             )
         if self.archive_root is not None:
             analyze = partial(analyze, archive_root=self.archive_root)
+        if self.identity_registry is not None:
+            analyze = partial(analyze, owner_identity_registry=self.identity_registry)
         with ThreadPoolExecutor(max_workers=1, thread_name_prefix="research") as executor:
             pending = executor.submit(
                 analyze, request, active.attempt, active.deadline, watchdog.cancelled
@@ -367,7 +394,10 @@ class _Worker:
             and not watchdog.cancelled.is_set()
             and _remaining(active.expires) > 0
         ):
-            self.publish(active, result)
+            self.publish(
+                active, result,
+                expected_version="0.3" if request.get("job_schema_version") == "0.2" else "0.2",
+            )
 
     def heartbeat_at(self, lease: _Lease) -> float:
         remaining = _remaining(lease.expires)
@@ -427,11 +457,11 @@ class _Worker:
                     raise ControlError()
                 return
 
-    def publish(self, lease: _Lease, result: dict) -> None:
+    def publish(self, lease: _Lease, result: dict, *, expected_version: str = "0.2") -> None:
         if (
             not isinstance(result, dict)
             or result.keys() != _RESULT_KEYS
-            or result["result_schema_version"] != "0.2"
+            or result["result_schema_version"] != expected_version
         ):
             raise ValueError("invalid offline research result envelope")
         expected = _encode(result)
@@ -505,6 +535,7 @@ def run_worker(
     heartbeat_interval: float = 10,
     request_timeout: float = 5,
     archive_root: Path | None = None,
+    identity_registry: ArchiveReference | dict | None = None,
 ) -> None:
     """Poll Control and publish offline results until the stop event is set."""
     worker_id = worker_id if worker_id is not None else f"research-offline-{uuid4()}"
@@ -519,6 +550,13 @@ def run_worker(
         archive_root = archive_root.resolve(strict=True)
         if not archive_root.is_dir():
             raise ValueError("archive root must be a directory")
+    if identity_registry is not None:
+        if archive_root is None:
+            raise ValueError("an identity registry requires an archive root")
+        from tradingbot.security_identity import load_identity_registry
+
+        identity_registry = ArchiveReference.model_validate(identity_registry)
+        load_identity_registry(archive_root, identity_registry)
     control = ControlClient(control_url, request_timeout)
     _Worker(
         control,
@@ -528,4 +566,5 @@ def run_worker(
         poll_interval,
         heartbeat_interval,
         archive_root,
+        identity_registry,
     ).run()

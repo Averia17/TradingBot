@@ -94,7 +94,7 @@ func (o *Outbox) Requeue(ctx context.Context, id int64) error {
 	if err != nil {
 		return err
 	}
-	if task.Queue != queueName && task.Queue != paperQueueName {
+	if task.Queue != queueName && task.Queue != paperQueueName && task.Queue != paperAccountQueue {
 		return pgqueue.ErrTaskNotFound
 	}
 	return o.queue.Enable(ctx, id)

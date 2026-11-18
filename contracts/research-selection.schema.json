@@ -42,6 +42,130 @@
       "title": "Candidate",
       "type": "object"
     },
+    "IdentitySelectionRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": "0.3",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "job_id": {
+          "format": "uuid",
+          "title": "Job Id",
+          "type": "string"
+        },
+        "policy_version": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+          "title": "Policy Version",
+          "type": "string"
+        },
+        "portfolio": {
+          "$ref": "#/$defs/PortfolioSnapshot"
+        },
+        "data_manifest": {
+          "$ref": "#/$defs/ArchiveReference"
+        },
+        "candidates": {
+          "items": {
+            "$ref": "#/$defs/RosterCandidate"
+          },
+          "maxItems": 100,
+          "minItems": 1,
+          "title": "Candidates",
+          "type": "array"
+        },
+        "top_k": {
+          "maximum": 100,
+          "minimum": 1,
+          "title": "Top K",
+          "type": "integer"
+        },
+        "remaining_analysis_slots": {
+          "maximum": 100,
+          "minimum": 0,
+          "title": "Remaining Analysis Slots",
+          "type": "integer"
+        },
+        "calls_per_symbol": {
+          "maximum": 63,
+          "minimum": 1,
+          "title": "Calls Per Symbol",
+          "type": "integer"
+        },
+        "max_llm_calls": {
+          "maximum": 64,
+          "minimum": 1,
+          "title": "Max Llm Calls",
+          "type": "integer"
+        },
+        "roc_periods": {
+          "maximum": 30,
+          "minimum": 2,
+          "title": "Roc Periods",
+          "type": "integer"
+        },
+        "max_bar_age_seconds": {
+          "maximum": 604800,
+          "minimum": 1,
+          "title": "Max Bar Age Seconds",
+          "type": "integer"
+        },
+        "max_bar_gap_seconds": {
+          "maximum": 604800,
+          "minimum": 1,
+          "title": "Max Bar Gap Seconds",
+          "type": "integer"
+        },
+        "max_catalyst_age_seconds": {
+          "maximum": 2592000,
+          "minimum": 1,
+          "title": "Max Catalyst Age Seconds",
+          "type": "integer"
+        },
+        "min_bar_turnover_usd": {
+          "pattern": "^(?:0|[1-9][0-9]{0,11})(?:\\.[0-9]{1,8})?$",
+          "title": "Min Bar Turnover Usd",
+          "type": "string"
+        },
+        "max_spread_bps": {
+          "maximum": 10000,
+          "minimum": 0,
+          "title": "Max Spread Bps",
+          "type": "integer"
+        },
+        "universe_provider": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+          "title": "Universe Provider",
+          "type": "string"
+        },
+        "identity_registry": {
+          "$ref": "#/$defs/ArchiveReference"
+        }
+      },
+      "required": [
+        "schema_version",
+        "job_id",
+        "policy_version",
+        "portfolio",
+        "data_manifest",
+        "candidates",
+        "top_k",
+        "remaining_analysis_slots",
+        "calls_per_symbol",
+        "max_llm_calls",
+        "roc_periods",
+        "max_bar_age_seconds",
+        "max_bar_gap_seconds",
+        "max_catalyst_age_seconds",
+        "min_bar_turnover_usd",
+        "max_spread_bps",
+        "universe_provider",
+        "identity_registry"
+      ],
+      "title": "IdentitySelectionRequest",
+      "type": "object"
+    },
     "PortfolioSnapshot": {
       "additionalProperties": false,
       "properties": {
@@ -406,7 +530,8 @@
   "discriminator": {
     "mapping": {
       "0.1": "#/$defs/SelectionRequest",
-      "0.2": "#/$defs/RosterSelectionRequest"
+      "0.2": "#/$defs/RosterSelectionRequest",
+      "0.3": "#/$defs/IdentitySelectionRequest"
     },
     "propertyName": "schema_version"
   },
@@ -416,6 +541,9 @@
     },
     {
       "$ref": "#/$defs/RosterSelectionRequest"
+    },
+    {
+      "$ref": "#/$defs/IdentitySelectionRequest"
     }
   ]
 }

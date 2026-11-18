@@ -12,6 +12,7 @@ TradingAgents анализирует рынок и предлагает реше
 | [`services/control`](services/control/) | Go API, research jobs, PostgreSQL и тесты |
 | [`services/trade-events`](services/trade-events/) | Тестовый приём исполнений, pgqueue outbox и публикация в Kafka |
 | [`services/notifications`](services/notifications/) | Kafka consumer и личные уведомления в Telegram |
+| [`services/portfolio-analytics`](services/portfolio-analytics/) | Go-проекция paper-счёта и отчёты NAV, P&L и доходности. [Запуск](docs/runbooks/paper.md#аналитика-портфеля-в-telegram) |
 
 Код, зависимости и тесты принадлежат своим сервисам. В [`contracts/`](contracts/)
 лежат JSON-схемы и примеры payload. Конфигурация Compose — в [`deploy/`](deploy/).
@@ -193,6 +194,13 @@ uv --directory services/research run --offline --frozen python -m tradingbot.ing
 сбора, права использования и покрытие требуют собственных подтверждений.
 [Схема манифеста](contracts/pit-capture-manifest.schema.json) · [SEC EDGAR API](https://www.sec.gov/search-filings/edgar-application-programming-interfaces) · [Документация ALFRED](https://fred.stlouisfed.org/docs/api/fred/realtime_period.html).
 
+Для количественных показателей SEC добавьте захват `sec_company_facts`.
+Селектор задаёт accession, концепт US GAAP, единицу и отчётный период.
+Показатель появляется в архиве после получения обоих исходных ответов.
+Значение сохраняется точно в десятичной строке, без преобразования в float.
+У поправки свой accession и своё время видимости.
+[Синтетический пример манифеста](services/research/examples/pit-import/sec-facts-manifest.json).
+
 Тот же импорт принимает `normalized_market` с исходными OHLCV, новостями
 и их правками, корпоративными действиями и событиями листинга. Для каждого
 файла фиксируются SHA-256 и местное время получения. Команда `snapshots`
@@ -221,6 +229,43 @@ uv --directory services/research run --offline --frozen python -m tradingbot.sel
 Пример использует синтетические raw bars в USD. Оборот, bid и ask
 должны относиться к заявленной записи. [Схема отбора](contracts/research-selection.schema.json).
 
+### Исследование по устойчивому ID бумаги
+
+Отбор `0.3` связывает тикер с `security_id`, действующим листингом
+и источниками данных на момент среза. Отдельный пин владельца задаётся
+ссылкой и SHA-256 реестра. В результате отбора `job` версии `0.2`
+сохраняет привязки в порядке запрошенных тикеров. Архивный воркер
+использует эти же привязки и сохраняет хеш полученного среза в результате
+`0.3`. [Пример отбора](services/research/examples/selection/identity-request.json) ·
+[Схема реестра](contracts/research-identity-registry.schema.json).
+
+```powershell
+$env:TRADINGBOT_RESEARCH_IDENTITY_ARCHIVE_DIR = (Resolve-Path services/research/examples/selection).Path
+$env:TRADINGBOT_RESEARCH_IDENTITY_REGISTRY_REF = 'identity-registry.json'
+$registryPath = Join-Path $env:TRADINGBOT_RESEARCH_IDENTITY_ARCHIVE_DIR $env:TRADINGBOT_RESEARCH_IDENTITY_REGISTRY_REF
+$env:TRADINGBOT_RESEARCH_IDENTITY_REGISTRY_SHA256 = (Get-FileHash $registryPath -Algorithm SHA256).Hash.ToLowerInvariant()
+docker compose -f deploy/research/compose.yaml --profile research-identity up -d --build postgres control identity-research
+```
+
+Передайте те же `--identity-registry-ref` и `--identity-registry-sha256`
+при запуске отбора. Для постановки задания используйте свежий снимок
+и доступный к нему архив. Исторические даты примера пригодны для локальной
+проверки отбора. Воркеры берут задания своей версии и реестра из одной
+PostgreSQL. Перед сменой пина завершите уже поставленные задания этого
+реестра. Допуск задания `0.2` к виртуальной заявке даёт локальный
+планировщик входов владельца.
+
+Для проверки сохранённого среза выгрузите завершённое задание через
+`research-replay-export --job`. Передайте SHA-256 выгрузки, корень исходного
+архива и пин владельца в `verify-identity-export`. Команда воспроизводит
+проекцию архива и сверяет сохранённый хеш без запуска графа.
+
+```powershell
+$identityExportPath = (Resolve-Path $identityExport).Path
+$identityExportHash = (Get-FileHash $identityExportPath -Algorithm SHA256).Hash.ToLowerInvariant()
+uv --directory services/research run --offline --frozen tradingbot verify-identity-export --input $identityExportPath --input-sha256 $identityExportHash --archive-root $env:TRADINGBOT_RESEARCH_IDENTITY_ARCHIVE_DIR --identity-registry-ref $env:TRADINGBOT_RESEARCH_IDENTITY_REGISTRY_REF --identity-registry-sha256 $env:TRADINGBOT_RESEARCH_IDENTITY_REGISTRY_SHA256
+```
+
 ## Локальный офлайн-контур в Docker Compose
 
 Go control, PostgreSQL и Python worker запускаются из корня репозитория.
@@ -233,15 +278,43 @@ docker compose -f deploy/research/compose.yaml up -d --build --wait
 docker compose -f deploy/research/compose.yaml --profile evaluation run --rm --build evaluation
 ```
 
-Для автоматического paper-контура задайте абсолютные пути к существующим
-локальным директориям через `TRADINGBOT_PAPER_ARCHIVE_DIR`,
-`TRADINGBOT_PAPER_CONFIG_DIR` и `TRADINGBOT_PAPER_QUOTES_DIR`. В директории
-конфига нужны `review.json` для открытой позиции и `policy.json` владельца.
-`TRADINGBOT_PAPER_ACCOUNT_ID` задаёт UUID того же виртуального счёта.
-Запустите paper worker с архивом, планировщиком и применением решений.
+Для автономного запуска создайте виртуальный счёт и задайте его UUID через
+`TRADINGBOT_PAPER_ACCOUNT_ID`. Укажите абсолютные пути к существующим
+директориям через `TRADINGBOT_PAPER_ARCHIVE_DIR`, `TRADINGBOT_PAPER_CONFIG_DIR`
+и `TRADINGBOT_PAPER_QUOTES_DIR`.
+
+- В архиве разместите план входов, ссылки из плана и рыночные снимки.
+  `TRADINGBOT_PAPER_ENTRY_PLAN_REF` задаёт путь внутри архива,
+  `TRADINGBOT_PAPER_ENTRY_PLAN_SHA256` фиксирует точные байты плана.
+- В директории конфига разместите `policy.json` с той же политикой, что и в
+  плане входов, и `quote-tape.json` с синтетическими котировками для этого
+  счёта. Файл котировок закрепляет `TRADINGBOT_PAPER_QUOTE_TAPE_SHA256`.
+- Дайте контейнеру `paper-quote` право записи в директорию котировок
+  при UID 65532. Диспетчер открывает эту директорию для чтения.
 
 ```powershell
-docker compose -f deploy/research/compose.yaml --profile paper up -d --build postgres control paper-research paper-review paper-dispatch
+docker compose -f deploy/research/compose.yaml --profile paper --profile paper-entry --profile paper-quote up -d --build postgres control paper-research paper-entry paper-quote paper-dispatch
+```
+
+Для пересмотра открытых позиций добавьте `review.json` в конфиг и включите
+`paper-review` из профиля `paper`. Журнал планировщика входов хранится в
+томе `paper-entry-journal`. После обработки всех окон текущего плана
+сервис входов завершается. Для следующего плана укажите его ссылку и хеш
+и заново запустите `paper-entry`.
+
+Для paper-входа по устойчивому ID используйте план `0.2` и ленту `0.3`.
+План закрепляет SHA-256 реестра, данных отбора и ленты. Тот же реестр
+подключите к `identity-research`. Архив с файлами плана доступен через
+`TRADINGBOT_PAPER_ARCHIVE_DIR`. Для ленты задайте относительный путь
+`TRADINGBOT_PAPER_IDENTITY_QUOTE_TAPE_REF` и SHA-256
+`TRADINGBOT_PAPER_QUOTE_TAPE_SHA256`. Диспетчер сверит устойчивый ID с
+инструментом из `policy.json` и проверит котировку по исходной ленте.
+В этом профиле используются синтетические наблюдения.
+[Пример плана](contracts/valid-paper-identity-entry-cycle-plan.json) ·
+[Пример ленты](contracts/valid-paper-identity-quote-tape.json).
+
+```powershell
+docker compose -f deploy/research/compose.yaml --profile research-identity --profile paper-entry --profile paper-identity up -d --build postgres control identity-research paper-entry paper-identity-quote paper-identity-dispatch
 ```
 
 Если в этом же Compose-проекте уже работает сервис `research` для
@@ -251,7 +324,9 @@ docker compose -f deploy/research/compose.yaml --profile paper up -d --build pos
 Для отдельной проверки сборки, совместимости, замены и отката worker запустите
 `python deploy/research/smoke.py` с Python 3.12 и Docker. Скрипт создаёт временный
 Compose-проект, отправляет тестовые задания, проверяет отклонение неподдерживаемой
-версии результата и удаляет только свои контейнеры и БД. Он выводит ID образов,
+версии результата, пересоздаёт планировщик между двумя окнами и проверяет
+подтверждение HOLD диспетчером. Затем он удаляет свои временные контейнеры
+и тома. Скрипт выводит ID образов,
 версии протоколов, SHA TradingAgents и хеши lock-файлов. Для постоянного локального
 проекта используйте `docker compose -f deploy/research/compose.yaml down` без
 удаления тома PostgreSQL.
@@ -330,6 +405,19 @@ go -C services/control run ./cmd/paper-apply follow --request $requestPath --pol
 go -C services/control run ./cmd/paper-quote-pin --job $jobId --tape $tapePath --sha256 $tapeHash --quote-root $quoteRoot
 ```
 
+Для автоматического выбора котировок используйте архив версии `0.2` с
+`account_id`. Производитель читает привязки завершённых заданий из PostgreSQL
+и ищет подходящее наблюдение по инструменту, стороне и объёму. Для публикации
+котировка должна быть firm, поступить после завершения анализа и оставаться
+действительной в момент проверки. В режиме опроса новые задания подхватываются
+из того же хешированного файла, пока в нём есть подходящие наблюдения.
+[Схема ленты](contracts/paper-quote-tape.schema.json) ·
+[Пример ленты счёта](contracts/valid-paper-account-quote-tape.json).
+
+```powershell
+go -C services/control run ./cmd/paper-quote-pin --account $accountId --tape $tapePath --sha256 $tapeHash --quote-root $quoteRoot --poll-interval 2s
+```
+
 Для сравнения синтетических котировок на одной экспозиции запустите
 `paper-quote-compare`. Формат фиксирует chain, mint, программу, decimals,
 историю коэффициента shares per token и курс settlement к USD. Команда
@@ -385,6 +473,51 @@ go -C services/control run ./cmd/paper-apply schedule-review --config $reviewCon
 проход. Воркеры читают созданные задания из обычной очереди.
 [Пример конфига](contracts/valid-paper-review-schedule.json).
 
+Для позиции, открытой по устойчивому ID, `review` возвращает `opening_identity`
+с исходным `security_id`, инструментом и хешем применения. Подготовьте расписание
+`0.2` на один момент среза. Команда `prepare-identity-review` читает `review` и
+`snapshot` через локальный `paper-apply`, проверяет архив и вычисляет хеш
+проекции. Для нового снимка обновите вход и сохраните принятый конфиг вместе с
+хешированными файлами для повтора.
+
+```powershell
+$paperApply = Join-Path ([System.IO.Path]::GetTempPath()) ('tradingbot-paper-apply-' + [Guid]::NewGuid() + '.exe')
+go -C services/control build -mod=readonly -o $paperApply ./cmd/paper-apply
+uv --directory services/research run --offline --frozen tradingbot prepare-identity-review --paper-apply $paperApply --archive-root $archiveRoot --account $accountId --order $openingOrderId --as-of $cutoff --policy $policyPath --marks $marksPath --data-manifest-ref $manifestRef --data-manifest-sha256 $manifestHash --identity-registry-ref $registryRef --identity-registry-sha256 $registryHash --quote-tape-ref $quoteTapeRef --quote-tape-sha256 $quoteTapeHash --max-llm-calls 32 > $reviewConfig
+& $paperApply schedule-review --config $reviewConfig --archive-root $archiveRoot --identity-registry-sha256 $registryHash
+```
+
+Передавайте время `$cutoff`, для которого цены и состояние счёта были доступны.
+Go возвращает `not_due` до положенного пересмотра. Для подтверждённого
+архивного катализатора передайте `event` в конфиге `0.2` по схеме команды.
+В Compose `paper-review` читает тот же конфиг из `review.json` и использует
+`TRADINGBOT_RESEARCH_IDENTITY_REGISTRY_SHA256`. Задание `0.2` получает воркер
+`identity-research` с тем же пином. Для виртуального применения работают
+`paper-identity-quote` и `paper-identity-dispatch`.
+
+Для автоматического пересмотра подготовьте [план окон](contracts/paper-review-cycle-plan.schema.json).
+[Синтетический пример](contracts/valid-paper-identity-review-cycle-plan.json) показывает привязку к открытию и архивному событию.
+Каждое окно задаёт ID открытия, срез, срок запуска, хеши архивов и лимит
+вызовов. На наступившем окне `paper-review-cycles` получает состояние счёта,
+проверяет проекцию и сохраняет точные байты запроса до передачи в Go.
+
+```powershell
+$env:TRADINGBOT_PAPER_REVIEW_PLAN_REF = 'review-plan.json'
+$env:TRADINGBOT_PAPER_REVIEW_PLAN_SHA256 = (Get-FileHash (Join-Path $env:TRADINGBOT_PAPER_ARCHIVE_DIR $env:TRADINGBOT_PAPER_REVIEW_PLAN_REF)).Hash.ToLowerInvariant()
+$env:TRADINGBOT_RESEARCH_IDENTITY_ARCHIVE_DIR = $env:TRADINGBOT_PAPER_ARCHIVE_DIR
+docker compose -f deploy/research/compose.yaml --profile research-identity --profile paper-review-cycles up -d --build postgres control identity-research paper-review-cycles
+```
+
+Укажите пины реестра `TRADINGBOT_RESEARCH_IDENTITY_REGISTRY_REF` и
+`TRADINGBOT_RESEARCH_IDENTITY_REGISTRY_SHA256` из того же архива.
+Запуск из одного плана использует том `paper-review-journal`. После рестарта
+сохранённый запрос отправляется с прежним снимком. Если следующий срез
+приходится на уже принятый триггер, Go возвращает ID из PostgreSQL.
+Для нового плана используйте отдельный журнал. При локальном запуске
+`python -m tradingbot.review_cycles` путь задаёт `--journal`.
+Планировщик использует локально подготовленные цены и события. Чтобы
+продолжить виртуальное исполнение, запустите профиль `paper-identity`.
+
 Для первого входа `paper-apply schedule-entry` принимает готовый результат
 отбора и конфиг владельца со снимком счёта, временем запуска, лимитом
 вызовов и SHA-256 точных байтов отбора. Go перепроверяет состояние счёта,
@@ -407,7 +540,8 @@ uv --directory services/research run --offline --frozen python -m tradingbot.ent
 ```
 
 Передайте абсолютные пути к корню, постоянному журналу и собранному
-`paper-apply`. План содержит относительные ссылки из этого корня.
+`paper-apply`. План содержит относительные ссылки из этого корня. Чтобы
+процесс ожидал очередных окон, добавьте `--poll-interval-seconds 1`.
 В примере даты исторические. [Схема плана](contracts/paper-entry-cycle-plan.schema.json) · [Пример плана](contracts/valid-paper-entry-cycle-plan.json).
 
 Новые задания пересмотра получают durable запись для `dispatch` в той же
@@ -415,7 +549,9 @@ uv --directory services/research run --offline --frozen python -m tradingbot.ent
 сопоставляет policy владельца и выполняет `follow`. Подтверждение наступает
 после записи результата применения. Если процесс сбился между этими шагами,
 следующий проход читает ту же квитанцию. Без готовой котировки заявка
-остаётся невыполненной.
+остаётся невыполненной. После смены политики диспетчер может завершить уже
+сохранённое применение по его исходной привязке и закреплённой котировке.
+Новые резервы проходят по действующей политике.
 
 ```powershell
 go -C services/control run ./cmd/paper-apply dispatch --account $accountId --policy $policyPath --quote-root $quoteRoot --poll-interval 5s
@@ -429,6 +565,27 @@ go -C services/control run ./cmd/paper-apply dispatch --account $accountId --pol
 go -C services/control run ./cmd/paper-memory --account $accountId --as-of $snapshotAsOf --policy $policyPath --input $marketArchivePath --input-sha256 $marketArchiveHash --output $newArchivePath
 ```
 
+Журнал уроков фиксирует результат конкретного виртуального SELL по FIFO
+и связывает его с событием исполнения, решением и версией счёта.
+`record-lesson` получает суммы из ledger. `correct-lesson` добавляет событие
+отзыва или восстановления, сохраняя ранее записанные суммы и даты. Для
+повтора передавайте тот же UUID операции. `lessons` показывает ревизию,
+доступную к указанному `as_of`. Ключ `--history` выводит до 100 видимых
+событий выбранного урока.
+
+```powershell
+go -C services/control run ./cmd/paper-memory record-lesson --account $accountId --fill-event $sellFillEventId --event $recordEventId
+go -C services/control run ./cmd/paper-memory correct-lesson --account $accountId --lesson $lessonId --event $correctionEventId --expected-revision 1 --action retract
+go -C services/control run ./cmd/paper-memory lessons --account $accountId --lesson $lessonId --as-of $snapshotAsOf --history
+```
+
+[Контракт события журнала уроков](contracts/paper-memory-lesson.schema.json).
+
+Добавьте `--durable-lessons` к команде экспорта архива, чтобы использовать
+уроки из журнала. Архив связывает отражение с активной ревизией на момент
+`as_of`. Исторический прогон добавляет его в режиме `factual_reflection`
+на том же срезе. После отзыва в новых срезах остаются исходные суммы FIFO.
+
 `paper-thesis-outcome` оценивает конкретное открытие по FIFO. Предел
 горизонта считается от первого записанного исполнения по максимальному
 сроку из решения. Для открытого остатка нужен полный по размеру,
@@ -441,6 +598,16 @@ go -C services/control run ./cmd/paper-thesis-outcome --input $outcomeInput --sh
 ```
 
 [Схема отчёта](contracts/paper-thesis-outcome.schema.json) · [Пример входа](contracts/valid-paper-thesis-outcome-input.json).
+
+Для открытия с устойчивым ID используйте вход `0.2` с пустым `exit_observations`.
+При оценке оставшейся позиции передайте `exit_tape` с `ref` и `sha256` ленты
+`0.3`, `exit_identity_registry` с пином её реестра и укажите `--archive-root`.
+Лента должна относиться к тому же виртуальному счёту. Реестр может обновиться,
+если исходная бумага и точный инструмент допущены в момент котировки и на
+горизонте. Отчёт сохраняет хеши открытия, ленты, реестра и выбранной котировки.
+Для реализованных сумм он проверяет сохранённое применение
+каждой отнесённой FIFO продажи. Если продажа не имеет проверяемой привязки к
+той же бумаге, команда возвращает ошибку.
 
 Для отклонённого симулятором открытия `paper-shadow-outcome` проверяет
 сохранённую квитанцию и событие отмены. Два отдельных файла фиксируют цены,
@@ -506,6 +673,18 @@ go -C services/control run ./cmd/research-schedule-coverage --config $schedulePa
 прошлые доступные midpoints, деньги счёта и следующую подходящую котировку.
 Порог длительности пропуска и длина истории задаются до прогона.
 
+Равновзвешенный бенчмарк с ребалансировкой принимает один или несколько
+UTC-моментов через `--rebalance-at`. `--rebalance-phase-seconds` задаёт
+длительность окна продаж и следующего окна покупок, а
+`--rebalance-max-mark-age-seconds` задаёт допустимый возраст цены.
+Размер покупок определяется после окна продаж по фактическому свободному
+кэшу симулятора. В отчёте сохраняются время расчёта, состав начального
+universe, исполненные заявки, свободный кэш и комиссии.
+Для дневной оценки зафиксируйте эталон `kind: "equal_weight_scheduled"`
+и объект `rebalance_schedule` с `rebalance_at`, `execution_phase_seconds`
+и `max_mark_age_seconds` в протоколе. `freeze-statistics` включает
+расписание в хеш протокола. [Схема протокола](contracts/evaluation-protocol.schema.json).
+
 ```powershell
 uv --directory services/evaluation run --frozen tradingbot-evaluation replay examples/quote-replay.json
 uv --directory services/evaluation run --frozen tradingbot-evaluation benchmarks examples/quote-replay.json --start-at 2026-10-02T13:30:10Z --buy-and-hold-symbol TSLA
@@ -552,6 +731,30 @@ uv --directory services/evaluation run --offline --frozen tradingbot-evaluation 
 `replay` передайте значение `evaluated_through` из отчёта через
 `--through`. [Схема экспорта](contracts/research-replay-export.schema.json).
 
+Для сохранённых решений `0.2` используйте ленту с реестром и отдельным
+ключом Nautilus на каждую бумагу. Передайте дополнительно `--identity-registry`
+с путём к файлу и `--identity-registry-sha256` с пином владельца. Сверка
+остатков, позиций и отметок включается автоматически. Все задания в таком
+прогоне должны ссылаться на те же байты реестра. Ключ `--emit-replay-input`
+сохраняет привязки вместе с нативными заявками. [Схема ленты](contracts/evaluation-identity-replay.schema.json).
+
+Для дневного сравнения сохранённых решений используйте `replay_source` в
+протоколе `0.2`. Поле `replay_sha256` берётся из `normalized_input_sha256`
+отчёта `research-replay`. В `replay_source.identity` укажите
+`research_export_sha256`, `tape_sha256`, `identity_registry_sha256` и
+`mark_max_age_seconds`. Для эталона из одной бумаги укажите `security_id`.
+Стратегия и бенчмарк используют одинаковые даты UTC, начиная с контрольной
+даты с начальным капиталом до первой заявки.
+
+```powershell
+uv --directory services/evaluation run --offline --frozen tradingbot-evaluation replay-evidence $protocolPath $tapePath --protocol-sha256 $protocolHash --research-export $exportPath --identity-registry $registryPath > $evidencePath
+```
+
+Команда заново проверяет все исходные хеши, перестраивает заявки и считает
+дневной NAV с учётом спреда и комиссий симулятора. Для статистики передайте
+хеш сохранённого отчёта. Издержки на данные, инфраструктуру и модели
+остаются неизвестными в синтетическом прогоне.
+
 `walk-forward` формирует снимок из состояния Nautilus к каждому сроку
 в плане и запрашивает новое решение у закреплённого офлайн-графа TradingAgents
 в отдельном Python-процессе. Архив передаёт только записи, полученные к
@@ -573,6 +776,15 @@ uv --directory services/evaluation run --offline --frozen tradingbot-evaluation 
 `replay-evidence`. Офлайн-модель в этом примере проверяет конвейер на
 синтетических данных и возвращает HOLD. [Схема плана](contracts/walk-forward-plan.schema.json).
 
+Для прогона с устойчивыми ID возьмите [план 0.2](services/evaluation/examples/identity-walk-plan.json)
+и [ленту 0.2](services/evaluation/examples/identity-walk-tape.json). Укажите их пути
+в предыдущей команде, пересчитайте хеши и добавьте
+`--identity-registry $walkRegistry --identity-registry-sha256 $walkRegistryHash`.
+Файл `$walkRegistry` лежит в `$walkArchive` по пути `identity-registry.json`.
+Nautilus ведёт позиции по отдельным ключам бумаг. В каждый снимок research
+попадают их точные инструменты и доступные цены. Прогон прерывается, если
+оставшуюся позицию невозможно однозначно оценить на финальном горизонте.
+
 Чтобы воспроизвести дневной отчёт, используйте `walk-forward-evidence`.
 Протокол фиксирует план, ленту, даты и бенчмарки до запуска. Команда
 выполняет анализ по каждому срезу, пересчитывает NAV и сохраняет хеш шагов
@@ -589,6 +801,12 @@ uv --directory services/evaluation run --offline --frozen tradingbot-evaluation 
 $walkEvidenceHash = (Get-FileHash $walkEvidencePath).Hash.ToLowerInvariant()
 uv --directory services/evaluation run --offline --frozen tradingbot-evaluation statistics $walkProtocol $walkEvidencePath --protocol-sha256 $walkProtocolHash --evidence-sha256 $walkEvidenceHash
 ```
+
+С [протоколом для устойчивых ID](services/evaluation/examples/identity-walk-protocol.json)
+передайте план и ленту `0.2`, добавив к `walk-forward-evidence`
+`--identity-registry $walkRegistry`. Хеш `walk_forward_source.identity_registry_sha256`
+должен совпасть с планом и лентой до первого анализа. Для эталона из одной
+бумаги протокол задаёт `security_id`. `statistics` сверяет хеш реестра в отчёте.
 
 Для сравнения конфигураций `ablation-evidence` выполняет все варианты
 из одного протокола на общих датах, исходном капитале, архиве и ленте.
@@ -607,6 +825,10 @@ uv --directory services/evaluation run --offline --frozen tradingbot-evaluation 
 $ablationEvidenceHash = (Get-FileHash $ablationEvidencePath).Hash.ToLowerInvariant()
 uv --directory services/evaluation run --offline --frozen tradingbot-evaluation statistics $ablationProtocol $ablationEvidencePath --protocol-sha256 $ablationPin --evidence-sha256 $ablationEvidenceHash
 ```
+
+Для плана и ленты `0.2` добавьте `ablation_source.identity_registry_sha256`
+в протокол `0.2` и передайте `--identity-registry $walkRegistry`. Все варианты
+используют те же байты реестра, а `statistics` сверяет его хеш в каждом варианте.
 
 Для forward-эксперимента перечислите в плане файлы запуска стратегии и
 каждого альтернативного варианта. Первая команда вычисляет

@@ -1,0 +1,19 @@
+{
+  "schema_version": "0.1",
+  "universe_provider": "fixture-roster",
+  "entries": [
+    {
+      "symbol": "TEST",
+      "security_id": "fixture-equity-1",
+      "available_at": "2026-11-17T15:00:00Z",
+      "effective_at": "2026-11-18T14:30:00Z",
+      "record_providers": ["fixture-market", "fixture-news"],
+      "sec_cik": "0000123456",
+      "instrument": {
+        "instrument_id": "fixture:TESTx",
+        "registry_version": "fixture-v1",
+        "decimals": 2
+      }
+    }
+  ]
+}

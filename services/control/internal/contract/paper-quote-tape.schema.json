@@ -1,13 +1,35 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "Owner-pinned local synthetic paper quote tape 0.1",
+  "title": "Owner-pinned local synthetic paper quote tape",
   "type": "object",
   "additionalProperties": false,
-  "required": ["paper_quote_tape_schema_version", "source_mode", "job_id", "scope", "observations"],
+  "required": ["paper_quote_tape_schema_version", "source_mode", "observations"],
+  "oneOf": [
+    {
+      "properties": {"paper_quote_tape_schema_version": {"const": "0.1"}},
+      "required": ["job_id", "scope"],
+      "not": {"anyOf": [{"required": ["account_id"]}, {"required": ["identity_registry_sha256"]}]}
+    },
+    {
+      "properties": {"paper_quote_tape_schema_version": {"const": "0.2"}},
+      "required": ["account_id"],
+      "not": {"anyOf": [{"required": ["job_id"]}, {"required": ["scope"]}, {"required": ["identity_registry_sha256"]}]}
+    },
+    {
+      "properties": {"paper_quote_tape_schema_version": {"const": "0.3"}},
+      "required": ["account_id", "identity_registry_sha256"],
+      "not": {"anyOf": [{"required": ["job_id"]}, {"required": ["scope"]}]}
+    }
+  ],
+  "if": {"properties": {"paper_quote_tape_schema_version": {"const": "0.3"}}},
+  "then": {"properties": {"observations": {"items": {"properties": {"quote": {"properties": {"paper_quote_schema_version": {"const": "0.3"}}}}}}}},
+  "else": {"properties": {"observations": {"items": {"properties": {"quote": {"properties": {"paper_quote_schema_version": {"enum": ["0.1", "0.2"]}}}}}}}},
   "properties": {
-    "paper_quote_tape_schema_version": {"const": "0.1"},
+    "paper_quote_tape_schema_version": {"enum": ["0.1", "0.2", "0.3"]},
     "source_mode": {"const": "synthetic_fixture"},
     "job_id": {"$ref": "paper-account.schema.json#/$defs/AccountID"},
+    "account_id": {"$ref": "paper-account.schema.json#/$defs/AccountID"},
+    "identity_registry_sha256": {"$ref": "paper-replay.schema.json#/$defs/SHA256"},
     "scope": {
       "type": "object",
       "additionalProperties": false,

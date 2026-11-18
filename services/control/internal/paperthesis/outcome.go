@@ -2,43 +2,50 @@ package paperthesis
 
 import (
 	"context"
+	"fmt"
 	"math/big"
 	"strings"
 	"time"
 
 	"tradingbot/control/internal/ledger"
+	"tradingbot/control/internal/paperapply"
 	"tradingbot/control/internal/papermemory"
 )
 
 const OutcomeVersion = "0.1"
 
 type OutcomeReport struct {
-	Version          string                     `json:"schema_version"`
-	Status           string                     `json:"status"`
-	InputSHA256      string                     `json:"input_sha256"`
-	Source           string                     `json:"source_mode"`
-	AccountID        string                     `json:"account_id"`
-	AccountVersion   int64                      `json:"account_version"`
-	AsOf             time.Time                  `json:"as_of"`
-	JobID            string                     `json:"research_job_id"`
-	DecisionID       string                     `json:"decision_id"`
-	OpeningOrderID   string                     `json:"opening_order_id"`
-	Instrument       ledger.Instrument          `json:"instrument"`
-	FirstFillEventID string                     `json:"first_fill_event_id,omitempty"`
-	OpenedAt         *time.Time                 `json:"opened_at,omitempty"`
-	HorizonDeadline  *time.Time                 `json:"horizon_deadline,omitempty"`
-	Actual           papermemory.OpeningAmounts `json:"actual"`
-	Horizon          *HorizonOutcome            `json:"horizon,omitempty"`
-	Benchmark        *BenchmarkOutcome          `json:"benchmark,omitempty"`
+	Version          string                      `json:"schema_version"`
+	Status           string                      `json:"status"`
+	InputSHA256      string                      `json:"input_sha256"`
+	Source           string                      `json:"source_mode"`
+	AccountID        string                      `json:"account_id"`
+	AccountVersion   int64                       `json:"account_version"`
+	AsOf             time.Time                   `json:"as_of"`
+	JobID            string                      `json:"research_job_id"`
+	DecisionID       string                      `json:"decision_id"`
+	OpeningOrderID   string                      `json:"opening_order_id"`
+	Instrument       ledger.Instrument           `json:"instrument"`
+	FirstFillEventID string                      `json:"first_fill_event_id,omitempty"`
+	OpenedAt         *time.Time                  `json:"opened_at,omitempty"`
+	HorizonDeadline  *time.Time                  `json:"horizon_deadline,omitempty"`
+	Actual           papermemory.OpeningAmounts  `json:"actual"`
+	Horizon          *HorizonOutcome             `json:"horizon,omitempty"`
+	Benchmark        *BenchmarkOutcome           `json:"benchmark,omitempty"`
+	OpeningIdentity  *paperapply.OpeningIdentity `json:"opening_identity,omitempty"`
+	ExitApplications []ExitApplication           `json:"exit_applications,omitempty"`
 }
 
 type HorizonOutcome struct {
-	AsOf                time.Time                  `json:"as_of"`
-	AccountVersion      int64                      `json:"account_version"`
-	Basis               papermemory.OpeningAmounts `json:"basis"`
-	ExitObservation     *ExitObservation           `json:"exit_observation,omitempty"`
-	EstimatedOpenNetUSD *string                    `json:"estimated_open_net_usd"`
-	NetPnLUSD           *string                    `json:"net_pnl_usd"`
+	AsOf                time.Time                    `json:"as_of"`
+	AccountVersion      int64                        `json:"account_version"`
+	Basis               papermemory.OpeningAmounts   `json:"basis"`
+	ExitObservation     *ExitObservation             `json:"exit_observation,omitempty"`
+	EstimatedOpenNetUSD *string                      `json:"estimated_open_net_usd"`
+	NetPnLUSD           *string                      `json:"net_pnl_usd"`
+	TapeSHA256          string                       `json:"exit_tape_sha256,omitempty"`
+	QuoteSHA256         string                       `json:"exit_quote_sha256,omitempty"`
+	ExitRegistry        *paperapply.ArchiveReference `json:"exit_identity_registry,omitempty"`
 }
 
 type BenchmarkOutcome struct {
@@ -53,8 +60,12 @@ type BenchmarkOutcome struct {
 // It never includes a fill or external observation first known after the fixed
 // horizon in its horizon result. The independent as-of view includes later fills.
 func BuildOutcome(ctx context.Context, research ResearchSource, source openingSource, input OutcomeInput, knownThrough time.Time) (OutcomeReport, error) {
+	return BuildOutcomeFromArchive(ctx, research, source, input, knownThrough, "")
+}
+
+func BuildOutcomeFromArchive(ctx context.Context, research ResearchSource, source openingSource, input OutcomeInput, knownThrough time.Time, archiveRoot string) (OutcomeReport, error) {
 	req := input.request
-	if input.digest == "" || req.AsOf.After(knownThrough) || knownThrough.IsZero() {
+	if input.digest == "" || req.AsOf.After(knownThrough) || knownThrough.IsZero() || req.ExitTape != nil && archiveRoot == "" {
 		return OutcomeReport{}, ErrInvalid
 	}
 	opening, err := readOpening(ctx, research, source, req.AccountID, req.OpeningOrderID, req.AsOf)
@@ -62,16 +73,25 @@ func BuildOutcome(ctx context.Context, research ResearchSource, source openingSo
 		return OutcomeReport{}, err
 	}
 	view := opening.view
+	if (view.OpeningIdentity != nil) != (req.Version == paperapply.IdentityVersion) {
+		return OutcomeReport{}, fmt.Errorf("%w: horizon outcome version differs from the opening identity", ErrInvalid)
+	}
 	actual, err := papermemory.AttributeOpening(opening.book, opening.fillIDs)
 	if err != nil {
 		return OutcomeReport{}, err
 	}
 	report := OutcomeReport{
-		Version: OutcomeVersion, InputSHA256: input.digest, Source: req.Source,
+		Version: req.Version, InputSHA256: input.digest, Source: req.Source,
 		AccountID: view.AccountID, AccountVersion: view.AccountVersion, AsOf: view.AsOf,
 		JobID: view.JobID, DecisionID: view.DecisionID, OpeningOrderID: view.OrderID, Instrument: view.Instrument,
 		FirstFillEventID: view.FirstFillEventID, OpenedAt: view.OpenedAt, HorizonDeadline: view.ExpiresAt, Actual: actual,
-		Status: "opening_unfilled",
+		Status: "opening_unfilled", OpeningIdentity: view.OpeningIdentity,
+	}
+	if view.OpeningIdentity != nil {
+		report.ExitApplications, err = verifyIdentitySales(ctx, research, source, opening, actual.ExitFillIDs)
+		if err != nil {
+			return OutcomeReport{}, err
+		}
 	}
 	if view.OpenedAt == nil {
 		if view.State == "unopened" {
@@ -109,7 +129,15 @@ func BuildOutcome(ctx context.Context, research ResearchSource, source openingSo
 		return report, nil
 	}
 	report.Status = "open_unpriced_at_horizon"
-	exit := executableExit(req.ExitObservations, view.Instrument, basis.OpenQuantityRaw, deadline, age)
+	var exit *ExitObservation
+	if view.OpeningIdentity != nil {
+		exit, err = identityHorizonExit(archiveRoot, req.ExitTape, req.ExitRegistry, view, report.Horizon, basis.OpenQuantityRaw, age)
+		if err != nil {
+			return OutcomeReport{}, err
+		}
+	} else {
+		exit = executableExit(req.ExitObservations, view.Instrument, basis.OpenQuantityRaw, deadline, age)
+	}
 	if exit != nil {
 		report.Status = "open_marked_at_horizon"
 		estimated := decimal(exit.GrossUSD)

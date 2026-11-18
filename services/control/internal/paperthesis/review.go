@@ -14,6 +14,7 @@ import (
 	"tradingbot/control/internal/contract"
 	"tradingbot/control/internal/jobs"
 	"tradingbot/control/internal/ledger"
+	"tradingbot/control/internal/paperapply"
 	"tradingbot/control/internal/papermemory"
 	"tradingbot/control/internal/researchscheduler"
 )
@@ -42,29 +43,30 @@ type LedgerSource interface {
 }
 
 type View struct {
-	Version             string            `json:"paper_thesis_schema_version"`
-	AccountID           string            `json:"account_id"`
-	AccountVersion      int64             `json:"account_version"`
-	AsOf                time.Time         `json:"as_of"`
-	JobID               string            `json:"research_job_id"`
-	DecisionID          string            `json:"decision_id"`
-	OrderID             string            `json:"opening_order_id"`
-	Instrument          ledger.Instrument `json:"instrument"`
-	Symbol              string            `json:"symbol"`
-	State               string            `json:"state"`
-	OpeningOrderState   string            `json:"opening_order_state"`
-	FirstFillEventID    string            `json:"first_fill_event_id,omitempty"`
-	OpenedAt            *time.Time        `json:"opened_at,omitempty"`
-	NextReviewAt        *time.Time        `json:"next_review_at,omitempty"`
-	ExpiresAt           *time.Time        `json:"thesis_expires_at,omitempty"`
-	Horizon             contract.Horizon  `json:"horizon"`
-	SourceQuantityRaw   string            `json:"source_quantity_raw"`
-	HeldQuantityRaw     string            `json:"held_quantity_raw"`
-	ReservedQuantityRaw string            `json:"reserved_quantity_raw"`
-	FreeQuantityRaw     string            `json:"free_quantity_raw"`
-	CashUSD             string            `json:"cash_usd"`
-	ReservedCashUSD     string            `json:"reserved_cash_usd"`
-	ClockReview         *Trigger          `json:"clock_review,omitempty"`
+	Version             string                      `json:"paper_thesis_schema_version"`
+	AccountID           string                      `json:"account_id"`
+	AccountVersion      int64                       `json:"account_version"`
+	AsOf                time.Time                   `json:"as_of"`
+	JobID               string                      `json:"research_job_id"`
+	DecisionID          string                      `json:"decision_id"`
+	OrderID             string                      `json:"opening_order_id"`
+	Instrument          ledger.Instrument           `json:"instrument"`
+	Symbol              string                      `json:"symbol"`
+	State               string                      `json:"state"`
+	OpeningOrderState   string                      `json:"opening_order_state"`
+	FirstFillEventID    string                      `json:"first_fill_event_id,omitempty"`
+	OpenedAt            *time.Time                  `json:"opened_at,omitempty"`
+	NextReviewAt        *time.Time                  `json:"next_review_at,omitempty"`
+	ExpiresAt           *time.Time                  `json:"thesis_expires_at,omitempty"`
+	Horizon             contract.Horizon            `json:"horizon"`
+	SourceQuantityRaw   string                      `json:"source_quantity_raw"`
+	HeldQuantityRaw     string                      `json:"held_quantity_raw"`
+	ReservedQuantityRaw string                      `json:"reserved_quantity_raw"`
+	FreeQuantityRaw     string                      `json:"free_quantity_raw"`
+	CashUSD             string                      `json:"cash_usd"`
+	ReservedCashUSD     string                      `json:"reserved_cash_usd"`
+	ClockReview         *Trigger                    `json:"clock_review,omitempty"`
+	OpeningIdentity     *paperapply.OpeningIdentity `json:"opening_identity,omitempty"`
 }
 
 type Trigger struct {
@@ -131,7 +133,7 @@ func readOpening(ctx context.Context, research ResearchSource, source openingSou
 	if trace.reservedAt.IsZero() || trace.request != order.ReservationRequest {
 		return openingProjection{}, fmt.Errorf("%w: opening reservation does not match its event", ErrInvalid)
 	}
-	decision, err := openingDecision(ctx, research, order.ReservationRequest, trace.reservedAt)
+	decision, identity, err := openingDecision(ctx, research, source, order, trace.reservedAt)
 	if err != nil {
 		return openingProjection{}, err
 	}
@@ -146,7 +148,10 @@ func readOpening(ctx context.Context, research ResearchSource, source openingSou
 		JobID: order.ResearchJobID, DecisionID: order.DecisionID, OrderID: orderID,
 		Instrument: order.Instrument, Symbol: decision.Symbol, OpeningOrderState: trace.state,
 		FirstFillEventID: trace.firstFillID, Horizon: decision.Horizon,
-		HeldQuantityRaw: held.String(), SourceQuantityRaw: sourced.String(), CashUSD: book.CashUSD,
+		HeldQuantityRaw: held.String(), SourceQuantityRaw: sourced.String(), CashUSD: book.CashUSD, OpeningIdentity: identity,
+	}
+	if identity != nil {
+		view.Version = paperapply.IdentityVersion
 	}
 	if trace.openedAt.IsZero() {
 		view.State = "pending"

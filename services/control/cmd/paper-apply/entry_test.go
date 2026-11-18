@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -171,6 +172,29 @@ func TestScheduleEntryDurablyBindsScreenedResearchToPaperDispatch(t *testing.T) 
 		"quote": map[string]string{"ref": "entry-quote.json", "sha256": hex.EncodeToString(quoteDigest[:])},
 	}))
 	dispatchArgs := []string{"dispatch", "--account", accountID, "--policy", policyPath, "--quote-root", dir}
+	rotated := policy
+	rotated.Version = "entry-e2e-stricter"
+	rotated.MaxOrderUSD = "50"
+	saveDocument(t, dir, "entry-policy", encode(t, rotated))
+	if err := run(ctx, dsn, dispatchArgs, &bytes.Buffer{}, clock); err == nil ||
+		!strings.Contains(err.Error(), "paper snapshot policy differs from the owner policy") {
+		t.Fatalf("old policy admitted a new order after rotation: %v", err)
+	}
+	if _, err := paper.GetApplication(ctx, first.JobID); !errors.Is(err, ledger.ErrNotFound) {
+		t.Fatalf("old policy created a paper application after rotation: %v", err)
+	}
+	saveDocument(t, dir, "entry-policy", encode(t, policy))
+	interrupted := errors.New("dispatcher lost after reservation")
+	if _, err := paperapply.Follow(ctx, research, interruptedFollowStore{Store: paper, err: interrupted},
+		application, localQuoteSource(dir), clock()); !errors.Is(err, interrupted) {
+		t.Fatalf("could not simulate a crash after reservation: %v", err)
+	}
+	reserved, err := paper.GetApplication(ctx, first.JobID)
+	if err != nil || reserved.OrderID == "" || len(reserved.Result) != 0 || !bytes.Equal(reserved.Quote, quote) {
+		t.Fatalf("reservation did not preserve the exact quote: %+v %v", reserved, err)
+	}
+	saveDocument(t, dir, "entry-policy", encode(t, rotated))
+	dispatchArgs[len(dispatchArgs)-1] = t.TempDir()
 	var output bytes.Buffer
 	if err := run(ctx, dsn, dispatchArgs, &output, clock); err != nil {
 		t.Fatal(err)
@@ -178,8 +202,13 @@ func TestScheduleEntryDurablyBindsScreenedResearchToPaperDispatch(t *testing.T) 
 	var applied paperapply.FollowResult
 	if json.Unmarshal(output.Bytes(), &applied) != nil || applied.Status != "applied" || applied.JobID != first.JobID ||
 		applied.Application == nil || applied.Application.Execution == nil || applied.Application.Execution.Order.Status != "filled" ||
-		applied.Application.Execution.Order.ResearchJobID != first.JobID {
+		applied.Application.Execution.Order.ResearchJobID != first.JobID || applied.Application.Execution.Order.OrderID != reserved.OrderID ||
+		applied.Application.Execution.QuoteSHA256 != hex.EncodeToString(quoteDigest[:]) || applied.Application.Execution.ReservationRecorded {
 		t.Fatalf("could not dispatch screened job: %s", output.Bytes())
+	}
+	receipt, err := dispatchTask(ctx, research, paper, binding, rotated, nil, boundDispatchOptions{})
+	if err != nil || !bytes.Equal(encode(t, receipt), encode(t, applied)) {
+		t.Fatalf("stored application and acknowledgement did not replay after rotation: %+v %v", receipt, err)
 	}
 	output.Reset()
 	if err := run(ctx, dsn, dispatchArgs, &output, clock); err != nil || output.Len() != 0 {

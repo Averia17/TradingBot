@@ -2,3 +2,5 @@ paper-cash-nav.json text eol=lf
 paper-total-return-benchmark.json text eol=lf
 research-rate-schedule.json text eol=lf
 walk-forward-tape.json text eol=lf
+identity-walk-plan.json text eol=lf
+identity-walk-tape.json text eol=lf

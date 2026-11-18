@@ -6,7 +6,7 @@ import re
 import sys
 from collections import defaultdict
 from datetime import UTC, date, datetime, time
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from itertools import pairwise
 from pathlib import Path
 from typing import Annotated, Literal, Self
@@ -23,8 +23,11 @@ from tradingbot.snapshots import (
     Listing,
     SourceMode,
     UTCDateTime,
+    _reject_fraction,
+    _unique_keys,
     _utc,
     decode_pinned_json,
+    read_pinned_bytes,
     read_pinned_json,
 )
 
@@ -44,6 +47,30 @@ class SECCapture(Contract):
     cik: Annotated[str, Field(pattern=r"^[0-9]{10}$")]
     symbol: Symbol
     accessions: Annotated[tuple[Accession, ...], Field(min_length=1, max_length=1000)]
+
+
+class SECFactSelector(Contract):
+    accession: Accession
+    concept: Annotated[str, Field(pattern=r"^[A-Za-z][A-Za-z0-9]{0,95}$")]
+    unit: Annotated[str, Field(pattern=r"^[A-Za-z][A-Za-z0-9/_-]{0,31}$")]
+    period_end: CalendarDate
+    period_start: CalendarDate | None = None
+
+    @model_validator(mode="after")
+    def ordered_period(self) -> Self:
+        end = _day(self.period_end)
+        if self.period_start is not None and _day(self.period_start) > end:
+            raise ValueError("SEC fact period starts after it ends")
+        return self
+
+
+class SECFactsCapture(Contract):
+    kind: Literal["sec_company_facts"]
+    source: ArchiveReference
+    captured_at: CaptureTime
+    cik: Annotated[str, Field(pattern=r"^[0-9]{10}$")]
+    symbol: Symbol
+    selectors: Annotated[tuple[SECFactSelector, ...], Field(min_length=1, max_length=32)]
 
 
 class ALFREDCapture(Contract):
@@ -185,7 +212,8 @@ class CaptureManifest(Contract):
     captures: Annotated[
         tuple[
             Annotated[
-                SECCapture | ALFREDCapture | BLSCapture | MarketCapture, Field(discriminator="kind")
+                SECCapture | SECFactsCapture | ALFREDCapture | BLSCapture | MarketCapture,
+                Field(discriminator="kind"),
             ],
             ...,
         ],
@@ -254,6 +282,106 @@ def _sec_records(capture: SECCapture, response: JsonValue) -> list[ArchiveRecord
         )
     if seen != selected:
         raise ValueError("requested SEC accession missing from the pinned response")
+    return records
+
+
+def _sec_fact_number(value: object) -> str:
+    if type(value) is int and abs(value) < 10**32:
+        return str(value)
+    if (
+        isinstance(value, Decimal)
+        and value.is_finite()
+        and value.adjusted() < 32
+        and value.as_tuple().exponent >= -24
+    ):
+        return format(value, "f")
+    raise ValueError("SEC fact value must be an exact number within the supported precision")
+
+
+def _sec_fact_details(
+    gaap: dict, selector: SECFactSelector, submission: ArchiveRecord
+) -> dict[str, JsonValue]:
+    concept = gaap.get(selector.concept)
+    units = concept.get("units") if isinstance(concept, dict) else None
+    rows = units.get(selector.unit) if isinstance(units, dict) else None
+    if not isinstance(rows, list):
+        raise ValueError("expected exactly one SEC fact for the selected accession and period")
+    matches = [
+        row
+        for row in rows
+        if isinstance(row, dict)
+        and row.get("accn") == selector.accession
+        and row.get("start") == selector.period_start
+        and row.get("end") == selector.period_end
+    ]
+    if len(matches) != 1:
+        raise ValueError("expected exactly one SEC fact for the selected accession and period")
+    row = matches[0]
+    if row.get("form") != submission.payload["form"]:
+        raise ValueError("SEC fact does not match its SEC submission form")
+    return {
+        "concept": selector.concept,
+        "unit": selector.unit,
+        "period_start": selector.period_start,
+        "period_end": selector.period_end,
+        "filed_date": _day(row.get("filed")).isoformat(),
+        "value": _sec_fact_number(row.get("val")),
+    }
+
+
+def _sec_fact_records(
+    root: Path,
+    capture: SECFactsCapture,
+    submissions: dict[tuple[str, str, str], ArchiveRecord],
+) -> list[ArchiveRecord]:
+    raw = read_pinned_bytes(root, capture.source)
+    try:
+        response = json.loads(
+            raw.decode("utf-8-sig"),
+            object_pairs_hook=_unique_keys,
+            parse_float=Decimal,
+            parse_constant=_reject_fraction,
+        )
+    except InvalidOperation:
+        raise ValueError("invalid SEC fact value") from None
+    if not isinstance(response, dict) or str(response.get("cik", "")).zfill(10) != capture.cik:
+        raise ValueError("SEC Company Facts response does not match the declared filer")
+    facts = response.get("facts")
+    gaap = facts.get("us-gaap") if isinstance(facts, dict) else None
+    if not isinstance(gaap, dict):
+        raise ValueError("SEC Company Facts response has no US GAAP facts")
+    if len(set(capture.selectors)) != len(capture.selectors):
+        raise ValueError("duplicate SEC fact selector")
+    selected: dict[str, list[dict[str, JsonValue]]] = defaultdict(list)
+    for selector in sorted(
+        capture.selectors,
+        key=lambda item: (
+            item.accession, item.concept, item.unit, item.period_end, item.period_start or "",
+        ),
+    ):
+        submission = submissions.get((capture.cik, capture.symbol, selector.accession))
+        if submission is None:
+            raise ValueError("SEC facts require a matching SEC submission")
+        if submission.event_time > capture.captured_at:
+            raise ValueError("Company Facts response was captured before SEC acceptance")
+        if len(selected[selector.accession]) >= 4:
+            raise ValueError("a filing may include at most four selected SEC facts")
+        selected[selector.accession].append(_sec_fact_details(gaap, selector, submission))
+    records = []
+    for accession, details in selected.items():
+        submission = submissions[capture.cik, capture.symbol, accession]
+        known_at = max(submission.ingested_at, capture.captured_at)
+        records.append(submission.model_copy(update={
+            "revision": 2,
+            "available_at": known_at,
+            "ingested_at": known_at,
+            "payload": submission.payload | {
+                "facts": details,
+                "company_facts_taxonomy": "us-gaap",
+                "company_facts_sha256": capture.source.sha256,
+                "company_facts_captured_at": capture.captured_at.isoformat(),
+            },
+        }))
     return records
 
 
@@ -377,8 +505,11 @@ def build_archive(root: Path, manifest: JsonValue) -> dict:
     inputs = CaptureManifest.model_validate(manifest)
     by_key: dict[tuple[str, str, str, str], list[ArchiveRecord]] = defaultdict(list)
     market: dict[tuple[str, str], list[ArchiveRecord]] = defaultdict(list)
+    submissions: dict[tuple[str, str, str], ArchiveRecord] = {}
     total = 0
     for capture in inputs.captures:
+        if isinstance(capture, SECFactsCapture):
+            continue
         raw = read_pinned_json(root, capture.source)
         if isinstance(capture, SECCapture):
             records = _sec_records(capture, raw)
@@ -396,6 +527,8 @@ def build_archive(root: Path, manifest: JsonValue) -> dict:
                 market[item.provider, item.record_id].append(item)
             else:
                 by_key[item.key()].append(item)
+            if isinstance(capture, SECCapture):
+                submissions[capture.cik, capture.symbol, item.record_id] = item
     output = []
     for _, revisions in sorted(by_key.items()):
         if len(revisions) > 1:
@@ -423,6 +556,16 @@ def build_archive(root: Path, manifest: JsonValue) -> dict:
         if len(identities) != 1:
             raise ValueError("market record revisions must preserve instrument and record identity")
         output.extend(_market_revisions(revisions))
+    enriched = set()
+    for capture in inputs.captures:
+        if isinstance(capture, SECFactsCapture):
+            for item in _sec_fact_records(root, capture, submissions):
+                if item.key() in enriched:
+                    raise ValueError("duplicate SEC Company Facts capture for the same accession")
+                enriched.add(item.key())
+                output.append(item)
+    if len(output) > MAX_RECORDS:
+        raise ValueError("combined archive has too many observations")
     output.sort(key=lambda item: (item.key(), item.revision))
     return {
         "schema_version": "0.1",

@@ -37,13 +37,24 @@ func main() {
 }
 
 func run(ctx context.Context, dsn string, args []string, output io.Writer) error {
+	if len(args) > 0 {
+		switch args[0] {
+		case "record-lesson", "correct-lesson", "lessons":
+			return lessonCommand(ctx, dsn, args[0], args[1:], output)
+		}
+	}
 	flags := flag.NewFlagSet("paper-memory", flag.ContinueOnError)
+	flags.Usage = func() {
+		fmt.Fprintln(flags.Output(), "Export a paper archive or use record-lesson, correct-lesson, or lessons.")
+		flags.PrintDefaults()
+	}
 	account := flags.String("account", "", "paper account UUID")
 	cutoff := flags.String("as-of", "", "same RFC3339 cutoff as the research portfolio")
 	policyPath := flags.String("policy", "", "paper policy file for the exact instrument registry")
 	inputPath := flags.String("input", "", "existing market archive file")
 	inputDigest := flags.String("input-sha256", "", "verified hash of the existing market archive bytes")
 	outputPath := flags.String("output", "", "new archive file, under the worker's archive root")
+	durable := flags.Bool("durable-lessons", false, "include active stored lessons at the archive cutoff")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -67,12 +78,21 @@ func run(ctx context.Context, dsn string, args []string, output io.Writer) error
 	if err != nil {
 		return fmt.Errorf("read market archive: %w", err)
 	}
-	store, err := ledger.Open(ctx, dsn)
-	if err != nil {
-		return errors.New("paper ledger startup failed")
+	var archive []byte
+	if *durable {
+		err = ledger.WithReadSnapshot(ctx, dsn, func(snapshot ledger.ReadSnapshot) error {
+			var err error
+			archive, err = papermemory.ExportArchiveWithLessons(ctx, snapshot, *account, asOf, policy, raw, *inputDigest)
+			return err
+		})
+	} else {
+		store, openErr := ledger.Open(ctx, dsn)
+		if openErr != nil {
+			return errors.New("paper ledger startup failed")
+		}
+		defer store.Close()
+		archive, err = papermemory.ExportArchive(ctx, store, *account, asOf, policy, raw, *inputDigest)
 	}
-	defer store.Close()
-	archive, err := papermemory.ExportArchive(ctx, store, *account, asOf, policy, raw, *inputDigest)
 	if err != nil {
 		return err
 	}

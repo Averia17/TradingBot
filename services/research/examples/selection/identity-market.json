@@ -1,0 +1,217 @@
+{
+  "schema_version": "0.1",
+  "source_mode": "synthetic_fixture",
+  "records": [
+    {
+      "kind": "bar",
+      "provider": "selection-fixture",
+      "record_id": "bar-0",
+      "symbol": "TSLA",
+      "revision": 1,
+      "event_time": "2026-11-18T09:57:30+00:00",
+      "available_at": "2026-11-18T09:57:30+00:00",
+      "ingested_at": "2026-11-18T09:57:30+00:00",
+      "payload": {
+        "close": "95",
+        "volume": 10000,
+        "currency": "USD",
+        "price_basis": "raw",
+        "bid": "97.90",
+        "ask": "98.07",
+        "security_id": "fixture-current"
+      }
+    },
+    {
+      "kind": "bar",
+      "provider": "selection-fixture",
+      "record_id": "bar-1",
+      "symbol": "TSLA",
+      "revision": 1,
+      "event_time": "2026-11-18T09:58:30+00:00",
+      "available_at": "2026-11-18T09:58:30+00:00",
+      "ingested_at": "2026-11-18T09:58:30+00:00",
+      "payload": {
+        "close": "97",
+        "volume": 10000,
+        "currency": "USD",
+        "price_basis": "raw",
+        "bid": "97.90",
+        "ask": "98.07",
+        "security_id": "fixture-current"
+      }
+    },
+    {
+      "kind": "bar",
+      "provider": "selection-fixture",
+      "record_id": "bar-2",
+      "symbol": "TSLA",
+      "revision": 1,
+      "event_time": "2026-11-18T09:59:30+00:00",
+      "available_at": "2026-11-18T09:59:30+00:00",
+      "ingested_at": "2026-11-18T09:59:30+00:00",
+      "payload": {
+        "close": "98",
+        "volume": 10000,
+        "currency": "USD",
+        "price_basis": "raw",
+        "bid": "97.90",
+        "ask": "98.07",
+        "security_id": "fixture-current"
+      }
+    },
+    {
+      "kind": "bar",
+      "provider": "selection-fixture",
+      "record_id": "bar-0",
+      "symbol": "NVDA",
+      "revision": 1,
+      "event_time": "2026-11-18T09:57:30+00:00",
+      "available_at": "2026-11-18T09:57:30+00:00",
+      "ingested_at": "2026-11-18T09:57:30+00:00",
+      "payload": {
+        "close": "98",
+        "volume": 10000,
+        "currency": "USD",
+        "price_basis": "raw",
+        "bid": "101.91",
+        "ask": "102.10",
+        "security_id": "fixture-nvda"
+      }
+    },
+    {
+      "kind": "bar",
+      "provider": "selection-fixture",
+      "record_id": "bar-1",
+      "symbol": "NVDA",
+      "revision": 1,
+      "event_time": "2026-11-18T09:58:30+00:00",
+      "available_at": "2026-11-18T09:58:30+00:00",
+      "ingested_at": "2026-11-18T09:58:30+00:00",
+      "payload": {
+        "close": "99",
+        "volume": 10000,
+        "currency": "USD",
+        "price_basis": "raw",
+        "bid": "101.91",
+        "ask": "102.10",
+        "security_id": "fixture-nvda"
+      }
+    },
+    {
+      "kind": "bar",
+      "provider": "selection-fixture",
+      "record_id": "bar-2",
+      "symbol": "NVDA",
+      "revision": 1,
+      "event_time": "2026-11-18T09:59:30+00:00",
+      "available_at": "2026-11-18T09:59:30+00:00",
+      "ingested_at": "2026-11-18T09:59:30+00:00",
+      "payload": {
+        "close": "102",
+        "volume": 10000,
+        "currency": "USD",
+        "price_basis": "raw",
+        "bid": "101.91",
+        "ask": "102.10",
+        "security_id": "fixture-nvda"
+      }
+    },
+    {
+      "kind": "filing",
+      "provider": "selection-fixture",
+      "record_id": "filing-1",
+      "symbol": "TSLA",
+      "revision": 1,
+      "event_time": "2026-11-18T09:58:00+00:00",
+      "available_at": "2026-11-18T09:58:00+00:00",
+      "ingested_at": "2026-11-18T09:58:00+00:00",
+      "payload": {
+        "headline": "Synthetic filing catalyst",
+        "security_id": "fixture-current"
+      }
+    },
+    {
+      "kind": "listing",
+      "provider": "selection-fixture",
+      "record_id": "fixture-previous-listed",
+      "symbol": "TSLA",
+      "revision": 1,
+      "event_time": "2026-11-15T00:00:00Z",
+      "available_at": "2026-11-15T00:00:00Z",
+      "ingested_at": "2026-11-15T00:00:00Z",
+      "payload": {
+        "security_id": "fixture-previous",
+        "status": "listed",
+        "effective_at": "2026-11-15T00:00:00Z",
+        "source_sha256": "4444444444444444444444444444444444444444444444444444444444444444"
+      }
+    },
+    {
+      "kind": "listing",
+      "provider": "selection-fixture",
+      "record_id": "fixture-previous-delisted",
+      "symbol": "TSLA",
+      "revision": 1,
+      "event_time": "2026-11-17T00:00:00Z",
+      "available_at": "2026-11-17T00:00:00Z",
+      "ingested_at": "2026-11-17T00:00:00Z",
+      "payload": {
+        "security_id": "fixture-previous",
+        "status": "delisted",
+        "effective_at": "2026-11-17T00:00:00Z",
+        "source_sha256": "4444444444444444444444444444444444444444444444444444444444444444"
+      }
+    },
+    {
+      "kind": "listing",
+      "provider": "selection-fixture",
+      "record_id": "fixture-current-listed",
+      "symbol": "TSLA",
+      "revision": 1,
+      "event_time": "2026-11-18T00:00:00Z",
+      "available_at": "2026-11-18T00:00:00Z",
+      "ingested_at": "2026-11-18T00:00:00Z",
+      "payload": {
+        "security_id": "fixture-current",
+        "status": "listed",
+        "effective_at": "2026-11-18T00:00:00Z",
+        "source_sha256": "4444444444444444444444444444444444444444444444444444444444444444"
+      }
+    },
+    {
+      "kind": "listing",
+      "provider": "selection-fixture",
+      "record_id": "fixture-nvda-listed",
+      "symbol": "NVDA",
+      "revision": 1,
+      "event_time": "2026-11-18T00:00:00Z",
+      "available_at": "2026-11-18T00:00:00Z",
+      "ingested_at": "2026-11-18T00:00:00Z",
+      "payload": {
+        "security_id": "fixture-nvda",
+        "status": "listed",
+        "effective_at": "2026-11-18T00:00:00Z",
+        "source_sha256": "4444444444444444444444444444444444444444444444444444444444444444"
+      }
+    },
+    {
+      "kind": "bar",
+      "provider": "selection-fixture",
+      "record_id": "previous-issuer-bar",
+      "symbol": "TSLA",
+      "revision": 1,
+      "event_time": "2026-11-16T09:59:30Z",
+      "available_at": "2026-11-16T09:59:30Z",
+      "ingested_at": "2026-11-16T09:59:30Z",
+      "payload": {
+        "close": "20",
+        "volume": 10000,
+        "currency": "USD",
+        "price_basis": "raw",
+        "bid": "97.90",
+        "ask": "98.07",
+        "security_id": "fixture-previous"
+      }
+    }
+  ]
+}

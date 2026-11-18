@@ -28,14 +28,18 @@ func main() {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	if err := run(ctx, *address, *maxResearchAge, os.Getenv("TRADINGBOT_DATABASE_URL")); err != nil {
+	if err := run(ctx, *address, *maxResearchAge, os.Getenv("TRADINGBOT_DATABASE_URL"),
+		os.Getenv("TRADINGBOT_RESEARCH_IDENTITY_REGISTRY_SHA256")); err != nil {
 		slog.Error("control stopped", "error", err)
 		os.Exit(1)
 	}
 }
 
-func run(ctx context.Context, address string, maxResearchAge time.Duration, dsn string) error {
-	handler := control.NewHandler(maxResearchAge, time.Now, nil)
+func run(ctx context.Context, address string, maxResearchAge time.Duration, dsn, identityRegistrySHA256 string) error {
+	handler, err := control.NewHandlerWithResearchIdentity(maxResearchAge, time.Now, nil, nil, identityRegistrySHA256)
+	if err != nil {
+		return err
+	}
 	if dsn != "" {
 		startup, cancel := context.WithTimeout(ctx, 10*time.Second)
 		store, err := jobs.Open(startup, dsn)
@@ -44,14 +48,17 @@ func run(ctx context.Context, address string, maxResearchAge time.Duration, dsn 
 			return errors.New("research job storage startup failed; check database configuration and connectivity")
 		}
 		defer store.Close()
-		paperStartup, stopPaperStartup := context.WithTimeout(ctx, 10*time.Second)
+		paperStartup, stopPaperStartup := context.WithTimeout(ctx, time.Minute)
 		paper, err := ledger.Open(paperStartup, dsn)
 		stopPaperStartup()
 		if err != nil {
 			return errors.New("paper storage startup failed; check database configuration and connectivity")
 		}
 		defer paper.Close()
-		handler = control.NewHandlerWithPaper(maxResearchAge, time.Now, store, paper)
+		handler, err = control.NewHandlerWithResearchIdentity(maxResearchAge, time.Now, store, paper, identityRegistrySHA256)
+		if err != nil {
+			return err
+		}
 	}
 	listener, err := (&net.ListenConfig{}).Listen(ctx, "tcp", address)
 	if err != nil {

@@ -20,6 +20,11 @@ type CompletedResearch struct {
 	Result Result
 }
 
+type CompletedPaperResearch struct {
+	CompletedResearch
+	Dispatch *PaperDispatchTask
+}
+
 // ReadCompletedResearch reads the exact persisted bytes in one read-only
 // snapshot. It can use a reporting role with no permission to run migrations.
 func ReadCompletedResearch(ctx context.Context, dsn string, ids []string) ([]CompletedResearch, error) {
@@ -30,22 +35,15 @@ func ReadCompletedResearch(ctx context.Context, dsn string, ids []string) ([]Com
 	remaining := maxResearchReplayBytes
 	err := withResearchReadSnapshot(ctx, dsn, func(tx pgx.Tx) error {
 		for _, id := range ids {
-			result, err := readResult(tx.QueryRow(ctx, selectResult, id))
+			completed, err := readCompletedResearch(ctx, tx, id)
 			if err != nil {
-				return fmt.Errorf("read completed result for %s: %w", id, err)
+				return err
 			}
-			job, asOf, err := claimInputs(ctx, tx, id)
-			if err != nil {
-				return fmt.Errorf("read immutable inputs for %s: %w", id, err)
-			}
-			if asOf.After(job.CreatedAt) {
-				return fmt.Errorf("research job %s was recorded before its snapshot", id)
-			}
-			remaining -= len(job.Request) + len(result.Payload)
+			remaining -= len(completed.Job.Request) + len(completed.Result.Payload)
 			if remaining < 0 {
 				return errors.New("research replay selection exceeds its payload limit")
 			}
-			items = append(items, CompletedResearch{Job: job, Result: result})
+			items = append(items, completed)
 		}
 		return nil
 	})
@@ -53,6 +51,56 @@ func ReadCompletedResearch(ctx context.Context, dsn string, ids []string) ([]Com
 		return nil, err
 	}
 	return items, nil
+}
+
+// ReadCompletedPaperResearch reads the immutable proof for a paper opening or
+// exit. Registry-bound jobs must have a durable owner dispatch. Legacy
+// reporting needs no access to the dispatch table.
+func ReadCompletedPaperResearch(ctx context.Context, dsn, id string) (CompletedPaperResearch, error) {
+	var receipt CompletedPaperResearch
+	err := withResearchReadSnapshot(ctx, dsn, func(tx pgx.Tx) error {
+		completed, err := readCompletedResearch(ctx, tx, id)
+		if err != nil {
+			return err
+		}
+		registry, err := jobRegistryPin(completed.Job.Request)
+		if err != nil {
+			return err
+		}
+		size := len(completed.Job.Request) + len(completed.Result.Payload)
+		if registry != "" {
+			dispatch, err := readPaperDispatch(tx.QueryRow(ctx, selectPaperDispatch, id))
+			if err != nil {
+				return fmt.Errorf("read owner paper dispatch for %s: %w", id, err)
+			}
+			receipt.Dispatch = &dispatch
+			size += len(dispatch.Request)
+		}
+		if size > maxResearchReplayBytes {
+			return errors.New("completed paper research exceeds its payload limit")
+		}
+		receipt.CompletedResearch = completed
+		return nil
+	})
+	if err != nil {
+		return CompletedPaperResearch{}, err
+	}
+	return receipt, nil
+}
+
+func readCompletedResearch(ctx context.Context, tx pgx.Tx, id string) (CompletedResearch, error) {
+	result, err := readResult(tx.QueryRow(ctx, selectResult, id))
+	if err != nil {
+		return CompletedResearch{}, fmt.Errorf("read completed result for %s: %w", id, err)
+	}
+	job, asOf, err := claimInputs(ctx, tx, id)
+	if err != nil {
+		return CompletedResearch{}, fmt.Errorf("read immutable inputs for %s: %w", id, err)
+	}
+	if asOf.After(job.CreatedAt) {
+		return CompletedResearch{}, fmt.Errorf("research job %s was recorded before its snapshot", id)
+	}
+	return CompletedResearch{Job: job, Result: result}, nil
 }
 
 func withResearchReadSnapshot(ctx context.Context, dsn string, read func(pgx.Tx) error) error {

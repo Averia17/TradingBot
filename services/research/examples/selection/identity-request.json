@@ -1,0 +1,46 @@
+{
+  "schema_version": "0.3",
+  "job_id": "33333333-3333-4333-8333-333333333333",
+  "policy_version": "fixture-paper-v1",
+  "portfolio": {
+    "snapshot_id": "44444444-4444-4444-8444-444444444444",
+    "as_of": "2026-11-18T10:00:00+00:00",
+    "currency": "USD",
+    "cash_asset": "USD",
+    "cash_usd": "900",
+    "reserved_cash_usd": "0",
+    "max_position_pct": "0.25",
+    "positions": []
+  },
+  "data_manifest": {
+    "ref": "identity-market.json",
+    "sha256": "7015cfad25251d66832f7db2d84739a5e9ee0558406932509e544ecffab38046"
+  },
+  "candidates": [
+    {
+      "symbol": "NVDA",
+      "allowed": true,
+      "security_id": "fixture-nvda"
+    },
+    {
+      "symbol": "TSLA",
+      "allowed": true,
+      "security_id": "fixture-current"
+    }
+  ],
+  "top_k": 2,
+  "remaining_analysis_slots": 2,
+  "calls_per_symbol": 16,
+  "max_llm_calls": 33,
+  "roc_periods": 2,
+  "max_bar_age_seconds": 60,
+  "max_bar_gap_seconds": 60,
+  "max_catalyst_age_seconds": 1200,
+  "min_bar_turnover_usd": "10000",
+  "max_spread_bps": 25,
+  "universe_provider": "selection-fixture",
+  "identity_registry": {
+    "ref": "identity-registry.json",
+    "sha256": "aa3d6dc48790eb7d7e549f684ffb0cdfa855625c4dd6d76c3fe2220c35a86f5c"
+  }
+}

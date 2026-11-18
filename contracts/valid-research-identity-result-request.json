@@ -1,0 +1,115 @@
+{
+  "result_schema_version": "0.3",
+  "worker_id": "fixture-worker",
+  "lease_token": "00000000-0000-0000-0000-000000000020",
+  "batch": {
+    "schema_version": "0.1",
+    "execution_mode": "research",
+    "run_id": "00000000-0000-0000-0000-000000000002",
+    "portfolio_snapshot_id": "00000000-0000-0000-0000-000000000001",
+    "as_of": "2026-10-04T12:00:00Z",
+    "created_at": "2026-10-04T12:00:00Z",
+    "expires_at": "2026-10-04T12:30:00Z",
+    "evidence_hashes": {
+      "TSLA:market_report": "5abd8691f2cadb598fed70ad900f68b624e751a822cd6cb62b2b9612362797b1",
+      "TSLA:final_trade_decision": "fad056111043a90d37113e088167294276ae9f36081617409193fda96c9ac0dd",
+      "NVDA:market_report": "2a5433b07f6f79b1ebaef050ad5795041d6379ab1069db99451acc693f44d801",
+      "NVDA:final_trade_decision": "fad056111043a90d37113e088167294276ae9f36081617409193fda96c9ac0dd"
+    },
+    "intents": [
+      {
+        "symbol": "TSLA",
+        "action": "HOLD",
+        "notional_usd": "0",
+        "confidence": null,
+        "expected_return_pct": null,
+        "horizon": {
+          "min_hours": 24,
+          "max_hours": 720
+        },
+        "thesis": [
+          "SYNTHETIC FIXTURE; no market thesis or alpha estimate"
+        ],
+        "invalidation_conditions": [
+          "Replace fixture with actual upstream reports"
+        ],
+        "evidence_ids": [
+          "TSLA:market_report"
+        ],
+        "max_execution_cost_bps": 10,
+        "decision_id": "00000000-0000-0000-0000-000000000003"
+      },
+      {
+        "symbol": "NVDA",
+        "action": "HOLD",
+        "notional_usd": "0",
+        "confidence": null,
+        "expected_return_pct": null,
+        "horizon": {
+          "min_hours": 24,
+          "max_hours": 720
+        },
+        "thesis": [
+          "SYNTHETIC FIXTURE; no market thesis or alpha estimate"
+        ],
+        "invalidation_conditions": [
+          "Replace fixture with actual upstream reports"
+        ],
+        "evidence_ids": [
+          "NVDA:market_report"
+        ],
+        "max_execution_cost_bps": 10,
+        "decision_id": "00000000-0000-0000-0000-000000000004"
+      }
+    ]
+  },
+  "reports": {
+    "TSLA": {
+      "market_report": "SYNTHETIC FIXTURE: TSLA; no real market observations.",
+      "final_trade_decision": "Hold: fixture tests plumbing, not strategy returns."
+    },
+    "NVDA": {
+      "market_report": "SYNTHETIC FIXTURE: NVDA; no real market observations.",
+      "final_trade_decision": "Hold: fixture tests plumbing, not strategy returns."
+    }
+  },
+  "metadata": {
+    "source_mode": "tradingagents_offline",
+    "alpha_measured": false,
+    "intraday_pit_verified": false,
+    "llm_calls": 12,
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "missing_usage_calls": 12,
+    "usd_cost": null,
+    "provenance": {
+      "job_id": "f700cba3-c634-4204-8669-1acd78612431",
+      "attempt": 1,
+      "policy_version": "test-1",
+      "data_manifest": {
+        "ref": "test/manifest.json",
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "worker_version": "0.1.0",
+      "upstream_version": "0.7.1",
+      "upstream_sha": "c4544913a14ed3df5f1ed7b9e8483270ce20682a",
+      "config_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "model_id": "scripted-offline-v1",
+      "identity_registry": {
+        "ref": "test/research-identity.json",
+        "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+      },
+      "security_bindings": [
+        {
+          "symbol": "TSLA",
+          "security_id": "fixture-tesla"
+        },
+        {
+          "symbol": "NVDA",
+          "security_id": "fixture-nvidia"
+        }
+      ],
+      "projected_snapshot_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+    }
+  }
+}

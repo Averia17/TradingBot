@@ -214,7 +214,7 @@ func TestClaimRechecksLeaseAfterLockingAnExpiredCandidate(t *testing.T) {
 	if _, err := tx.Exec(ctx, `SELECT id FROM research_jobs WHERE id = $1 FOR UPDATE`, input.ID); err != nil {
 		t.Fatal(err)
 	}
-	lease, err := claimLockedJob(ctx, tx, input.ID, "leased", 1, "worker-2", testIdentity(206), testSnapshotWindow)
+	lease, err := claimLockedJob(ctx, tx, input.ID, "leased", 1, "worker-2", testIdentity(206), testSnapshotWindow, "")
 	if err != nil || lease.Token != "" {
 		t.Fatalf("renewed candidate unexpectedly acquired = %+v, %v", lease, err)
 	}

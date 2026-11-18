@@ -1,0 +1,40 @@
+{
+  "schema_version": "0.2",
+  "experiment_id": "stable-identity-walk",
+  "configuration_sha256": "daf7bc96338e02dcef8c350802be760ead69cb9f764b3dac79d0fcb3e72a61d5",
+  "source_mode": "synthetic_fixture",
+  "model_training_cutoff": null,
+  "nav_basis": "execution_net",
+  "splits": {
+    "train_start": "2026-11-15",
+    "validation_start": "2026-11-16",
+    "test_start": "2026-11-17",
+    "end_exclusive": "2026-11-19",
+    "embargo_calendar_days": 0
+  },
+  "expected_nav_dates": ["2026-11-15", "2026-11-16", "2026-11-17", "2026-11-18"],
+  "primary_comparison_id": "versus-cash",
+  "comparisons": [
+    {
+      "comparison_id": "versus-cash",
+      "strategy": "offline-graph",
+      "benchmark": "cash",
+      "benchmark_access": "synthetic_fixture",
+      "minimum_daily_excess_bps": 0
+    }
+  ],
+  "bootstrap": {
+    "block_marks": 2,
+    "minimum_blocks": 2,
+    "replications": 500,
+    "seed": 0,
+    "family_alpha_bps": 500
+  },
+  "walk_forward_source": {
+    "plan_sha256": "daf7bc96338e02dcef8c350802be760ead69cb9f764b3dac79d0fcb3e72a61d5",
+    "tape_sha256": "e5062aee4d1fe4d0833e196727bf328e0d6640efc8f5c64161abf41734dbf373",
+    "identity_registry_sha256": "aa3d6dc48790eb7d7e549f684ffb0cdfa855625c4dd6d76c3fe2220c35a86f5c",
+    "mark_max_age_seconds": 86400,
+    "benchmarks": [{"series_id": "cash", "kind": "cash"}]
+  }
+}

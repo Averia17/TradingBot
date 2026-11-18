@@ -110,6 +110,9 @@ func compile(data []byte, reference string, linked ...schemaResource) *jsonschem
 var batchValidator = compile(batchSchema, "")
 var portfolioValidator = compile(portfolioSchema, "")
 
+var ResearchIdentityJob = compile(researchJobSchema, "#/$defs/IdentityJobRequest",
+	schemaResource{"https://tradingbot.local/portfolio.schema.json", portfolioSchema})
+
 var PaperAccountCreate = compile(paperSchema, "#/$defs/CreateAccount")
 var PaperReserve = compile(paperSchema, "#/$defs/Reserve")
 var PaperResolve = compile(paperSchema, "#/$defs/Resolve")

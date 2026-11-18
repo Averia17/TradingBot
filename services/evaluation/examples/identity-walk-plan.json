@@ -1,0 +1,36 @@
+{
+  "schema_version": "0.2",
+  "source_mode": "synthetic_fixture",
+  "experiment_id": "stable-identity-walk",
+  "policy_version": "fixture-paper-v1",
+  "max_position_pct": "0.25",
+  "max_total_llm_calls": 32,
+  "identity_registry": {
+    "ref": "identity-registry.json",
+    "sha256": "aa3d6dc48790eb7d7e549f684ffb0cdfa855625c4dd6d76c3fe2220c35a86f5c"
+  },
+  "steps": [
+    {
+      "as_of": "2026-11-18T10:00:00Z",
+      "completed_at": "2026-11-18T10:00:01Z",
+      "requested_symbols": ["TSLA"],
+      "security_bindings": [{"symbol": "TSLA", "security_id": "fixture-current"}],
+      "max_llm_calls": 16,
+      "data_manifest": {
+        "ref": "identity-market.json",
+        "sha256": "7015cfad25251d66832f7db2d84739a5e9ee0558406932509e544ecffab38046"
+      }
+    },
+    {
+      "as_of": "2026-11-18T10:01:00Z",
+      "completed_at": "2026-11-18T10:01:01Z",
+      "requested_symbols": ["NVDA"],
+      "security_bindings": [{"symbol": "NVDA", "security_id": "fixture-nvda"}],
+      "max_llm_calls": 16,
+      "data_manifest": {
+        "ref": "identity-market.json",
+        "sha256": "7015cfad25251d66832f7db2d84739a5e9ee0558406932509e544ecffab38046"
+      }
+    }
+  ]
+}

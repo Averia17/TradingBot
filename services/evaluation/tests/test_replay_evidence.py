@@ -1,4 +1,5 @@
 import json
+from datetime import UTC, datetime, time
 from hashlib import sha256
 from pathlib import Path
 
@@ -6,7 +7,8 @@ import msgspec
 import pytest
 
 from tradingbot_evaluation.__main__ import main
-from tradingbot_evaluation.replay import load_replay, run_replay
+from tradingbot_evaluation.benchmarks import run_benchmarks
+from tradingbot_evaluation.replay import load_replay, replay_prefix, run_replay
 from tradingbot_evaluation.replay_evidence import derive_replay_evidence
 from tradingbot_evaluation.statistics import (
     evaluate_statistics,
@@ -136,6 +138,98 @@ def derive(replay, manifest):
         protocol, replay, expected_protocol_sha256=protocol_sha256(protocol)
     )
     return protocol, evidence
+
+
+def scheduled_inputs():
+    source = replay_document()
+    source["orders"] = []
+    source["cash_dividends"] = []
+    source["quotes"] = [
+        quote("TSLA", 1, "10.00", "10.00"),
+        quote("NVDA", 1, "10.00", "10.00"),
+        quote("TSLA", 2, "10.00", "10.00", hour=1),
+        quote("NVDA", 2, "10.00", "10.00", hour=1),
+        quote("TSLA", 3, "20.00", "20.00"),
+        quote("NVDA", 3, "5.00", "5.00"),
+        quote("TSLA", 3, "20.00", "20.00", hour=13)
+        | {"observed_at": "2026-10-03T12:30:00Z", "available_at": "2026-10-03T12:30:00Z"},
+        quote("NVDA", 3, "5.00", "5.00", hour=13)
+        | {"observed_at": "2026-10-03T13:30:00Z", "available_at": "2026-10-03T13:30:00Z"},
+    ]
+    replay, manifest = inputs(source)
+    manifest["replay_source"]["benchmarks"][-1].update(
+        kind="equal_weight_scheduled",
+        rebalance_schedule={
+            "rebalance_at": [at(3)],
+            "execution_phase_seconds": 3600,
+            "max_mark_age_seconds": 604800,
+        },
+    )
+    return replay, manifest
+
+
+def test_frozen_equal_weight_daily_nav_reuses_one_schedule_on_every_prefix():
+    replay, manifest = scheduled_inputs()
+    protocol, evidence = derive(replay, manifest)
+    assert [row.nav_usd["universe"] for row in evidence.daily_nav] == [
+        "1000.00",
+        "990.20",
+        "1227.75",
+        "1227.75",
+    ]
+
+    schedule = protocol.replay_source.benchmarks[-1].rebalance_schedule
+    start = datetime.combine(protocol.expected_nav_dates[0], time.max, tzinfo=UTC)
+    early = datetime.fromisoformat("2026-10-03T12:45:00Z")
+    end = datetime.combine(protocol.expected_nav_dates[-1], time.max, tzinfo=UTC)
+
+    def run(tape, cutoff):
+        return run_benchmarks(
+            tape,
+            start_at=start,
+            through=cutoff,
+            buy_and_hold_symbol=None,
+            include_equal_weight=False,
+            equal_weight_schedule=schedule,
+        )["benchmarks"]["equal_weight_scheduled"]
+
+    full = run(replay, end)
+    prefix = run(replay_prefix(replay, early), early)
+    assert full["schedule_sha256"] == prefix["schedule_sha256"]
+    assert full["ending_bid_mark_nav_usd"] == evidence.daily_nav[-1].nav_usd["universe"]
+    assert prefix["fills"] == full["fills"][:3]
+    assert "free_cash_before_buy_usd" not in prefix["rebalances"][1]
+    assert prefix["ending_cash_usd"] == full["rebalances"][1]["free_cash_before_buy_usd"]
+    assert derive(replay, manifest) == (protocol, evidence)
+
+
+def test_frozen_equal_weight_binding_is_strict_and_normalized():
+    _, manifest = scheduled_inputs()
+    spec = manifest["replay_source"]["benchmarks"][-1]
+    schedule = spec["rebalance_schedule"]
+    original = protocol_sha256(load_protocol(dumps(manifest)))
+    schedule["rebalance_at"] = ["2026-10-03T13:00:00+01:00"]
+    assert protocol_sha256(load_protocol(dumps(manifest))) == original
+    schedule["rebalance_at"] = [at(4)]
+    assert protocol_sha256(load_protocol(dumps(manifest))) != original
+    schedule["rebalance_at"] = [at(5)]
+    with pytest.raises(ValueError, match="inside the evaluation"):
+        load_protocol(dumps(manifest))
+    schedule["rebalance_at"] = ["2026-10-03T12:00:00.0000001Z"]
+    with pytest.raises(ValueError, match="microsecond precision"):
+        load_protocol(dumps(manifest))
+    schedule["rebalance_at"] = [at(3)]
+    schedule["unexpected"] = True
+    with pytest.raises(ValueError, match="unknown field"):
+        load_protocol(dumps(manifest))
+    schedule.pop("unexpected")
+    spec["kind"] = "equal_weight_once"
+    with pytest.raises(ValueError, match="Only equal_weight_scheduled"):
+        load_protocol(dumps(manifest))
+    spec["kind"] = "equal_weight_scheduled"
+    spec.pop("rebalance_schedule")
+    with pytest.raises(ValueError, match="requires a frozen rebalance schedule"):
+        load_protocol(dumps(manifest))
 
 
 def test_durable_research_cli_input_feeds_frozen_daily_evidence(tmp_path, capsys):

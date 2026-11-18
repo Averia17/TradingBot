@@ -1,0 +1,97 @@
+services:
+  analytics-kafka-init:
+    profiles: [analytics]
+    image: confluentinc/cp-kafka:7.4.10@sha256:88c430304d033c4a1f5bb48798461f7aebbf0a492a8116e13cc0a53516eb1749
+    entrypoint: [/bin/sh, -ec]
+    command:
+      - |
+        kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists \
+          --topic tradingbot.portfolio.account.paper.v1 --partitions 1 --replication-factor 1
+        kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists \
+          --topic tradingbot.portfolio.account-head.paper.v1 --partitions 1 --replication-factor 1 \
+          --config cleanup.policy=compact
+        kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists \
+          --topic tradingbot.portfolio.valuation.paper.v1 --partitions 1 --replication-factor 1
+    depends_on:
+      kafka:
+        condition: service_healthy
+    networks: [events]
+
+  analytics-postgres:
+    profiles: [analytics]
+    image: postgres:17-alpine@sha256:d3244e8ce3f165ee3c93d9c4a4b1d0fe48b3a89e2287b717fdcbbde92d405065
+    environment:
+      POSTGRES_DB: portfolio_analytics
+      POSTGRES_USER: portfolio_analytics
+      POSTGRES_HOST_AUTH_METHOD: trust
+    healthcheck:
+      test: [CMD, pg_isready, -h, 127.0.0.1, -U, portfolio_analytics, -d, portfolio_analytics]
+      interval: 3s
+      timeout: 2s
+      retries: 15
+    networks: [analytics-data]
+    volumes:
+      - analytics-postgres-data:/var/lib/postgresql/data
+
+  paper-account-relay:
+    profiles: [analytics]
+    image: tradingbot-trade-events:local
+    build:
+      context: ../../services/trade-events
+      args:
+        GO_IMAGE: ${TRADINGBOT_GO_BUILD_IMAGE:-golang:1.26.5-bookworm@sha256:53eeac89074db483fdf0ab3be1df32bf6e47562263d2d0d6baa7f26acb4957dd}
+    command: [-paper-account]
+    environment:
+      TRADINGBOT_DATABASE_URL: ${TRADINGBOT_ANALYTICS_LEDGER_DATABASE_URL:-postgresql://research_control@postgres:5432/tradingbot?sslmode=disable}
+      TRADINGBOT_KAFKA_BROKERS: kafka:9092
+      TRADINGBOT_TRADE_TOPIC: tradingbot.portfolio.account.paper.v1
+      TRADINGBOT_PAPER_ACCOUNT_HEAD_INTERVAL: ${TRADINGBOT_PAPER_ACCOUNT_HEAD_INTERVAL:-20s}
+    depends_on:
+      analytics-kafka-init:
+        condition: service_completed_successfully
+    networks: [events, paper-source]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+
+  portfolio-analytics:
+    profiles: [analytics]
+    image: tradingbot-portfolio-analytics:local
+    build:
+      context: ../../services/portfolio-analytics
+      args:
+        GO_IMAGE: ${TRADINGBOT_GO_BUILD_IMAGE:-golang:1.26.5-bookworm@sha256:53eeac89074db483fdf0ab3be1df32bf6e47562263d2d0d6baa7f26acb4957dd}
+    environment:
+      TRADINGBOT_ANALYTICS_DATABASE_URL: postgresql://portfolio_analytics@analytics-postgres:5432/portfolio_analytics?sslmode=disable
+      TRADINGBOT_ANALYTICS_BROKERS: kafka:9092
+      TRADINGBOT_ANALYTICS_ACCOUNT_ID: ${TRADINGBOT_ANALYTICS_ACCOUNT_ID:-}
+      TRADINGBOT_ANALYTICS_GROUP: ${TRADINGBOT_ANALYTICS_GROUP:-}
+      TRADINGBOT_ANALYTICS_MARK_MAX_AGE: ${TRADINGBOT_ANALYTICS_MARK_MAX_AGE:-72h}
+      TRADINGBOT_ANALYTICS_BENCHMARK_ID: ${TRADINGBOT_ANALYTICS_BENCHMARK_ID:-}
+    depends_on:
+      analytics-postgres:
+        condition: service_healthy
+      analytics-kafka-init:
+        condition: service_completed_successfully
+    networks: [analytics-data, analytics-api, events]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+
+  notifications:
+    environment:
+      TRADINGBOT_ANALYTICS_URL: http://portfolio-analytics:8080
+      TRADINGBOT_TELEGRAM_OWNER_USER_ID: ${TRADINGBOT_TELEGRAM_OWNER_USER_ID:-}
+    networks: [events, analytics-api]
+
+networks:
+  analytics-data:
+    internal: true
+  analytics-api:
+    internal: true
+  paper-source:
+    external: true
+    name: ${TRADINGBOT_PAPER_LEDGER_NETWORK:-tradingbot-research_storage}
+
+volumes:
+  analytics-postgres-data: {}

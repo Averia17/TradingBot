@@ -13,14 +13,14 @@ from tempfile import TemporaryDirectory
 from threading import Event, Lock
 from time import monotonic
 from types import SimpleNamespace
-from typing import Annotated, Literal
+from typing import Annotated, Literal, Self
 from unittest.mock import patch
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from langchain_core.language_models import SimpleChatModel
 from langchain_core.runnables import RunnableLambda
 from langsmith import tracing_context
-from pydantic import Field
+from pydantic import Field, TypeAdapter, model_validator
 
 from tradingbot.adapters.tradingagents import (
     TradingAgentsAdapter,
@@ -38,7 +38,12 @@ from tradingbot.paper_memory import (
     build_contexts,
 )
 from tradingbot.research import collect_reports, create_decisions
-from tradingbot.snapshots import ArchiveRecord, PointInTimeSnapshot, load_snapshot
+from tradingbot.security_identity import (
+    SecurityBinding,
+    StablePointInTimeSnapshot,
+    load_identity_snapshot,
+)
+from tradingbot.snapshots import ArchiveRecord, ArchiveReference, PointInTimeSnapshot, load_snapshot
 from tradingbot.upstream import verify
 
 MODEL_ID = "scripted-offline-v1"
@@ -70,6 +75,24 @@ class OfflineJob(Contract):
     data_manifest: DataManifest
     policy_version: Identifier
     max_llm_calls: Annotated[int, Field(strict=True, ge=1, le=64)]
+
+
+class IdentityOfflineJob(OfflineJob):
+    job_schema_version: Literal["0.2"]
+    identity_registry: ArchiveReference
+    security_bindings: Annotated[list[SecurityBinding], Field(min_length=1, max_length=100)]
+
+    @model_validator(mode="after")
+    def covers_symbols(self) -> Self:
+        if [binding.symbol for binding in self.security_bindings] != self.requested_symbols:
+            raise ValueError("security bindings must match requested symbols in order")
+        if len({binding.security_id for binding in self.security_bindings}) != len(self.security_bindings):
+            raise ValueError("requested symbols must identify distinct securities")
+        return self
+
+
+OfflineJobRequest = Annotated[OfflineJob | IdentityOfflineJob, Field(discriminator="job_schema_version")]
+_OFFLINE_JOB = TypeAdapter(OfflineJobRequest)
 
 
 class OfflineBudget(CallBudget):
@@ -206,9 +229,16 @@ def _verified_upstream() -> tuple[str, str]:
 
 def _archive_contexts(snapshot: PointInTimeSnapshot, symbols: list[str]) -> dict[str, str]:
     grouped: dict[str | None, list[ArchiveRecord]] = defaultdict(list)
+    security_ids: dict[str, set[str]] = defaultdict(set)
     for record in snapshot.records:
         if record.kind != PAPER_KIND:
             grouped[record.symbol].append(record)
+            security_id = record.payload.get("security_id")
+            if record.symbol is not None and isinstance(security_id, str) and security_id:
+                security_ids[record.symbol].add(security_id)
+    for symbol in symbols:
+        if len(security_ids.get(symbol, ())) > 1:
+            raise ValueError(f"archive contains multiple security IDs for {symbol}")
 
     # Encode the available records once, including the records shared across
     # symbols. ASCII serialization makes the byte limit independent of Unicode.
@@ -249,6 +279,10 @@ def _archive_contexts(snapshot: PointInTimeSnapshot, symbols: list[str]) -> dict
                     break
         if not selected or selected[0] not in own:
             raise ValueError("archive has no available symbol observation that fits the prompt")
+        if isinstance(snapshot, StablePointInTimeSnapshot) and not any(
+            record["symbol"] == symbol and record["kind"] != "listing" for record in selected
+        ):
+            raise ValueError("archive has no available issuer observation that fits the prompt")
     return contexts
 
 
@@ -300,14 +334,15 @@ def analyze_offline(
     authorize_call: Callable[[UUID], None] | None = None,
     record_call: Callable[[LLMCall], None] | None = None,
     archive_root: Path | None = None,
+    owner_identity_registry: ArchiveReference | dict | None = None,
 ) -> dict:
-    """Analyze a leased job once, returning a research result v0.2 for Control."""
+    """Analyze a leased job and return its matching result protocol."""
     if type(attempt) is not int or not 1 <= attempt <= 3 or attempt_deadline.utcoffset() is None:
         raise ValueError("invalid offline attempt identity or deadline")
 
     return _analyze_offline(
         request, attempt, attempt_deadline, cancelled, authorize_call, archive_root,
-        record_call=record_call,
+        record_call=record_call, owner_identity_registry=owner_identity_registry,
     )
 
 
@@ -318,17 +353,21 @@ def analyze_historical(
     *,
     variant: HistoricalVariant = "full_graph",
     usage_output: Path | None = None,
+    owner_identity_registry: ArchiveReference | dict | None = None,
 ) -> dict:
     """Use the pinned graph for a synthetic historical step with a simulated clock."""
     now = datetime.now(UTC)
     if completed_at.utcoffset() != timedelta(0) or not job.portfolio.as_of <= completed_at <= now:
         raise ValueError("historical completion must be UTC, at or after the cutoff and in the past")
+    if not isinstance(job, IdentityOfflineJob) and owner_identity_registry is not None:
+        raise ValueError("legacy historical steps do not use a pinned identity registry")
 
     return _analyze_offline(
         job, 1, now + HISTORICAL_STEP_TIMEOUT, Event(), None, archive_root,
         historical_completed_at=completed_at,
         historical_variant=variant,
         usage_output=usage_output,
+        owner_identity_registry=owner_identity_registry,
     )
 
 
@@ -368,6 +407,7 @@ def _analyze_offline(
     archive_root: Path | None,
     *,
     record_call: Callable[[LLMCall], None] | None = None,
+    owner_identity_registry: ArchiveReference | dict | None = None,
     historical_completed_at: datetime | None = None,
     historical_variant: HistoricalVariant = "full_graph",
     usage_output: Path | None = None,
@@ -385,27 +425,43 @@ def _analyze_offline(
             raise OfflineAnalysisCancelled("offline research attempt is no longer active")
 
     ensure_active()
-    job = OfflineJob.model_validate(request)
+    job = _OFFLINE_JOB.validate_python(request)
     symbols = job.requested_symbols
     if len(set(symbols)) != len(symbols) or job.portfolio.as_of > datetime.now(UTC):
         raise ValueError("invalid offline universe or future portfolio")
     archive_contexts = {}
     memory_contexts = {}
+    identity_proof = {}
+    if isinstance(job, IdentityOfflineJob):
+        if (
+            archive_root is None or owner_identity_registry is None
+            or ArchiveReference.model_validate(owner_identity_registry) != job.identity_registry
+        ):
+            raise ValueError("identity-bound research requires the owner-approved identity registry")
     if archive_root is not None:
-        snapshot = load_snapshot(
-            archive_root,
-            job.data_manifest.model_dump(),
-            job.portfolio.as_of,
-            symbols=symbols,
-            visibility="locally_ingested",
-        )
+        if isinstance(job, IdentityOfflineJob):
+            snapshot = load_identity_snapshot(
+                archive_root, job.data_manifest.model_dump(), job.identity_registry,
+                job.portfolio.as_of, job.security_bindings, positions=job.portfolio.positions,
+            )
+            identity_proof = {
+                "identity_registry": job.identity_registry.model_dump(mode="json"),
+                "security_bindings": [binding.model_dump(mode="json") for binding in job.security_bindings],
+                "projected_snapshot_sha256": snapshot.sha256,
+            }
+        else:
+            snapshot = load_snapshot(
+                archive_root, job.data_manifest.model_dump(), job.portfolio.as_of,
+                symbols=symbols, visibility="locally_ingested",
+            )
         if historical and snapshot.source_mode != "synthetic_fixture":
             raise ValueError("historical steps require a synthetic archive")
         archive_contexts = _archive_contexts(snapshot, symbols)
         if historical_variant != "no_memory":
             memory_contexts = build_contexts(
                 snapshot, symbols, job.policy_version,
-                include_reflections=historical_variant == "factual_reflection",
+                include_reflections=(not historical and isinstance(job, IdentityOfflineJob))
+                or historical_variant == "factual_reflection",
             )
         ensure_active()
     upstream_version, upstream_sha = _verified_upstream()
@@ -450,6 +506,11 @@ def _analyze_offline(
             stable_config["paper_memory_context_limits"] = [
                 PAPER_CONTEXT_BYTES, PAPER_CONTEXT_RECORDS,
             ]
+        if identity_proof:
+            stable_config["archive_identity_projection"] = "0.2"
+            if not historical or historical_variant == "factual_reflection":
+                stable_config["paper_reflection_method"] = PAPER_REFLECTION_METHOD
+                stable_config["durable_paper_reflections"] = True
         if historical:
             stable_config["offline_clock"] = "synthetic-historical-step-0.1"
             if historical_variant != "full_graph":
@@ -486,7 +547,7 @@ def _analyze_offline(
             )
     budget.check_active()
     return {
-        "result_schema_version": "0.2",
+        "result_schema_version": "0.3" if identity_proof else "0.2",
         "batch": batch.model_dump(mode="json"),
         "reports": reports,
         "metadata": budget.summary() | {
@@ -503,6 +564,6 @@ def _analyze_offline(
                 "upstream_sha": upstream_sha,
                 "config_sha256": config_hash,
                 "model_id": MODEL_ID,
-            },
+            } | identity_proof,
         },
     }

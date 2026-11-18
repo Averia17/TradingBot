@@ -1,0 +1,34 @@
+{
+  "schema_version": "0.1",
+  "universe_provider": "selection-fixture",
+  "entries": [
+    {
+      "symbol": "NVDA",
+      "security_id": "fixture-nvda",
+      "available_at": "2026-11-18T00:00:00Z",
+      "effective_at": "2026-11-18T00:00:00Z",
+      "record_providers": [
+        "selection-fixture"
+      ],
+      "instrument": {
+        "instrument_id": "fixture:NVDA",
+        "registry_version": "fixture-v1",
+        "decimals": 2
+      }
+    },
+    {
+      "symbol": "TSLA",
+      "security_id": "fixture-current",
+      "available_at": "2026-11-18T00:00:00Z",
+      "effective_at": "2026-11-18T00:00:00Z",
+      "record_providers": [
+        "selection-fixture"
+      ],
+      "instrument": {
+        "instrument_id": "fixture:TSLA",
+        "registry_version": "fixture-v1",
+        "decimals": 2
+      }
+    }
+  ]
+}

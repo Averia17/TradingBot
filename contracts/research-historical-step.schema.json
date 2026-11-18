@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Synthetic historical research step request",
-  "description": "The result uses research result 0.2. This request supplies a simulated completion time and a job with a locally ingested synthetic archive.",
+  "description": "This request supplies a simulated completion time and a job with a locally ingested synthetic archive. Legacy jobs produce research result 0.2. Identity-bound jobs require an independent CLI registry pin and produce research result 0.3 with the selected identities and projected snapshot digest.",
   "type": "object",
   "additionalProperties": false,
   "required": ["job", "completed_at"],

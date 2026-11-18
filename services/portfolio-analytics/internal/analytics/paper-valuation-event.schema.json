@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Paper portfolio valuation input 1.0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "account_id", "id", "kind", "source_id", "source_kind", "observed_at", "available_at"],
+  "properties": {
+    "version": {"const": "1.0"},
+    "account_id": {"type": "string", "pattern": "^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$"},
+    "id": {"$ref": "#/$defs/Identifier"},
+    "kind": {"enum": ["mark", "benchmark", "operating_cost", "cost_coverage"]},
+    "source_id": {"$ref": "#/$defs/Identifier"},
+    "source_kind": {"enum": ["local_archive", "synthetic_fixture"]},
+    "observed_at": {"$ref": "#/$defs/UTC"},
+    "available_at": {"$ref": "#/$defs/UTC"},
+    "mark": {"$ref": "#/$defs/Mark"},
+    "benchmark": {"$ref": "#/$defs/Benchmark"},
+    "operating_cost": {"$ref": "#/$defs/Cost"},
+    "cost_coverage": {"$ref": "#/$defs/Coverage"}
+  },
+  "oneOf": [
+    {"properties": {"kind": {"const": "mark"}}, "required": ["mark"], "not": {"anyOf": [{"required": ["benchmark"]}, {"required": ["operating_cost"]}, {"required": ["cost_coverage"]}]}},
+    {"properties": {"kind": {"const": "benchmark"}}, "required": ["benchmark"], "not": {"anyOf": [{"required": ["mark"]}, {"required": ["operating_cost"]}, {"required": ["cost_coverage"]}]}},
+    {"properties": {"kind": {"const": "operating_cost"}}, "required": ["operating_cost"], "not": {"anyOf": [{"required": ["mark"]}, {"required": ["benchmark"]}, {"required": ["cost_coverage"]}]}},
+    {"properties": {"kind": {"const": "cost_coverage"}}, "required": ["cost_coverage"], "not": {"anyOf": [{"required": ["mark"]}, {"required": ["benchmark"]}, {"required": ["operating_cost"]}]}}
+  ],
+  "$defs": {
+    "Identifier": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"},
+    "UTC": {"type": "string", "format": "date-time", "pattern": "Z$"},
+    "PositiveDecimal": {"type": "string", "pattern": "^(?:0|[1-9][0-9]{0,29})(?:\\.[0-9]{1,8})?$", "not": {"pattern": "^0(?:\\.0+)?$"}},
+    "Mark": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["instrument_id", "registry_version", "decimals", "price_usd"],
+      "properties": {
+        "instrument_id": {"$ref": "#/$defs/Identifier"}, "registry_version": {"$ref": "#/$defs/Identifier"},
+        "decimals": {"type": "integer", "minimum": 0, "maximum": 18}, "price_usd": {"$ref": "#/$defs/PositiveDecimal"}
+      }
+    },
+    "Benchmark": {
+      "description": "A USD total-return level for one preselected series",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["series_id", "level"],
+      "properties": {"series_id": {"$ref": "#/$defs/Identifier"}, "level": {"$ref": "#/$defs/PositiveDecimal"}}
+    },
+    "Cost": {
+      "description": "An expense not already included in execution-net ledger cash flows",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["category", "amount_usd"],
+      "properties": {"category": {"$ref": "#/$defs/CostCategory"}, "amount_usd": {"$ref": "#/$defs/PositiveDecimal"}}
+    },
+    "CostCategory": {"enum": ["additional_execution_fees", "chain_fees", "data", "fx", "infrastructure", "issuer_drag", "llm", "other_operating"]},
+    "Coverage": {
+      "description": "Coverage of additional costs for each UTC day in this inclusive range",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["first_day", "last_day", "categories"],
+      "properties": {
+        "first_day": {"type": "string", "format": "date"},
+        "last_day": {"type": "string", "format": "date"},
+        "categories": {
+          "type": "object",
+          "propertyNames": {"$ref": "#/$defs/CostCategory"},
+          "minProperties": 8,
+          "maxProperties": 8,
+          "additionalProperties": {"enum": ["complete", "zero", "unknown"]}
+        }
+      }
+    }
+  }
+}

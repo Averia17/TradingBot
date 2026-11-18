@@ -17,14 +17,13 @@ import (
 	"tradingbot/control/internal/contract"
 	"tradingbot/control/internal/jobs"
 	"tradingbot/control/internal/paperapply"
+	"tradingbot/control/internal/paperquotes"
 	"tradingbot/control/internal/papersim"
 )
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	err := run(ctx, os.Getenv("TRADINGBOT_DATABASE_URL"), os.Args[1:], os.Stdout)
-	cancel()
 	stop()
 	if err != nil && !errors.Is(err, flag.ErrHelp) {
 		slog.Error("local paper quote pin failed", "error", err)
@@ -54,23 +53,27 @@ type pinResult struct {
 func run(ctx context.Context, dsn string, args []string, output io.Writer) error {
 	flags := flag.NewFlagSet("paper-quote-pin", flag.ContinueOnError)
 	jobID := flags.String("job", "", "research job ID")
+	accountID := flags.String("account", "", "virtual account UUID for durable paper dispatch")
 	tapePath := flags.String("tape", "", "owner-pinned synthetic quote tape file")
 	digest := flags.String("sha256", "", "SHA-256 of the exact tape bytes")
 	directory := flags.String("quote-root", "", "existing directory for quote and job pin")
 	requestPath := flags.String("request", "", "bound paper application request if the job has no durable dispatch")
+	poll := flags.Duration("poll-interval", 0, "account polling interval (1s to 1h); default is one page")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
-	if flags.NArg() != 0 || *jobID == "" || *tapePath == "" || *digest == "" || *directory == "" || dsn == "" {
-		return errors.New("provide --job, --tape, --sha256, --quote-root and TRADINGBOT_DATABASE_URL")
+	if flags.NArg() != 0 || (*jobID == "") == (*accountID == "") || *tapePath == "" || *digest == "" || *directory == "" || dsn == "" {
+		return errors.New("provide one of --job or --account with --tape, --sha256, --quote-root and TRADINGBOT_DATABASE_URL")
 	}
-	raw, err := readPath(*tapePath, maxTapeBytes)
-	if err != nil {
-		return fmt.Errorf("read synthetic quote tape: %w", err)
+	if *accountID != "" && *requestPath != "" || *jobID != "" && *poll != 0 {
+		return errors.New("--request requires --job and --poll-interval requires --account")
 	}
-	tape, err := decodeTape(raw, *digest, *jobID)
+	if *poll != 0 && (*poll < time.Second || *poll > time.Hour) {
+		return errors.New("poll interval must be zero or between 1s and 1h")
+	}
+	tape, err := paperquotes.OpenTape(*tapePath, *digest, *jobID, *accountID)
 	if err != nil {
-		return err
+		return fmt.Errorf("open synthetic quote tape: %w", err)
 	}
 	var requestBytes []byte
 	if *requestPath != "" {
@@ -84,21 +87,29 @@ func run(ctx context.Context, dsn string, args []string, output io.Writer) error
 		return fmt.Errorf("open local paper quote root: %w", err)
 	}
 	defer root.Close()
-	research, err := jobs.Open(ctx, dsn)
+	startup, stopStartup := context.WithTimeout(ctx, 30*time.Second)
+	research, err := jobs.Open(startup, dsn)
+	stopStartup()
 	if err != nil {
 		return errors.New("research job storage startup failed; check PostgreSQL configuration")
 	}
 	defer research.Close()
-	result, err := pinCompleted(ctx, research, root, tape, *digest, requestBytes)
+	encoder := json.NewEncoder(output)
+	if *accountID != "" {
+		return runAccount(ctx, research, root, tape, *poll, encoder)
+	}
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	result, err := pinCompleted(ctx, research, root, tape, *jobID, requestBytes)
 	if err != nil {
 		return err
 	}
-	return json.NewEncoder(output).Encode(result)
+	return encoder.Encode(result)
 }
 
-func pinCompleted(ctx context.Context, research researchReader, root *os.Root, tape quoteTape, digest string, requestBytes []byte) (pinResult, error) {
-	result := pinResult{Version: "0.1", Source: papersim.Source, JobID: tape.JobID, TapeSHA256: digest}
-	job, err := research.Get(ctx, tape.JobID)
+func pinCompleted(ctx context.Context, research researchReader, root *os.Root, tape *paperquotes.Tape, jobID string, requestBytes []byte) (pinResult, error) {
+	result := pinResult{Version: "0.1", Source: papersim.Source, JobID: jobID, TapeSHA256: tape.SHA256()}
+	job, err := research.Get(ctx, jobID)
 	if errors.Is(err, jobs.ErrNotFound) {
 		result.Status = "awaiting_research"
 		return result, nil
@@ -121,8 +132,11 @@ func pinCompleted(ctx context.Context, research researchReader, root *os.Root, t
 	if err != nil {
 		return result, err
 	}
-	req, err := applicationRequest(ctx, research, tape.JobID, requestBytes)
+	req, err := applicationRequest(ctx, research, jobID, requestBytes)
 	if err != nil {
+		return result, err
+	}
+	if err := checkTapeBinding(tape, req); err != nil {
 		return result, err
 	}
 	now, err := research.Now(ctx)
@@ -134,12 +148,12 @@ func pinCompleted(ctx context.Context, research researchReader, root *os.Root, t
 		return result, err
 	}
 	result.CompletedAt, result.CheckedAt = &receipt.CompletedAt, &now
-	existing, err := readPin(root, tape.JobID)
+	existing, err := readPin(root, jobID)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return result, err
 	}
 	if existing != nil {
-		match, err := tape.replay(root, *existing, digest, review, receipt.CompletedAt, now)
+		match, err := replayPublished(root, tape, *existing, review, receipt.CompletedAt, now)
 		if err != nil {
 			return result, err
 		}
@@ -153,10 +167,7 @@ func pinCompleted(ctx context.Context, research researchReader, root *os.Root, t
 		result.Status = "application_expired"
 		return result, nil
 	}
-	candidate, err := tape.selectQuote(review, receipt.CompletedAt, now)
-	if err != nil {
-		return result, err
-	}
+	candidate := tape.Select(receipt.CompletedAt, now, review.ExpiresAt(), review.Authorize)
 	if candidate == nil {
 		result.Status = "awaiting_quote"
 		return result, nil
@@ -167,12 +178,12 @@ func pinCompleted(ctx context.Context, research researchReader, root *os.Root, t
 		return result, err
 	}
 	result.CheckedAt = &checkedAt
-	if !candidate.available.Before(checkedAt) || !checkedAt.Before(candidate.quote.ExpiresAt) || !checkedAt.Before(review.ExpiresAt()) {
+	if !candidate.AvailableAt.Before(checkedAt) || !checkedAt.Before(candidate.Quote.ExpiresAt) || !checkedAt.Before(review.ExpiresAt()) {
 		result.Status = "awaiting_quote"
 		return result, nil
 	}
-	pin := quotePin{Version: "0.1", JobID: tape.JobID, Quote: candidate.reference(digest)}
-	created, err := publishPin(ctx, root, pin, candidate.raw)
+	pin := quotePin{Version: "0.1", JobID: jobID, Quote: quoteReference(tape, jobID, candidate.SHA256)}
+	created, err := publishPin(ctx, root, pin, candidate.Raw)
 	if err != nil {
 		return result, err
 	}
@@ -182,7 +193,22 @@ func pinCompleted(ctx context.Context, research researchReader, root *os.Root, t
 	return result.withQuote("pinned", pin, *candidate), nil
 }
 
+func checkTapeBinding(tape *paperquotes.Tape, req paperapply.Request) error {
+	if tape.AccountID() != "" && req.SnapshotContext.AccountID != tape.AccountID() {
+		return errors.New("durable paper dispatch differs from the synthetic tape account")
+	}
+	if req.Identity == nil {
+		if tape.IdentityRegistrySHA256() != "" {
+			return errors.New("security-bound tape requires security-bound paper dispatch")
+		}
+	} else if tape.IdentityRegistrySHA256() != req.Identity.Registry.SHA256 || tape.SHA256() != req.Identity.QuoteTape.SHA256 {
+		return errors.New("synthetic tape differs from the durable paper dispatch tape or registry pin")
+	}
+	return nil
+}
+
 func applicationRequest(ctx context.Context, research researchReader, jobID string, raw []byte) (paperapply.Request, error) {
+	explicit := len(raw) != 0
 	task, err := research.GetPaperDispatch(ctx, jobID)
 	switch {
 	case err == nil:
@@ -204,6 +230,9 @@ func applicationRequest(ctx context.Context, research researchReader, jobID stri
 	if len(raw) > papersim.MaxInputBytes || contract.Decode(raw, contract.PaperApplication, &req) != nil || req.JobID != jobID || req.Intent != nil {
 		return paperapply.Request{}, paperapply.ErrInvalid
 	}
+	if req.Identity != nil && (err != nil || explicit) {
+		return paperapply.Request{}, errors.New("security-bound quote pin requires the durable paper dispatch request")
+	}
 	if err == nil {
 		canonical, encodeErr := json.Marshal(req)
 		if encodeErr != nil || sha256.Sum256(canonical) != task.RequestSHA256 || req.SnapshotContext.AccountID != task.AccountID {
@@ -213,9 +242,9 @@ func applicationRequest(ctx context.Context, research researchReader, jobID stri
 	return req, nil
 }
 
-func (r pinResult) withQuote(status string, pin quotePin, candidate tapeCandidate) pinResult {
+func (r pinResult) withQuote(status string, pin quotePin, candidate paperquotes.Observation) pinResult {
 	r.Status, r.Quote = status, &pin.Quote
-	observed, available := candidate.quote.ObservedAt.UTC(), candidate.available.UTC()
+	observed, available := candidate.Quote.ObservedAt.UTC(), candidate.AvailableAt.UTC()
 	r.ObservedAt, r.AvailableAt = &observed, &available
 	return r
 }

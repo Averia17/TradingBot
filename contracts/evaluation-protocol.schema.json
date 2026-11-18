@@ -7,6 +7,10 @@
           "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
           "type": "string"
         },
+        "identity_registry_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "type": "string"
+        },
         "mark_max_age_seconds": {
           "maximum": 604800,
           "minimum": 1,
@@ -128,6 +132,37 @@
         "minimum_daily_excess_bps"
       ],
       "title": "Comparison",
+      "type": "object"
+    },
+    "EqualWeightSchedule": {
+      "additionalProperties": false,
+      "properties": {
+        "execution_phase_seconds": {
+          "maximum": 3600,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "max_mark_age_seconds": {
+          "maximum": 604800,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "rebalance_at": {
+          "items": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "maxItems": 64,
+          "minItems": 1,
+          "type": "array"
+        }
+      },
+      "required": [
+        "rebalance_at",
+        "execution_phase_seconds",
+        "max_mark_age_seconds"
+      ],
+      "title": "EqualWeightSchedule",
       "type": "object"
     },
     "EvaluationProtocol": {
@@ -419,6 +454,36 @@
       "title": "ForwardRegimeReview",
       "type": "object"
     },
+    "IdentityReplayInputs": {
+      "additionalProperties": false,
+      "properties": {
+        "identity_registry_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "type": "string"
+        },
+        "mark_max_age_seconds": {
+          "maximum": 604800,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "research_export_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "type": "string"
+        },
+        "tape_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "research_export_sha256",
+        "tape_sha256",
+        "identity_registry_sha256",
+        "mark_max_age_seconds"
+      ],
+      "title": "IdentityReplayInputs",
+      "type": "object"
+    },
     "PaperMarkSource": {
       "additionalProperties": false,
       "properties": {
@@ -448,6 +513,7 @@
             "buy_and_hold",
             "cash",
             "equal_weight_once",
+            "equal_weight_scheduled",
             "trend_momentum"
           ]
         },
@@ -476,6 +542,13 @@
             }
           ],
           "default": null
+        },
+        "rebalance_schedule": {
+          "$ref": "#/$defs/EqualWeightSchedule"
+        },
+        "security_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+          "type": "string"
         },
         "series_id": {
           "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
@@ -508,9 +581,12 @@
           "items": {
             "$ref": "#/$defs/ReplayBenchmark"
           },
-          "maxItems": 4,
+          "maxItems": 5,
           "minItems": 1,
           "type": "array"
+        },
+        "identity": {
+          "$ref": "#/$defs/IdentityReplayInputs"
         },
         "replay_sha256": {
           "pattern": "^[a-f0-9]{64}$",
@@ -566,9 +642,13 @@
           "items": {
             "$ref": "#/$defs/ReplayBenchmark"
           },
-          "maxItems": 4,
+          "maxItems": 5,
           "minItems": 1,
           "type": "array"
+        },
+        "identity_registry_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "type": "string"
         },
         "mark_max_age_seconds": {
           "maximum": 604800,

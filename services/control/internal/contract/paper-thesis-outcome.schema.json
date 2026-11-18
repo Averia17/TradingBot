@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "Point-in-time paper thesis outcome 0.1",
+  "title": "Point-in-time paper thesis outcome",
   "$ref": "#/$defs/Request",
   "$defs": {
     "UUID": {"type": "string", "pattern": "^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$"},
@@ -11,6 +11,15 @@
     "SignedAmount": {"type": "string", "pattern": "^-?(?:0|[1-9][0-9]*)(?:\\.[0-9]{1,8})?$"},
     "Quantity": {"type": "string", "pattern": "^(?:0|[1-9][0-9]*)$"},
     "ID": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9:._-]{0,127}$"},
+    "ArchiveReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ref", "sha256"],
+      "properties": {
+        "ref": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]{0,511}$"},
+        "sha256": {"$ref": "#/$defs/SHA256"}
+      }
+    },
     "Instrument": {
       "type": "object",
       "additionalProperties": false,
@@ -19,6 +28,28 @@
         "instrument_id": {"$ref": "#/$defs/ID"},
         "registry_version": {"$ref": "#/$defs/ID"},
         "decimals": {"type": "integer", "minimum": 0, "maximum": 18}
+      }
+    },
+    "OpeningIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["symbol", "security_id", "instrument", "identity_registry", "application_sha256"],
+      "properties": {
+        "symbol": {"type": "string", "pattern": "^[A-Z][A-Z0-9.-]{0,15}$"},
+        "security_id": {"$ref": "#/$defs/ID"},
+        "instrument": {"$ref": "#/$defs/Instrument"},
+        "identity_registry": {"$ref": "#/$defs/ArchiveReference"},
+        "application_sha256": {"$ref": "#/$defs/SHA256"}
+      }
+    },
+    "ExitApplication": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fill_event_id", "order_id", "application_sha256"],
+      "properties": {
+        "fill_event_id": {"$ref": "#/$defs/UUID"},
+        "order_id": {"$ref": "#/$defs/UUID"},
+        "application_sha256": {"$ref": "#/$defs/SHA256"}
       }
     },
     "ExitObservation": {
@@ -51,13 +82,15 @@
       "additionalProperties": false,
       "required": ["schema_version", "source_mode", "account_id", "opening_order_id", "as_of", "max_observation_age_seconds", "exit_observations"],
       "properties": {
-        "schema_version": {"const": "0.1"},
+        "schema_version": {"enum": ["0.1", "0.2"]},
         "source_mode": {"const": "synthetic_fixture"},
         "account_id": {"$ref": "#/$defs/UUID"},
         "opening_order_id": {"$ref": "#/$defs/UUID"},
         "as_of": {"$ref": "#/$defs/Timestamp"},
         "max_observation_age_seconds": {"type": "integer", "minimum": 1, "maximum": 86400},
         "exit_observations": {"type": "array", "maxItems": 4096, "items": {"$ref": "#/$defs/ExitObservation"}},
+        "exit_tape": {"$ref": "#/$defs/ArchiveReference"},
+        "exit_identity_registry": {"$ref": "#/$defs/ArchiveReference"},
         "benchmark": {
           "type": "object",
           "additionalProperties": false,
@@ -67,7 +100,11 @@
             "levels": {"type": "array", "maxItems": 4096, "items": {"$ref": "#/$defs/BenchmarkLevel"}}
           }
         }
-      }
+      },
+      "dependentRequired": {"exit_tape": ["exit_identity_registry"], "exit_identity_registry": ["exit_tape"]},
+      "if": {"properties": {"schema_version": {"const": "0.2"}}},
+      "then": {"properties": {"exit_observations": {"maxItems": 0}}},
+      "else": {"not": {"required": ["exit_tape"]}}
     },
     "OpeningAmounts": {
       "type": "object",
@@ -92,8 +129,16 @@
         "account_version": {"type": "integer", "minimum": 1},
         "basis": {"$ref": "#/$defs/OpeningAmounts"},
         "exit_observation": {"$ref": "#/$defs/ExitObservation"},
+        "exit_tape_sha256": {"$ref": "#/$defs/SHA256"},
+        "exit_quote_sha256": {"$ref": "#/$defs/SHA256"},
+        "exit_identity_registry": {"$ref": "#/$defs/ArchiveReference"},
         "estimated_open_net_usd": {"anyOf": [{"$ref": "#/$defs/Amount"}, {"type": "null"}]},
         "net_pnl_usd": {"anyOf": [{"$ref": "#/$defs/SignedAmount"}, {"type": "null"}]}
+      },
+      "dependentRequired": {
+        "exit_tape_sha256": ["exit_identity_registry"],
+        "exit_identity_registry": ["exit_tape_sha256"],
+        "exit_quote_sha256": ["exit_observation", "exit_tape_sha256"]
       }
     },
     "BenchmarkOutcome": {
@@ -113,7 +158,7 @@
       "additionalProperties": false,
       "required": ["schema_version", "status", "input_sha256", "source_mode", "account_id", "account_version", "as_of", "research_job_id", "decision_id", "opening_order_id", "instrument", "actual"],
       "properties": {
-        "schema_version": {"const": "0.1"},
+        "schema_version": {"enum": ["0.1", "0.2"]},
         "status": {"enum": ["opening_unfilled", "opening_cancelled", "immature", "settled_at_horizon", "open_marked_at_horizon", "open_unpriced_at_horizon"]},
         "input_sha256": {"$ref": "#/$defs/SHA256"},
         "source_mode": {"const": "synthetic_fixture"},
@@ -128,8 +173,19 @@
         "opened_at": {"$ref": "#/$defs/Timestamp"},
         "horizon_deadline": {"$ref": "#/$defs/Timestamp"},
         "actual": {"$ref": "#/$defs/OpeningAmounts"},
+        "opening_identity": {"$ref": "#/$defs/OpeningIdentity"},
+        "exit_applications": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/ExitApplication"}},
         "horizon": {"$ref": "#/$defs/HorizonOutcome"},
         "benchmark": {"$ref": "#/$defs/BenchmarkOutcome"}
+      },
+      "if": {"properties": {"schema_version": {"const": "0.2"}}},
+      "then": {
+        "required": ["opening_identity"],
+        "properties": {"horizon": {"dependentRequired": {"exit_observation": ["exit_tape_sha256", "exit_quote_sha256"]}}}
+      },
+      "else": {
+        "not": {"anyOf": [{"required": ["opening_identity"]}, {"required": ["exit_applications"]}]},
+        "properties": {"horizon": {"not": {"anyOf": [{"required": ["exit_tape_sha256"]}, {"required": ["exit_quote_sha256"]}, {"required": ["exit_identity_registry"]}]}}}
       }
     }
   }

@@ -111,6 +111,7 @@ func (s *Store) resolve(ctx context.Context, r ResolutionRequest, proof *reconci
 		return Order{}, false, err
 	}
 	order.Status = r.Outcome
+	var analyticsFill *accountAnalyticsFill
 	if r.isFill() {
 		fill, err := writeFill(ctx, tx, r)
 		if err != nil {
@@ -119,6 +120,8 @@ func (s *Store) resolve(ctx context.Context, r ResolutionRequest, proof *reconci
 		if err := writeFillOutbox(ctx, tx, order, fill); err != nil {
 			return Order{}, false, err
 		}
+		booked := accountFill(order, fill)
+		analyticsFill = &booked
 		order.Fills = append(order.Fills, fill)
 		if err := order.summarizeFills(); err != nil {
 			return Order{}, false, err
@@ -129,6 +132,9 @@ func (s *Store) resolve(ctx context.Context, r ResolutionRequest, proof *reconci
 		return Order{}, false, fmt.Errorf("update paper order: %w", err)
 	}
 	if err := advanceAccount(ctx, tx, r.AccountID, order.AccountVersion); err != nil {
+		return Order{}, false, err
+	}
+	if err := captureAccountOutbox(ctx, tx, r.AccountID, r.EventID, order.AccountVersion, &order.Instrument, analyticsFill); err != nil {
 		return Order{}, false, err
 	}
 	if err := tx.Commit(ctx); err != nil {

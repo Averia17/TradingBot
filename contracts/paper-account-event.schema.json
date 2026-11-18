@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Paper account ledger event 1.0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "account_id", "event_id", "account_version", "kind", "recorded_at", "cash_usd", "reserved_cash_usd"],
+  "properties": {
+    "version": {"const": "1.0"},
+    "account_id": {"$ref": "#/$defs/UUID"},
+    "event_id": {"$ref": "#/$defs/UUID"},
+    "account_version": {"type": "integer", "minimum": 1, "maximum": 9223372036854775807},
+    "kind": {"enum": ["paper_account.created", "paper_order.reserved", "paper_order.partially_filled", "paper_order.filled", "paper_order.unknown", "paper_order.cancelled"]},
+    "recorded_at": {"$ref": "#/$defs/UTC"},
+    "cash_usd": {"$ref": "#/$defs/USD"},
+    "reserved_cash_usd": {"$ref": "#/$defs/USD"},
+    "position": {"$ref": "#/$defs/Position"},
+    "fill": {"$ref": "#/$defs/Fill"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"kind": {"const": "paper_account.created"}}},
+      "then": {"properties": {"account_version": {"const": 1}}, "not": {"required": ["position"]}},
+      "else": {"properties": {"account_version": {"minimum": 2}}, "required": ["position"]}
+    },
+    {
+      "if": {"properties": {"kind": {"enum": ["paper_order.partially_filled", "paper_order.filled"]}}},
+      "then": {"required": ["fill"]},
+      "else": {"not": {"required": ["fill"]}}
+    }
+  ],
+  "$defs": {
+    "UUID": {"type": "string", "pattern": "^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$"},
+    "Identifier": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9:._-]{0,127}$"},
+    "UTC": {"type": "string", "format": "date-time", "pattern": "Z$"},
+    "USD": {"type": "string", "pattern": "^(?:0|[1-9][0-9]{0,29})(?:\\.[0-9]{1,8})?$"},
+    "Raw": {"type": "string", "pattern": "^(?:0|[1-9][0-9]{0,37})$"},
+    "Position": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["instrument_id", "registry_version", "decimals", "quantity_raw", "reserved_quantity_raw"],
+      "properties": {
+        "instrument_id": {"$ref": "#/$defs/Identifier"},
+        "registry_version": {"$ref": "#/$defs/Identifier"},
+        "decimals": {"type": "integer", "minimum": 0, "maximum": 18},
+        "quantity_raw": {"$ref": "#/$defs/Raw"},
+        "reserved_quantity_raw": {"$ref": "#/$defs/Raw"}
+      }
+    },
+    "Fill": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["side", "quantity_raw", "gross_usd", "fee_usd", "observed_at", "order_id", "decision_id", "quote_id"],
+      "properties": {
+        "side": {"enum": ["BUY", "SELL"]},
+        "quantity_raw": {"type": "string", "pattern": "^[1-9][0-9]{0,37}$"},
+        "gross_usd": {"$ref": "#/$defs/USD", "not": {"pattern": "^0(?:\\.0+)?$"}},
+        "fee_usd": {"$ref": "#/$defs/USD"},
+        "observed_at": {"$ref": "#/$defs/UTC"},
+        "order_id": {"$ref": "#/$defs/UUID"},
+        "decision_id": {"$ref": "#/$defs/UUID"},
+        "quote_id": {"$ref": "#/$defs/UUID"},
+        "research_job_id": {"$ref": "#/$defs/UUID"}
+      }
+    }
+  }
+}

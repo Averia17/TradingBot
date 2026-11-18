@@ -24,6 +24,21 @@ func NewHandler(maxResearchAge time.Duration, now func() time.Time, store jobSto
 }
 
 func NewHandlerWithPaper(maxResearchAge time.Duration, now func() time.Time, store jobStore, paper paperAccountStore) http.Handler {
+	return newHandler(maxResearchAge, now, store, paper, "")
+}
+
+// NewHandlerWithResearchIdentity enables the identity protocol only for the
+// deployment-pinned registry digest. An empty digest enables legacy jobs only.
+func NewHandlerWithResearchIdentity(maxResearchAge time.Duration, now func() time.Time, store jobStore,
+	paper paperAccountStore, identityRegistrySHA256 string) (http.Handler, error) {
+	if identityRegistrySHA256 != "" && !sha256Hex.MatchString(identityRegistrySHA256) {
+		return nil, errors.New("invalid configured research identity registry SHA-256")
+	}
+	return newHandler(maxResearchAge, now, store, paper, identityRegistrySHA256), nil
+}
+
+func newHandler(maxResearchAge time.Duration, now func() time.Time, store jobStore, paper paperAccountStore,
+	identityRegistrySHA256 string) http.Handler {
 	mux := http.NewServeMux()
 	paperOrders, hasPaperOrders := paper.(paperOrderStore)
 	calendar, hasCalendar := store.(researchCalendarStore)
@@ -74,8 +89,15 @@ func NewHandlerWithPaper(maxResearchAge time.Duration, now func() time.Time, sto
 		}
 		if store != nil {
 			response["research_job_schema_version"] = jobSchemaVersion
+			jobVersions := []string{jobSchemaVersion}
+			resultVersions := []string{syntheticResultVersion, offlineResultVersion}
+			if identityRegistrySHA256 != "" {
+				jobVersions = append(jobVersions, identityJobSchemaVersion)
+				resultVersions = append(resultVersions, identityResultVersion)
+			}
+			response["research_job_schema_versions"] = jobVersions
 			response["research_result_schema_version"] = syntheticResultVersion
-			response["research_result_schema_versions"] = []string{syntheticResultVersion, offlineResultVersion}
+			response["research_result_schema_versions"] = resultVersions
 			response["research_result_source_modes"] = []string{syntheticSourceMode, offlineSourceMode}
 		}
 		if hasCalendar {
@@ -106,7 +128,7 @@ func NewHandlerWithPaper(maxResearchAge time.Duration, now func() time.Time, sto
 		mux.HandleFunc("GET /v1/paper/accounts/{id}/outcomes", bounded("paper_api_busy", orders.outcomes))
 	}
 	if store != nil {
-		h := jobHTTP{store: store, now: now, maxResearchAge: maxResearchAge}
+		h := jobHTTP{store: store, now: now, maxResearchAge: maxResearchAge, identityRegistrySHA256: identityRegistrySHA256}
 		mux.HandleFunc("POST /v1/research/jobs", bounded("job_api_busy", h.create))
 		mux.HandleFunc("GET /v1/research/jobs/{id}", h.get)
 		mux.HandleFunc("POST /v1/research/jobs/claim", bounded("job_api_busy", h.claim))

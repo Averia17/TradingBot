@@ -37,11 +37,14 @@ type PaperStore interface {
 }
 
 type Request struct {
-	Version             string           `json:"paper_apply_schema_version"`
-	JobID               string           `json:"job_id"`
-	SnapshotContext     SnapshotContext  `json:"snapshot_context"`
-	Intent              *papersim.Intent `json:"intent,omitempty"`
-	EntryScheduleSHA256 string           `json:"entry_schedule_sha256,omitempty"`
+	Version              string           `json:"paper_apply_schema_version"`
+	JobID                string           `json:"job_id"`
+	SnapshotContext      SnapshotContext  `json:"snapshot_context"`
+	Intent               *papersim.Intent `json:"intent,omitempty"`
+	EntryScheduleSHA256  string           `json:"entry_schedule_sha256,omitempty"`
+	ReviewScheduleSHA256 string           `json:"review_schedule_sha256,omitempty"`
+	ReviewOrigin         *ReviewOrigin    `json:"review_origin,omitempty"`
+	Identity             *IdentityBinding `json:"identity_binding,omitempty"`
 }
 
 type Result struct {
@@ -59,6 +62,8 @@ type storedJob struct {
 	DataManifest     researchscheduler.ArchiveReference `json:"data_manifest"`
 	PolicyVersion    string                             `json:"policy_version"`
 	MaxLLMCalls      int                                `json:"max_llm_calls"`
+	IdentityRegistry *ArchiveReference                  `json:"identity_registry,omitempty"`
+	SecurityBindings []ResearchSecurityBinding          `json:"security_bindings,omitempty"`
 }
 
 type storedResult struct {
@@ -72,7 +77,8 @@ type storedResult struct {
 // order against the currently locked version at reservation. Replay of an
 // existing exact order can still reconcile after its original TTL or version.
 func Apply(ctx context.Context, research ResearchStore, paper PaperStore, req Request, rawQuote []byte, now time.Time) (Result, error) {
-	if req.Version != Version || !uuidPattern.MatchString(req.JobID) || now.IsZero() {
+	if req.Version != Version || req.Identity != nil || req.ReviewScheduleSHA256 != "" || req.ReviewOrigin != nil ||
+		!uuidPattern.MatchString(req.JobID) || now.IsZero() {
 		return Result{}, ErrInvalid
 	}
 	job, err := research.Get(ctx, req.JobID)
@@ -86,7 +92,7 @@ func Apply(ctx context.Context, research ResearchStore, paper PaperStore, req Re
 	if err != nil {
 		return Result{}, fmt.Errorf("read durable research result: %w", err)
 	}
-	portfolio, batch, err := loadResearch(job, receipt, req.SnapshotContext, now)
+	portfolio, batch, err := loadResearch(job, receipt, req, now)
 	if err != nil {
 		return Result{}, err
 	}
@@ -94,7 +100,7 @@ func Apply(ctx context.Context, research ResearchStore, paper PaperStore, req Re
 }
 
 func applyCompleted(ctx context.Context, paper PaperStore, req Request, rawQuote []byte, portfolio contract.Portfolio, batch contract.Batch, completedAt, now time.Time) (Result, error) {
-	result := Result{Version: Version, JobID: req.JobID}
+	result := Result{Version: req.Version, JobID: req.JobID}
 	if req.Intent == nil && len(rawQuote) == 0 {
 		if !allHold(batch.Intents) {
 			return Result{}, fmt.Errorf("%w: expected a quote and intent for an actionable batch", ErrInvalid)
@@ -111,7 +117,7 @@ func applyCompleted(ctx context.Context, paper PaperStore, req Request, rawQuote
 	var in papersim.Intent
 	if req.Intent == nil {
 		var err error
-		in, err = fromQuote(req.SnapshotContext, batch, completedAt, rawQuote)
+		in, err = fromQuote(req, batch, completedAt, rawQuote)
 		if err != nil {
 			return Result{}, err
 		}
@@ -146,7 +152,7 @@ func applyCompleted(ctx context.Context, paper PaperStore, req Request, rawQuote
 }
 
 func recordRiskRefusal(ctx context.Context, paper PaperStore, req Request, in papersim.Intent, preview papersim.FixturePreview, reason ledger.RiskRefusalReason, now time.Time) error {
-	deadline := applicationDeadline(req.SnapshotContext, preview.ExpiresAt)
+	deadline := req.deadline(preview.ExpiresAt)
 	if !deadline.After(now) {
 		return nil
 	}
@@ -181,7 +187,8 @@ func (s researchOrderStore) Reserve(ctx context.Context, request ledger.Reservat
 	return s.Store.Reserve(ctx, request)
 }
 
-func fromQuote(config SnapshotContext, batch contract.Batch, decidedAt time.Time, raw []byte) (papersim.Intent, error) {
+func fromQuote(req Request, batch contract.Batch, decidedAt time.Time, raw []byte) (papersim.Intent, error) {
+	config := req.SnapshotContext
 	quote, err := papersim.ParseQuote(raw)
 	if err != nil {
 		return papersim.Intent{}, fmt.Errorf("%w: %v", ErrInvalid, err)
@@ -202,20 +209,37 @@ func fromQuote(config SnapshotContext, batch contract.Batch, decidedAt time.Time
 			return papersim.Intent{}, fmt.Errorf("%w: %v", ErrInvalid, err)
 		}
 		hash := sha256.Sum256(raw)
-		return papersim.Intent{
+		intent := papersim.Intent{
 			Version: papersim.Version, AccountID: config.AccountID, DecisionID: strings.ToLower(decision.ID), SnapshotVersion: config.SnapshotVersion,
 			Instrument: quote.Instrument, Side: quote.Side, QuantityRaw: quote.QuantityRaw, GrossLimitUSD: quote.GrossUSD, MaxFeeUSD: fee,
 			DecidedAt: decidedAt, ExpiresAt: batch.Expires, QuoteSHA256: hex.EncodeToString(hash[:]),
-		}, nil
+		}
+		if req.Identity == nil {
+			if quote.SecurityID != "" || quote.IdentityRegistrySHA256 != "" {
+				return papersim.Intent{}, ErrInvalid
+			}
+			return intent, nil
+		}
+		for _, security := range req.Identity.Securities {
+			if quote.Version == papersim.IdentityQuoteVersion && security.Symbol == symbol && security.Instrument == quote.Instrument &&
+				security.SecurityID == quote.SecurityID && req.Identity.Registry.SHA256 == quote.IdentityRegistrySHA256 {
+				intent.Version = papersim.IdentityIntentVersion
+				intent.SecurityID, intent.IdentityRegistrySHA256 = quote.SecurityID, quote.IdentityRegistrySHA256
+				intent.ExpiresAt = req.deadline(intent.ExpiresAt)
+				return intent, nil
+			}
+		}
+		return papersim.Intent{}, fmt.Errorf("%w: quote differs from the owner security binding", ErrInvalid)
 	}
 	return papersim.Intent{}, fmt.Errorf("%w: quote has no actionable research decision", ErrInvalid)
 }
 
-func loadResearch(job jobs.Job, receipt jobs.Result, config SnapshotContext, now time.Time) (contract.Portfolio, contract.Batch, error) {
+func loadResearch(job jobs.Job, receipt jobs.Result, req Request, now time.Time) (contract.Portfolio, contract.Batch, error) {
+	config := req.SnapshotContext
 	var request storedJob
 	var result storedResult
 	if receipt.JobID != job.ID || receipt.Attempt < 1 || receipt.Attempt > 3 || receipt.CompletedAt.Before(job.CreatedAt) || receipt.CompletedAt.After(now) ||
-		contract.Decode(job.Request, nil, &request) != nil || request.Version != "0.1" || request.ID != job.ID || request.PolicyVersion != config.Policy.Version ||
+		contract.Decode(job.Request, nil, &request) != nil || request.ID != job.ID || request.PolicyVersion != config.Policy.Version ||
 		contract.CheckSymbols(request.RequestedSymbols) != nil || contract.Decode(receipt.Payload, nil, &result) != nil || !knownSource(result, request, receipt.Attempt) {
 		return contract.Portfolio{}, contract.Batch{}, fmt.Errorf("%w: unsupported or unbound research receipt", ErrInvalid)
 	}
@@ -225,6 +249,9 @@ func loadResearch(job jobs.Job, receipt jobs.Result, config SnapshotContext, now
 	}
 	if err := config.CheckPortfolio(portfolio); err != nil {
 		return contract.Portfolio{}, contract.Batch{}, err
+	}
+	if !req.matchesIdentity(request, result, portfolio) {
+		return contract.Portfolio{}, contract.Batch{}, fmt.Errorf("%w: research receipt differs from the owner identity binding", ErrInvalid)
 	}
 	// The completion path validated its age at receipt. Validate the batch at
 	// that immutable instant so an old exact replay keeps its original identity.
@@ -255,7 +282,7 @@ func knownSource(result storedResult, job storedJob, attempt int) bool {
 	switch result.Version {
 	case "0.1":
 		return metadata.Source == "synthetic_fixture" && *metadata.LLMCalls == 0
-	case "0.2":
+	case "0.2", "0.3":
 		p := metadata.Provenance
 		return metadata.Source == "tradingagents_offline" && metadata.PIT != nil && !*metadata.PIT && string(metadata.CostUSD) == "null" &&
 			*metadata.LLMCalls > 0 && *metadata.LLMCalls <= job.MaxLLMCalls && p.JobID == job.ID && p.Attempt == attempt &&

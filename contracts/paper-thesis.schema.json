@@ -1,11 +1,11 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "Paper position review projection 0.1",
+  "title": "Paper position review projection",
   "type": "object",
   "additionalProperties": false,
   "required": ["paper_thesis_schema_version", "account_id", "account_version", "as_of", "research_job_id", "decision_id", "opening_order_id", "instrument", "symbol", "state", "opening_order_state", "horizon", "source_quantity_raw", "held_quantity_raw", "reserved_quantity_raw", "free_quantity_raw", "cash_usd", "reserved_cash_usd"],
   "properties": {
-    "paper_thesis_schema_version": {"const": "0.1"},
+    "paper_thesis_schema_version": {"enum": ["0.1", "0.2"]},
     "account_id": {"$ref": "paper-account.schema.json#/$defs/AccountID"},
     "account_version": {"type": "integer", "minimum": 1},
     "as_of": {"$ref": "#/$defs/Time"},
@@ -14,6 +14,7 @@
     "opening_order_id": {"$ref": "paper-account.schema.json#/$defs/AccountID"},
     "instrument": {"$ref": "paper-account.schema.json#/$defs/Instrument"},
     "symbol": {"type": "string", "pattern": "^[A-Z][A-Z0-9.\\-]{0,15}$"},
+    "opening_identity": {"$ref": "#/$defs/OpeningIdentity"},
     "state": {"enum": ["pending", "unopened", "open", "closed"]},
     "opening_order_state": {"enum": ["reserved", "unknown", "partially_filled", "cancelled", "filled"]},
     "first_fill_event_id": {"$ref": "paper-account.schema.json#/$defs/AccountID"},
@@ -30,8 +31,31 @@
     "clock_review": {"$ref": "#/$defs/Trigger", "properties": {"reason": {"enum": ["cadence", "expiry"]}}},
     "catalyst_review": {"$ref": "#/$defs/Trigger", "properties": {"reason": {"const": "catalyst"}}}
   },
+  "if": {"properties": {"paper_thesis_schema_version": {"const": "0.2"}}},
+  "then": {"required": ["opening_identity"]},
+  "else": {"not": {"required": ["opening_identity"]}},
   "$defs": {
     "Time": {"type": "string", "format": "date-time"},
+    "OpeningIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["symbol", "security_id", "instrument", "identity_registry", "application_sha256"],
+      "properties": {
+        "symbol": {"$ref": "#/properties/symbol"},
+        "security_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9:._-]{0,127}$"},
+        "instrument": {"$ref": "paper-account.schema.json#/$defs/Instrument"},
+        "identity_registry": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["ref", "sha256"],
+          "properties": {
+            "ref": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]{0,511}$", "not": {"pattern": "(^|/)([.]|[.][.])(/|$)|//|/$"}},
+            "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+          }
+        },
+        "application_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    },
     "Trigger": {
       "type": "object",
       "additionalProperties": false,

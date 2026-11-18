@@ -12,6 +12,7 @@ from typing import Annotated, Literal
 
 import msgspec
 
+from tradingbot_evaluation.equal_weight import EqualWeightSchedule, parse_rebalance_at
 from tradingbot_evaluation.operating_costs import USD, OperatingCosts, apply_operating_costs
 from tradingbot_evaluation.replay import (
     MAX_INPUT_BYTES,
@@ -20,6 +21,7 @@ from tradingbot_evaluation.replay import (
     Timestamp,
     _unique_fields,
 )
+from tradingbot_evaluation.replay_identity import SecurityID
 from tradingbot_evaluation.trend import TrendLookbackQuotes, TrendMaxGapSeconds
 
 SHA256 = Annotated[str, msgspec.Meta(pattern=r"^[a-f0-9]{64}$")]
@@ -55,22 +57,35 @@ class Comparison(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
 
 class ReplayBenchmark(msgspec.Struct, frozen=True, forbid_unknown_fields=True, omit_defaults=True):
     series_id: IntentID
-    kind: Literal["cash", "buy_and_hold", "equal_weight_once", "trend_momentum"]
+    kind: Literal[
+        "cash", "buy_and_hold", "equal_weight_once", "trend_momentum", "equal_weight_scheduled"
+    ]
     symbol: Ticker | None = None
     lookback_quotes: TrendLookbackQuotes | None = None
     max_gap_seconds: TrendMaxGapSeconds | None = None
+    rebalance_schedule: EqualWeightSchedule | msgspec.UnsetType = msgspec.UNSET
+    security_id: SecurityID | msgspec.UnsetType = msgspec.UNSET
+
+
+class IdentityReplayInputs(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
+    research_export_sha256: SHA256
+    tape_sha256: SHA256
+    identity_registry_sha256: SHA256
+    mark_max_age_seconds: Annotated[int, msgspec.Meta(ge=1, le=604800)]
 
 
 class ReplaySource(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
     replay_sha256: SHA256
-    benchmarks: Annotated[tuple[ReplayBenchmark, ...], msgspec.Meta(min_length=1, max_length=4)]
+    benchmarks: Annotated[tuple[ReplayBenchmark, ...], msgspec.Meta(min_length=1, max_length=5)]
+    identity: IdentityReplayInputs | msgspec.UnsetType = msgspec.UNSET
 
 
 class WalkForwardSource(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
     plan_sha256: SHA256
     tape_sha256: SHA256
     mark_max_age_seconds: Annotated[int, msgspec.Meta(ge=1, le=604800)]
-    benchmarks: Annotated[tuple[ReplayBenchmark, ...], msgspec.Meta(min_length=1, max_length=4)]
+    benchmarks: Annotated[tuple[ReplayBenchmark, ...], msgspec.Meta(min_length=1, max_length=5)]
+    identity_registry_sha256: SHA256 | msgspec.UnsetType = msgspec.UNSET
 
 
 ResearchVariant = Literal["full_graph", "no_memory", "single_analyst", "factual_reflection"]
@@ -83,6 +98,7 @@ class AblationSource(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
     max_total_llm_calls: Annotated[int, msgspec.Meta(ge=1, le=8192)]
     baseline: IntentID
     variants: Annotated[dict[IntentID, ResearchVariant], msgspec.Meta(min_length=2, max_length=4)]
+    identity_registry_sha256: SHA256 | msgspec.UnsetType = msgspec.UNSET
 
 
 PaperAccount = Annotated[
@@ -181,6 +197,7 @@ class ReplayProvenance(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
     mark_policy: Literal["last_known_bid_at_utc_day_end"]
     execution_costs: Literal["bid_ask_and_simulated_commission"]
     external_costs_usd: None
+    identity: IdentityReplayInputs | msgspec.UnsetType = msgspec.UNSET
 
 
 class PaperNavProvenance(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
@@ -200,6 +217,7 @@ class WalkForwardProvenance(msgspec.Struct, frozen=True, forbid_unknown_fields=T
     llm_calls_used: Annotated[int, msgspec.Meta(ge=1, le=2048)]
     max_total_llm_calls: Annotated[int, msgspec.Meta(ge=1, le=2048)]
     replay: ReplayProvenance
+    identity_registry_sha256: SHA256 | msgspec.UnsetType = msgspec.UNSET
 
 
 class AblationArm(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
@@ -227,20 +245,28 @@ class EvaluationEvidence(msgspec.Struct, frozen=True, forbid_unknown_fields=True
     ablation_provenance: AblationProvenance | msgspec.UnsetType = msgspec.UNSET
 
 
-def _decode(data: bytes, contract):
+def _input_document(data: bytes):
     if len(data) > MAX_INPUT_BYTES:
         raise ValueError("Statistics input exceeds the input limit")
-    return msgspec.convert(json.loads(data, object_pairs_hook=_unique_fields), type=contract)
+    return json.loads(data, object_pairs_hook=_unique_fields)
 
 
 def load_protocol(data: bytes) -> EvaluationProtocol:
-    protocol = _decode(data, EvaluationProtocol)
+    document = _input_document(data)
+    protocol = msgspec.convert(document, type=EvaluationProtocol)
+    for source in ("replay_source", "walk_forward_source"):
+        if source not in document:
+            continue
+        for mapping in document[source]["benchmarks"]:
+            if "rebalance_schedule" in mapping:
+                for at in mapping["rebalance_schedule"]["rebalance_at"]:
+                    parse_rebalance_at(at)
     _validate_protocol(protocol)
     return protocol
 
 
 def load_evidence(data: bytes) -> EvaluationEvidence:
-    evidence = _decode(data, EvaluationEvidence)
+    evidence = msgspec.convert(_input_document(data), type=EvaluationEvidence)
     _validate_evidence_basis(evidence)
     return evidence
 
@@ -253,6 +279,10 @@ def _validate_evidence_basis(evidence: EvaluationEvidence) -> None:
         or evidence.paper_nav_provenance is not msgspec.UNSET
         or evidence.walk_forward_provenance is not msgspec.UNSET
         or evidence.ablation_provenance is not msgspec.UNSET
+        or (
+            evidence.replay_provenance is not msgspec.UNSET
+            and evidence.replay_provenance.identity is not msgspec.UNSET
+        )
     ):
         raise ValueError("Evidence daily_nav_basis and new source provenance require 0.2")
     walk = evidence.walk_forward_provenance
@@ -427,6 +457,13 @@ def _validate_forward_paper(
 def _validate_replay_source(
     protocol: EvaluationProtocol, source: ReplaySource | WalkForwardSource
 ) -> None:
+    bound = (
+        source.identity is not msgspec.UNSET
+        if isinstance(source, ReplaySource)
+        else source.identity_registry_sha256 is not msgspec.UNSET
+    )
+    if bound and protocol.schema_version != "0.2":
+        raise ValueError("Stable identity replay evidence requires protocol 0.2")
     if protocol.source_mode != "synthetic_fixture" or (
         protocol.schema_version == "0.1" and protocol.nav_basis != "execution_net"
     ):
@@ -446,7 +483,16 @@ def _validate_replay_source(
             "Replay benchmark mapping must cover each registered synthetic series once"
         )
     for mapping in source.benchmarks:
-        if (mapping.kind in {"buy_and_hold", "trend_momentum"}) != (mapping.symbol is not None):
+        names_one_security = mapping.kind in {"buy_and_hold", "trend_momentum"}
+        if bound and (
+            mapping.symbol is not None
+            or names_one_security != (mapping.security_id is not msgspec.UNSET)
+        ):
+            raise ValueError("Identity buy_and_hold and trend benchmarks require a stable security_id")
+        if not bound and (
+            mapping.security_id is not msgspec.UNSET
+            or names_one_security != (mapping.symbol is not None)
+        ):
             raise ValueError(
                 "The buy_and_hold and trend_momentum replay benchmarks require a symbol"
             )
@@ -458,6 +504,15 @@ def _validate_replay_source(
         elif mapping.lookback_quotes is not None or mapping.max_gap_seconds is not None:
             raise ValueError(
                 "Only the trend_momentum replay benchmark accepts lookback and max gap"
+            )
+        schedule = mapping.rebalance_schedule
+        if (mapping.kind == "equal_weight_scheduled") != (schedule is not msgspec.UNSET):
+            raise ValueError("Only equal_weight_scheduled requires a frozen rebalance schedule")
+        if schedule is not msgspec.UNSET:
+            days = protocol.expected_nav_dates
+            schedule.validate_window(
+                datetime.combine(days[0], time.max, tzinfo=UTC),
+                datetime.combine(days[-1], time.max, tzinfo=UTC),
             )
 
 
@@ -486,6 +541,12 @@ def _validate_ablation_evidence(
             "Ablation evidence differs from the frozen variants, inputs or call limits"
         )
     walks = [arm.walk for arm in evidence.arms.values()]
+    if any(
+        walk.identity_registry_sha256 != source.identity_registry_sha256
+        or walk.replay.identity is not msgspec.UNSET
+        for walk in walks
+    ):
+        raise ValueError("Ablation evidence arms must match the frozen registry SHA-256")
     if len({(walk.step_count, walk.max_total_llm_calls) for walk in walks}) != 1:
         raise ValueError("Ablation arms must use identical step counts and call limits")
     if sum(walk.llm_calls_used for walk in walks) > source.max_total_llm_calls:
@@ -757,6 +818,8 @@ def evaluate_statistics(
             raise ValueError("Replay provenance requires a frozen replay source")
     elif provenance is msgspec.UNSET or provenance.normalized_replay_sha256 != source.replay_sha256:
         raise ValueError("Evidence replay provenance must match the frozen replay SHA-256")
+    elif provenance.identity != source.identity:
+        raise ValueError("Evidence identity replay provenance must match all frozen source pins")
     paper = evidence.paper_nav_provenance
     if protocol.paper_nav_sha256 is msgspec.UNSET:
         if paper is not msgspec.UNSET:
@@ -783,6 +846,11 @@ def evaluate_statistics(
         raise ValueError(
             "Evidence walk-forward provenance must match the frozen plan and tape hashes"
         )
+    elif (
+        walk.identity_registry_sha256 != walk_source.identity_registry_sha256
+        or walk.replay.identity is not msgspec.UNSET
+    ):
+        raise ValueError("Evidence walk-forward provenance must match the frozen registry SHA-256")
     _validate_ablation_evidence(protocol.ablation_source, evidence.ablation_provenance)
     split = _split_audit(protocol.splits, evidence.decisions)
     navs = _aligned_nav(protocol, evidence.daily_nav)
@@ -895,7 +963,7 @@ def evaluate_statistics(
         result["comparisons_nav_basis"] = "execution_net"
         result["requested_nav_basis_available"] = True
     if provenance is not msgspec.UNSET:
-        result["replay_provenance_declared"] = msgspec.structs.asdict(provenance)
+        result["replay_provenance_declared"] = msgspec.to_builtins(provenance)
     if paper is not msgspec.UNSET:
         result["paper_nav_provenance_declared"] = msgspec.to_builtins(paper)
     if walk is not msgspec.UNSET:

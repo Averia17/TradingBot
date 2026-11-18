@@ -6,9 +6,9 @@ from pathlib import Path
 
 from pydantic import TypeAdapter, field_validator
 
-from tradingbot.adapters.offline import HistoricalVariant, OfflineJob, analyze_historical
+from tradingbot.adapters.offline import HistoricalVariant, OfflineJobRequest, analyze_historical
 from tradingbot.contracts import DECIMAL_PATTERN, Contract, PortfolioSnapshot
-from tradingbot.snapshots import CaptureTime, decode_pinned_json
+from tradingbot.snapshots import ArchiveReference, CaptureTime, decode_pinned_json
 
 MAX_STEP_BYTES = 256 * 1024
 CAPTURE_TIME = TypeAdapter(CaptureTime)
@@ -24,7 +24,7 @@ def _check_wire_amounts(values: dict, fields: tuple[str, ...]) -> None:
 
 
 class HistoricalStep(Contract):
-    job: OfflineJob
+    job: OfflineJobRequest
     completed_at: datetime
     variant: HistoricalVariant = "full_graph"
 
@@ -56,11 +56,16 @@ class HistoricalStep(Contract):
 
 
 def run_historical_step(
-    data: bytes, archive_root: Path, *, usage_output: Path | None = None
+    data: bytes,
+    archive_root: Path,
+    *,
+    usage_output: Path | None = None,
+    owner_identity_registry: ArchiveReference | dict | None = None,
 ) -> dict:
     if len(data) > MAX_STEP_BYTES:
         raise ValueError("historical step exceeds the input size limit")
     step = HistoricalStep.model_validate(decode_pinned_json(data))
     return analyze_historical(
-        step.job, step.completed_at, archive_root, variant=step.variant, usage_output=usage_output
+        step.job, step.completed_at, archive_root, variant=step.variant, usage_output=usage_output,
+        owner_identity_registry=owner_identity_registry,
     )

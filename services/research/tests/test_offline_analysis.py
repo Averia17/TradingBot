@@ -12,6 +12,7 @@ from tradingbot.adapters import offline
 from tradingbot.adapters.offline import OfflineAnalysisCancelled, ScriptedModel, analyze_offline
 from tradingbot.budget import CallBudgetExceeded
 from tradingbot.contracts import DecisionBatch
+from tradingbot.selection import plan_research
 from tradingbot.snapshots import load_snapshot
 from tradingbot.upstream import _git, _verify_repo
 
@@ -208,9 +209,11 @@ def test_verified_archive_observations_reach_actual_graph_prompts_and_evidence(t
     request = archive_job(
         tmp_path,
         [
-            archived_bar("early", "123.45678901"),
+            archived_bar("early", "123.45678901")
+            | {"payload": {"close": "123.45678901", "security_id": "fixture:tsla-at-cutoff"}},
             archived_bar("oversized", "7" * 8000),
-            archived_bar("future", "future-value", at="2020-01-03T16:00:00Z"),
+            archived_bar("future", "future-value", at="2020-01-03T16:00:00Z")
+            | {"payload": {"close": "future-value", "security_id": "fixture:future-issuer"}},
             archived_bar("late-receipt", "locally-unseen") | {"ingested_at": "2020-01-03T16:00:00Z"},
             archived_bar("other", "other-symbol-value", symbol="NVDA"),
         ],
@@ -271,4 +274,89 @@ def test_invalid_archive_stops_before_permit_or_model_call(tmp_path, monkeypatch
         analyze_offline(
             request, 1, datetime.now(UTC) + timedelta(minutes=5), Event(),
             archive_root=tmp_path, authorize_call=forbidden,
+        )
+
+
+def test_ticker_reuse_stops_research_before_mixing_issuer_observations(tmp_path, monkeypatch):
+    records = [
+        archived_bar("previous-issuer", "12.5", at="2020-01-01T16:00:00Z")
+        | {"payload": {"close": "12.5", "security_id": "fixture:issuer-old"}},
+        archived_bar("current-issuer", "125")
+        | {"payload": {"close": "125", "security_id": "fixture:issuer-new"}},
+    ]
+    request = archive_job(tmp_path, records)
+    request["portfolio"]["as_of"] = "2020-01-02T16:00:00Z"
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("the job has no stable security binding for a reused ticker")
+
+    monkeypatch.setattr(offline, "_verified_upstream", forbidden)
+    with pytest.raises(ValueError, match="multiple security IDs for TSLA"):
+        analyze_offline(
+            request, 1, datetime.now(UTC) + timedelta(minutes=5), Event(),
+            archive_root=tmp_path, authorize_call=forbidden,
+        )
+
+
+def test_offline_bound_research_preserves_selection_projection_and_excludes_former_issuer():
+    archive_root = Path(__file__).resolve().parents[1] / "examples/selection"
+    selection = json.loads((archive_root / "identity-request.json").read_bytes())
+    registry = selection["identity_registry"]
+    screened = plan_research(archive_root, selection, trusted_identity_registry=registry)
+    request = screened["job"]
+    authorized = set()
+    result = analyze_offline(
+        request, 1, datetime.now(UTC) + timedelta(minutes=5), Event(),
+        archive_root=archive_root, owner_identity_registry=registry, authorize_call=authorized.add,
+    )
+    proof = result["metadata"]["provenance"]
+    assert result["result_schema_version"] == "0.3"
+    assert proof["identity_registry"] == registry
+    assert proof["security_bindings"] == request["security_bindings"]
+    assert proof["projected_snapshot_sha256"] == screened["snapshot_sha256"]
+    assert len(authorized) == result["metadata"]["llm_calls"]
+    assert "fixture-current" in result["reports"]["TSLA"]["market_report"]
+    assert "fixture-previous" not in json.dumps(result["reports"])
+
+
+def test_offline_bound_research_requires_independent_owner_pin(monkeypatch):
+    archive_root = Path(__file__).resolve().parents[1] / "examples/selection"
+    selection = json.loads((archive_root / "identity-request.json").read_bytes())
+    registry = selection["identity_registry"]
+    request = plan_research(archive_root, selection, trusted_identity_registry=registry)["job"]
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("the rejected identity request cannot start the model graph")
+
+    monkeypatch.setattr(offline, "_verified_upstream", forbidden)
+    for owner_pin in (None, registry | {"ref": "another-registry.json"}):
+        with pytest.raises(ValueError, match="owner-approved identity registry"):
+            analyze_offline(
+                request, 1, datetime.now(UTC) + timedelta(minutes=5), Event(),
+                archive_root=archive_root, owner_identity_registry=owner_pin,
+                authorize_call=forbidden,
+            )
+
+
+def test_offline_bound_listing_without_issuer_observations_uses_no_permit(tmp_path, monkeypatch):
+    examples = Path(__file__).resolve().parents[1] / "examples/selection"
+    selection = json.loads((examples / "identity-request.json").read_bytes())
+    registry = selection["identity_registry"]
+    request = plan_research(examples, selection, trusted_identity_registry=registry)["job"]
+    (tmp_path / registry["ref"]).write_bytes((examples / registry["ref"]).read_bytes())
+    ref = request["data_manifest"]["ref"]
+    market = json.loads((examples / ref).read_bytes())
+    market["records"] = [row for row in market["records"] if row["kind"] == "listing"]
+    raw = json.dumps(market).encode()
+    (tmp_path / ref).write_bytes(raw)
+    request["data_manifest"]["sha256"] = hashlib.sha256(raw).hexdigest()
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("listing identity alone cannot supply issuer research observations")
+
+    monkeypatch.setattr(offline, "_verified_upstream", forbidden)
+    with pytest.raises(ValueError, match="available issuer observation"):
+        analyze_offline(
+            request, 1, datetime.now(UTC) + timedelta(minutes=5), Event(),
+            archive_root=tmp_path, owner_identity_registry=registry, authorize_call=forbidden,
         )

@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "Research job HTTP protocol 0.1",
-  "$ref": "#/$defs/JobRequest",
+  "title": "Research job HTTP protocols 0.1 and 0.2",
+  "$ref": "#/$defs/SupportedJobRequest",
   "$defs": {
     "UUID": {
       "type": "string",
@@ -37,13 +37,65 @@
         "max_llm_calls": {"type": "integer", "minimum": 1, "maximum": 64}
       }
     },
+    "PinnedLocalReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ref", "sha256"],
+      "properties": {
+        "ref": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]{0,511}$",
+          "not": {"pattern": "(^|/)([.]|[.][.])(/|$)|//|/$"}
+        },
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    },
+    "SecurityBindings": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 100,
+      "uniqueItems": true,
+      "description": "One distinct security ID for each requested symbol, in requested_symbols order.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["symbol", "security_id"],
+        "properties": {
+          "symbol": {"$ref": "#/$defs/JobRequest/properties/requested_symbols/items"},
+          "security_id": {"$ref": "#/$defs/Identifier"}
+        }
+      }
+    },
+    "IdentityJobRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["job_schema_version", "job_id", "portfolio", "requested_symbols", "data_manifest", "policy_version", "max_llm_calls", "identity_registry", "security_bindings"],
+      "properties": {
+        "job_schema_version": {"const": "0.2"},
+        "job_id": {"$ref": "#/$defs/JobRequest/properties/job_id"},
+        "portfolio": {"$ref": "#/$defs/JobRequest/properties/portfolio"},
+        "requested_symbols": {"$ref": "#/$defs/JobRequest/properties/requested_symbols"},
+        "data_manifest": {"$ref": "#/$defs/PinnedLocalReference"},
+        "policy_version": {"$ref": "#/$defs/JobRequest/properties/policy_version"},
+        "max_llm_calls": {"$ref": "#/$defs/JobRequest/properties/max_llm_calls"},
+        "identity_registry": {"$ref": "#/$defs/PinnedLocalReference"},
+        "security_bindings": {"$ref": "#/$defs/SecurityBindings"}
+      }
+    },
+    "SupportedJobRequest": {
+      "oneOf": [
+        {"$ref": "#/$defs/JobRequest"},
+        {"$ref": "#/$defs/IdentityJobRequest"}
+      ]
+    },
     "ClaimRequest": {
       "type": "object",
       "additionalProperties": false,
       "required": ["worker_id", "claim_id"],
       "properties": {
         "worker_id": {"$ref": "#/$defs/Identifier"},
-        "claim_id": {"$ref": "#/$defs/UUID"}
+        "claim_id": {"$ref": "#/$defs/UUID"},
+        "identity_registry_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
       }
     },
     "HeartbeatRequest": {
@@ -97,7 +149,7 @@
     },
     "ClaimResponse": {
       "allOf": [{"$ref": "#/$defs/Lease"}],
-      "properties": {"request": {"$ref": "#/$defs/JobRequest"}},
+      "properties": {"request": {"$ref": "#/$defs/SupportedJobRequest"}},
       "required": ["request"],
       "unevaluatedProperties": false
     },

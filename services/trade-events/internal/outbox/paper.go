@@ -40,19 +40,23 @@ func (o *Outbox) RelayPaper(ctx context.Context, producer *kgo.Client) error {
 	if err := pgqueue.Register(worker, publishPaperJob, handler); err != nil {
 		return err
 	}
+	return runHandoff(ctx, worker, "paper fill", o.queueOnePaper)
+}
+
+func runHandoff(ctx context.Context, worker *pgqueue.Worker, name string, queueOne func(context.Context) (bool, error)) error {
 	group, runCtx := errgroup.WithContext(ctx)
 	group.Go(func() error {
 		if err := worker.Start(runCtx); err != nil {
 			return err
 		}
 		if runCtx.Err() == nil {
-			return errors.New("paper fill relay stopped unexpectedly")
+			return fmt.Errorf("%s relay stopped unexpectedly", name)
 		}
 		return nil
 	})
 	group.Go(func() error {
 		for runCtx.Err() == nil {
-			moved, err := o.queueOnePaper(runCtx)
+			moved, err := queueOne(runCtx)
 			if err != nil {
 				return err
 			}
