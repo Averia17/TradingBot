@@ -1,0 +1,129 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "PaperInstrument": {
+      "additionalProperties": false,
+      "properties": {
+        "instrument_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9:._-]{0,127}$",
+          "title": "Instrument Id",
+          "type": "string"
+        },
+        "registry_version": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9:._-]{0,127}$",
+          "title": "Registry Version",
+          "type": "string"
+        },
+        "decimals": {
+          "maximum": 18,
+          "minimum": 0,
+          "title": "Decimals",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "instrument_id",
+        "registry_version",
+        "decimals"
+      ],
+      "title": "PaperInstrument",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "0.1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "source_mode": {
+      "const": "paper_simulated_ledger",
+      "title": "Source Mode",
+      "type": "string"
+    },
+    "accounting_method": {
+      "const": "fifo_recording_order_usd_scale8_v1",
+      "title": "Accounting Method",
+      "type": "string"
+    },
+    "account_id": {
+      "pattern": "^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$",
+      "title": "Account Id",
+      "type": "string"
+    },
+    "account_version": {
+      "maximum": 9223372036854775807,
+      "minimum": 2,
+      "title": "Account Version",
+      "type": "integer"
+    },
+    "fill_event_id": {
+      "pattern": "^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$",
+      "title": "Fill Event Id",
+      "type": "string"
+    },
+    "decision_id": {
+      "pattern": "^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$",
+      "title": "Decision Id",
+      "type": "string"
+    },
+    "policy_version": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9:._-]{0,127}$",
+      "title": "Policy Version",
+      "type": "string"
+    },
+    "risk_group": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9:._-]{0,127}$",
+      "title": "Risk Group",
+      "type": "string"
+    },
+    "instrument": {
+      "$ref": "#/$defs/PaperInstrument"
+    },
+    "quantity_raw": {
+      "pattern": "^[1-9][0-9]{0,37}$",
+      "title": "Quantity Raw",
+      "type": "string"
+    },
+    "gross_usd": {
+      "pattern": "^(?:0|[1-9][0-9]{0,29})(?:\\.[0-9]{1,8})?$",
+      "title": "Gross Usd",
+      "type": "string"
+    },
+    "fee_usd": {
+      "pattern": "^(?:0|[1-9][0-9]{0,29})(?:\\.[0-9]{1,8})?$",
+      "title": "Fee Usd",
+      "type": "string"
+    },
+    "cost_basis_usd": {
+      "pattern": "^(?:0|[1-9][0-9]{0,59})(?:\\.[0-9]{1,8})?$",
+      "title": "Cost Basis Usd",
+      "type": "string"
+    },
+    "net_pnl_usd": {
+      "pattern": "^-?(?:0|[1-9][0-9]{0,59})(?:\\.[0-9]{1,8})?$",
+      "title": "Net Pnl Usd",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "source_mode",
+    "accounting_method",
+    "account_id",
+    "account_version",
+    "fill_event_id",
+    "decision_id",
+    "policy_version",
+    "risk_group",
+    "instrument",
+    "quantity_raw",
+    "gross_usd",
+    "fee_usd",
+    "cost_basis_usd",
+    "net_pnl_usd"
+  ],
+  "title": "PaperOutcome",
+  "type": "object"
+}

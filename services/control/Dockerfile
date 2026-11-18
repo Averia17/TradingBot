@@ -6,9 +6,10 @@ COPY go.mod go.sum ./
 RUN go mod download && go mod verify
 COPY cmd ./cmd
 COPY internal ./internal
-RUN go build -mod=readonly -trimpath -o /out/control ./cmd/control
+RUN mkdir /out && go build -mod=readonly -trimpath -o /out/ \
+    ./cmd/control ./cmd/paper-apply ./cmd/paper-nav ./cmd/paper-quote-pin
 
 FROM busybox:latest@sha256:dc2d74b28e4cf8984fa52af1f39bc7c3d9c73760b41a74d629f5d11b1ab28616
-COPY --from=build /out/control /usr/local/bin/control
+COPY --from=build /out/ /usr/local/bin/
 USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/control"]

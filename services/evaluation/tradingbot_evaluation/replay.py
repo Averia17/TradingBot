@@ -1,10 +1,15 @@
 """Chronological synthetic quote replay through Nautilus' native market simulator."""
 
 import json
+from bisect import bisect_right
 from collections import defaultdict, deque
+from collections.abc import Callable
 from datetime import UTC, datetime
 from decimal import Decimal
+from enum import IntEnum
+from fractions import Fraction
 from hashlib import sha256
+from operator import itemgetter
 from typing import Annotated, Literal
 
 import msgspec
@@ -17,7 +22,7 @@ from nautilus_trader.model.data import CustomData, DataType, QuoteTick
 from nautilus_trader.model.enums import AccountType, OmsType, OrderSide, TimeInForce
 from nautilus_trader.model.identifiers import ClientId, InstrumentId, Symbol, Venue
 from nautilus_trader.model.instruments import Equity
-from nautilus_trader.model.objects import Money, Price, Quantity
+from nautilus_trader.model.objects import PRICE_MAX, QUANTITY_MAX, Money, Price, Quantity
 from nautilus_trader.trading.strategy import Strategy
 
 REPLAY_VERSION = "0.1"
@@ -58,6 +63,15 @@ class CashDividend(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
     cash_per_share_usd: MoneyText
 
 
+class StockSplit(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
+    action_id: IntentID
+    symbol: Ticker
+    available_at: Timestamp
+    effective_at: Timestamp
+    new_shares: Shares
+    old_shares: Shares
+
+
 class Replay(msgspec.Struct, frozen=True, forbid_unknown_fields=True, omit_defaults=True):
     schema_version: Literal["0.1"]
     source_mode: Literal["synthetic_fixture"]
@@ -66,6 +80,7 @@ class Replay(msgspec.Struct, frozen=True, forbid_unknown_fields=True, omit_defau
     quotes: Annotated[tuple[Quote, ...], msgspec.Meta(min_length=1)]
     orders: tuple[Order, ...]
     cash_dividends: tuple[CashDividend, ...] = ()
+    stock_splits: tuple[StockSplit, ...] = ()
 
 
 def _nanoseconds(at: datetime) -> int:
@@ -85,6 +100,10 @@ def _unique_fields(pairs):
     if len(fields) != len(pairs):
         raise ValueError("Duplicate replay object field")
     return fields
+
+
+def replay_sha256(replay: Replay) -> str:
+    return sha256(msgspec.json.encode(replay)).hexdigest()
 
 
 def load_replay(data: bytes) -> Replay:
@@ -115,7 +134,9 @@ def load_replay(data: bytes) -> Replay:
         if order.ready_at >= order.expires_at:
             raise ValueError("Order must expire after its earliest admission time")
         seen_orders.add(order.intent_id)
-    _validate_dividends(replay.cash_dividends, {symbol for symbol, _ in seen_quotes})
+    symbols = {symbol for symbol, _ in seen_quotes}
+    _validate_dividends(replay.cash_dividends, symbols)
+    _validate_splits(replay, symbols)
     return replay
 
 
@@ -137,7 +158,73 @@ def _validate_dividends(dividends: tuple[CashDividend, ...], symbols: set[str]) 
         seen.add(dividend.action_id)
 
 
-class _DividendBoundary(Data):
+def _validate_splits(replay: Replay, symbols: set[str]) -> None:
+    seen_ids = {action.action_id for action in replay.cash_dividends}
+    seen_times = set()
+    for action in replay.stock_splits:
+        available = _nanoseconds(action.available_at)
+        effective = _nanoseconds(action.effective_at)
+        key = (action.symbol, effective)
+        if action.action_id in seen_ids or key in seen_times or action.symbol not in symbols:
+            raise ValueError("Stock split requires a unique action ID, time and quoted symbol")
+        if (
+            available > effective
+            or not 1 <= action.new_shares <= 1_000_000
+            or not 1 <= action.old_shares <= 1_000_000
+            or action.new_shares == action.old_shares
+        ):
+            raise ValueError("Stock split requires a known effective time and a valid share ratio")
+        seen_ids.add(action.action_id)
+        seen_times.add(key)
+
+
+class _SplitUnits:
+    """Use first-era share units in Nautilus, exchanging exact raw units at the boundary."""
+
+    def __init__(self, splits: tuple[StockSplit, ...], horizon: datetime):
+        self._epochs = defaultdict(list)
+        for action in sorted(splits, key=lambda item: item.effective_at):
+            if action.effective_at > horizon:
+                break
+            epochs = self._epochs[action.symbol]
+            previous = epochs[-1][1] if epochs else Fraction(1)
+            factor = previous * Fraction(action.new_shares, action.old_shares)
+            if max(factor.numerator, factor.denominator) > QUANTITY_MAX:
+                raise ValueError("Cumulative stock split ratio exceeds the native quantity limit")
+            epochs.append((action.effective_at, factor))
+
+    def _epoch(self, symbol: str, at: datetime) -> int:
+        return bisect_right(self._epochs.get(symbol, ()), at, key=itemgetter(0))
+
+    def factor_at(self, symbol: str, at: datetime) -> Fraction:
+        epoch = self._epoch(symbol, at)
+        return self._epochs[symbol][epoch - 1][1] if epoch else Fraction(1)
+
+    def quote_is_current(self, quote: Quote, at: datetime) -> bool:
+        return self._epoch(quote.symbol, quote.observed_at) == self._epoch(quote.symbol, at)
+
+
+def _whole_shares(value: Fraction) -> int:
+    if value.denominator != 1:
+        raise ValueError("Stock split cannot be represented in whole shares on the native grid")
+    return value.numerator
+
+
+def _native_quantity(raw_quantity: int, factor: Fraction) -> Quantity:
+    quantity = _whole_shares(raw_quantity / factor)
+    if quantity > QUANTITY_MAX:
+        raise ValueError("Stock split quantity exceeds the native quantity limit")
+    return Quantity.from_int(quantity)
+
+
+def _scaled_usd(value: Decimal, factor: Fraction) -> Decimal:
+    cents = Fraction(value) * 100 * factor
+    if cents.denominator != 1 or cents > int(PRICE_MAX) * 100:
+        raise ValueError("Stock split price must fit in exact native USD cents")
+    return Decimal(cents.numerator) / 100
+
+
+class _CorporateActionBoundary(Data):
     def __init__(self, timestamp_ns: int):
         self.timestamp_ns = timestamp_ns
 
@@ -150,74 +237,116 @@ class _DividendBoundary(Data):
         return self.timestamp_ns
 
 
-class _DividendModule(SimulationModule):
+class _ActionStage(IntEnum):
+    SPLIT = 0
+    ENTITLEMENT = 1
+    PAYMENT = 2
+
+
+class _CorporateActions(SimulationModule):
     def __init__(
-        self, dividends: tuple[CashDividend, ...], horizon_ns: int, instruments: dict[str, Equity]
+        self,
+        replay: Replay,
+        horizon_ns: int,
+        strategy: "_ReplayStrategy",
     ):
         super().__init__(SimulationModuleConfig())
-        self.instruments = instruments
+        self.strategy = strategy
         events = []
-        for dividend in dividends:
+        for action in replay.stock_splits:
+            split_ns = _nanoseconds(action.effective_at)
+            if split_ns <= horizon_ns:
+                events.append((split_ns, _ActionStage.SPLIT, action))
+        for dividend in replay.cash_dividends:
             entitlement_ns = _nanoseconds(dividend.entitlement_at)
             paid_ns = _nanoseconds(dividend.paid_at)
             if entitlement_ns <= horizon_ns:
-                events.append((entitlement_ns, False, dividend))
+                events.append((entitlement_ns, _ActionStage.ENTITLEMENT, dividend))
             if paid_ns <= horizon_ns:
-                events.append((paid_ns, True, dividend))
+                events.append((paid_ns, _ActionStage.PAYMENT, dividend))
         self.timeline = deque(
             sorted(events, key=lambda item: (item[0], item[1], item[2].action_id))
         )
         self.receipts = {}
+        self.split_events = []
         self.cash_received = Decimal(0)
 
     def boundaries(self) -> list[CustomData]:
-        data_type = DataType(_DividendBoundary)
+        data_type = DataType(_CorporateActionBoundary)
         return [
-            CustomData(data_type, _DividendBoundary(timestamp_ns))
+            CustomData(data_type, _CorporateActionBoundary(timestamp_ns))
             for timestamp_ns in sorted({timestamp for timestamp, _, _ in self.timeline})
         ]
 
     def process(self, timestamp_ns: int) -> None:
         while self.timeline and self.timeline[0][0] <= timestamp_ns:
-            boundary_ns, pay, dividend = self.timeline.popleft()
+            boundary_ns, stage, action = self.timeline.popleft()
             if boundary_ns != timestamp_ns:
-                raise RuntimeError("Nautilus passed a cash dividend boundary without settling it")
-            if pay:
-                receipt = self.receipts[dividend.action_id]
-                amount = Decimal(receipt["entitled_shares"]) * Decimal(dividend.cash_per_share_usd)
+                raise RuntimeError(
+                    "Nautilus passed a corporate action boundary without settling it"
+                )
+            if stage == _ActionStage.SPLIT:
+                self._record_split(action, boundary_ns)
+            elif stage == _ActionStage.PAYMENT:
+                receipt = self.receipts[action.action_id]
+                amount = Decimal(receipt["entitled_shares"]) * Decimal(action.cash_per_share_usd)
                 if amount:
                     self.exchange.adjust_account(Money.from_decimal(amount, USD))
                 self.cash_received += amount
                 receipt.update(status="paid", cash_credited_usd=_usd(amount))
             else:
-                instrument = self.instruments[dividend.symbol]
-                shares = sum(
-                    (
-                        position.quantity.as_decimal()
-                        for position in self.exchange.cache.positions_open(
-                            instrument_id=instrument.id
-                        )
-                    ),
-                    Decimal(0),
+                shares = _whole_shares(
+                    self._held_units(action.symbol)
+                    * self.strategy.units.factor_at(action.symbol, action.entitlement_at)
                 )
-                self.receipts[dividend.action_id] = {
-                    "action_id": dividend.action_id,
-                    "symbol": dividend.symbol,
+                self.receipts[action.action_id] = {
+                    "action_id": action.action_id,
+                    "symbol": action.symbol,
                     "entitlement_at_ns": str(boundary_ns),
-                    "paid_at_ns": str(_nanoseconds(dividend.paid_at)),
+                    "paid_at_ns": str(_nanoseconds(action.paid_at)),
                     "entitled_shares": str(shares),
                     "cash_credited_usd": "0.00",
                     "status": "pending_payment",
                 }
+
+    def _held_units(self, symbol: str) -> Fraction:
+        instrument = self.strategy.instruments[symbol]
+        return sum(
+            (
+                Fraction(position.quantity.as_decimal())
+                for position in self.exchange.cache.positions_open(instrument_id=instrument.id)
+            ),
+            Fraction(0),
+        )
+
+    def _record_split(self, action: StockSplit, boundary_ns: int) -> None:
+        held = self._held_units(action.symbol)
+        after = held * self.strategy.units.factor_at(action.symbol, action.effective_at)
+        before = after * Fraction(action.old_shares, action.new_shares)
+        self.split_events.append(
+            {
+                "action_id": action.action_id,
+                "symbol": action.symbol,
+                "effective_at_ns": str(boundary_ns),
+                "new_shares": action.new_shares,
+                "old_shares": action.old_shares,
+                "shares_before": str(_whole_shares(before)),
+                "shares_after": str(_whole_shares(after)),
+            }
+        )
+        self.strategy.cancel_prior_units(action)
 
     def log_diagnostics(self, logger) -> None:
         pass
 
 
 class _ReplayStrategy(Strategy):
-    def __init__(self, instruments: dict[str, Equity], orders: tuple[Order, ...]):
+    def __init__(
+        self, instruments: dict[str, Equity], orders: tuple[Order, ...], units: _SplitUnits
+    ):
         super().__init__()
         self.instruments = instruments
+        self.units = units
         self.pending = defaultdict(deque)
         for order in sorted(orders, key=lambda item: (item.ready_at, item.intent_id)):
             self.pending[order.symbol].append(order)
@@ -229,8 +358,17 @@ class _ReplayStrategy(Strategy):
         for instrument in self.instruments.values():
             self.subscribe_quote_ticks(instrument.id)
 
+    def cancel_prior_units(self, action: StockSplit) -> None:
+        queue = self.pending[action.symbol]
+        while queue and queue[0].ready_at < action.effective_at:
+            order = queue.popleft()
+            self.statuses[order.intent_id] = (
+                "expired" if order.expires_at <= action.effective_at else "cancelled_stock_split"
+            )
+
     def on_quote_tick(self, tick):
-        queue = self.pending[tick.instrument_id.symbol.value]
+        symbol = tick.instrument_id.symbol.value
+        queue = self.pending[symbol]
         while queue:
             order = queue[0]
             if _nanoseconds(order.expires_at) <= tick.ts_init:
@@ -240,24 +378,25 @@ class _ReplayStrategy(Strategy):
             if _nanoseconds(order.ready_at) >= min(tick.ts_event, tick.ts_init):
                 break
             queue.popleft()
+            factor = self.units.factor_at(symbol, order.ready_at)
             market_order = self.order_factory.market(
                 instrument_id=tick.instrument_id,
                 order_side=OrderSide.BUY if order.side == "BUY" else OrderSide.SELL,
-                quantity=Quantity.from_int(order.quantity),
+                quantity=_native_quantity(order.quantity, factor),
                 time_in_force=TimeInForce.IOC,
                 reduce_only=order.side == "SELL",
             )
-            self.submitted[market_order.client_order_id] = (order.intent_id, tick.ts_init)
+            self.submitted[market_order.client_order_id] = (order.intent_id, tick.ts_init, factor)
             self.submit_order(market_order)
 
     def on_order_filled(self, event):
-        intent_id, quote_available_ns = self.submitted[event.client_order_id]
+        intent_id, quote_available_ns, factor = self.submitted[event.client_order_id]
         self.fills.append(
             {
                 "intent_id": intent_id,
                 "symbol": event.instrument_id.symbol.value,
-                "quantity": str(event.last_qty.as_decimal()),
-                "price_usd": _usd(event.last_px.as_decimal()),
+                "quantity": str(_whole_shares(Fraction(event.last_qty.as_decimal()) * factor)),
+                "price_usd": _usd(_scaled_usd(event.last_px.as_decimal(), 1 / factor)),
                 "commission_usd": _usd(event.commission.as_decimal()),
                 "quote_available_at_ns": str(quote_available_ns),
                 "filled_at_ns": str(event.ts_event),
@@ -266,6 +405,17 @@ class _ReplayStrategy(Strategy):
 
 
 def run_replay(replay: Replay, *, through: datetime | None = None) -> dict:
+    return _run_replay(replay, through=through)
+
+
+def _run_replay(
+    replay: Replay,
+    *,
+    through: datetime | None = None,
+    strategy_factory: Callable[
+        [dict[str, Equity], tuple[Order, ...], _SplitUnits], _ReplayStrategy
+    ] = _ReplayStrategy,
+) -> dict:
     venue = Venue("PAPER")
     starting_cash = Decimal(replay.starting_cash_usd)
     fee_rate = Decimal(replay.commission_bps) / 10_000
@@ -274,6 +424,10 @@ def run_replay(replay: Replay, *, through: datetime | None = None) -> dict:
     if horizon.utcoffset() is None or horizon < quotes[-1].available_at:
         raise ValueError("Replay horizon must be timezone-aware and cover the supplied quotes")
     horizon_ns = _nanoseconds(horizon)
+    symbols = {quote.symbol for quote in quotes}
+    _validate_dividends(replay.cash_dividends, symbols)
+    _validate_splits(replay, symbols)
+    units = _SplitUnits(replay.stock_splits, horizon)
     instruments = {
         code: Equity(
             instrument_id=InstrumentId(Symbol(code), venue),
@@ -286,15 +440,28 @@ def run_replay(replay: Replay, *, through: datetime | None = None) -> dict:
             ts_event=0,
             ts_init=0,
         )
-        for code in sorted({quote.symbol for quote in quotes})
+        for code in sorted(symbols)
     }
-    _validate_dividends(replay.cash_dividends, set(instruments))
-    dividend_module = (
-        _DividendModule(replay.cash_dividends, horizon_ns, instruments)
-        if replay.cash_dividends
-        else None
-    )
-    strategy = _ReplayStrategy(instruments, replay.orders)
+    strategy = strategy_factory(instruments, replay.orders, units)
+    actions = _CorporateActions(replay, horizon_ns, strategy)
+    boundaries = actions.boundaries()
+    eligible_quotes = [
+        quote for quote in quotes if units.quote_is_current(quote, quote.available_at)
+    ]
+    ticks = []
+    for quote in eligible_quotes:
+        factor = units.factor_at(quote.symbol, quote.observed_at)
+        ticks.append(
+            QuoteTick(
+                instrument_id=instruments[quote.symbol].id,
+                bid_price=Price.from_str(_usd(_scaled_usd(Decimal(quote.bid_usd), factor))),
+                ask_price=Price.from_str(_usd(_scaled_usd(Decimal(quote.ask_usd), factor))),
+                bid_size=_native_quantity(quote.bid_size, factor),
+                ask_size=_native_quantity(quote.ask_size, factor),
+                ts_event=_nanoseconds(quote.observed_at),
+                ts_init=_nanoseconds(quote.available_at),
+            )
+        )
     engine = BacktestEngine(config=BacktestEngineConfig(logging=LoggingConfig(bypass_logging=True)))
     try:
         engine.add_venue(
@@ -304,35 +471,34 @@ def run_replay(replay: Replay, *, through: datetime | None = None) -> dict:
             base_currency=USD,
             starting_balances=[Money.from_str(f"{_usd(starting_cash)} USD")],
             liquidity_consumption=True,
-            modules=[dividend_module] if dividend_module is not None else None,
+            modules=[actions] if boundaries else None,
         )
         for instrument in instruments.values():
             engine.add_instrument(instrument)
-        if dividend_module is not None and (boundaries := dividend_module.boundaries()):
+        if boundaries:
             # Stable sort by availability gives corporate boundaries priority over
             # equal-time quotes. No artificial quote or trade advances the clock.
             engine.add_data(boundaries, client_id=ClientId("CORPORATE-ACTIONS"))
-        engine.add_data(
-            [
-                QuoteTick(
-                    instrument_id=instruments[quote.symbol].id,
-                    bid_price=Price.from_str(_usd(Decimal(quote.bid_usd))),
-                    ask_price=Price.from_str(_usd(Decimal(quote.ask_usd))),
-                    bid_size=Quantity.from_int(quote.bid_size),
-                    ask_size=Quantity.from_int(quote.ask_size),
-                    ts_event=_nanoseconds(quote.observed_at),
-                    ts_init=_nanoseconds(quote.available_at),
-                )
-                for quote in quotes
-            ]
-        )
+        if ticks:
+            engine.add_data(ticks)
         engine.add_strategy(strategy)
         engine.run()
-        if dividend_module is not None and dividend_module.timeline:
-            raise RuntimeError("Nautilus did not settle all cash dividend boundaries")
+        if actions.timeline:
+            raise RuntimeError("Nautilus did not settle all corporate action boundaries")
+        booked_units = defaultdict(int)
+        for fill in strategy.fills:
+            booked_units[fill["intent_id"]] += int(fill["quantity"])
         for outcome in engine.cache.orders():
-            intent_id, _ = strategy.submitted[outcome.client_order_id]
-            strategy.statuses[intent_id] = outcome.status_string().lower()
+            intent_id, _, factor = strategy.submitted[outcome.client_order_id]
+            status = outcome.status_string().lower()
+            if status == "filled":
+                # An IOC gap can leave a filled order-cache status without an
+                # account fill callback. Report only what was actually booked.
+                booked = booked_units[intent_id]
+                requested = _whole_shares(Fraction(outcome.quantity.as_decimal()) * factor)
+                if booked < requested:
+                    status = "partially_filled" if booked else "no_accounted_fill"
+            strategy.statuses[intent_id] = status
 
         cash = engine.portfolio.account(venue).balance_total(USD).as_decimal()
         positions = {
@@ -340,20 +506,29 @@ def run_replay(replay: Replay, *, through: datetime | None = None) -> dict:
             for position in engine.cache.positions_open()
         }
         marks = {
-            quote.symbol: Decimal(quote.bid_usd)
-            for quote in sorted(quotes, key=lambda item: item.observed_at)
+            quote.symbol: quote
+            for quote in sorted(eligible_quotes, key=lambda item: item.observed_at)
         }
-        nav = cash + sum(quantity * marks[symbol] for symbol, quantity in positions.items())
+        nav = cash
+        for symbol, quantity in positions.items():
+            mark = marks[symbol]
+            nav += quantity * _scaled_usd(
+                Decimal(mark.bid_usd), units.factor_at(symbol, mark.observed_at)
+            )
+        raw_positions = {
+            symbol: str(_whole_shares(Fraction(quantity) * units.factor_at(symbol, horizon)))
+            for symbol, quantity in positions.items()
+        }
         commissions = sum((Decimal(fill["commission_usd"]) for fill in strategy.fills), Decimal(0))
         result = {
             "schema_version": REPLAY_VERSION,
             "source_mode": replay.source_mode,
             "alpha_measured": False,
             "intent_pipeline_connected": False,
-            "normalized_input_sha256": sha256(msgspec.json.encode(replay)).hexdigest(),
+            "normalized_input_sha256": replay_sha256(replay),
             "starting_cash_usd": _usd(starting_cash),
             "ending_cash_usd": _usd(cash),
-            "open_positions": {symbol: str(quantity) for symbol, quantity in positions.items()},
+            "open_positions": raw_positions,
             "ending_bid_mark_nav_usd": _usd(nav),
             "cash_benchmark_nav_usd": _usd(starting_cash),
             "simulated_commission_usd": _usd(commissions),
@@ -363,9 +538,14 @@ def run_replay(replay: Replay, *, through: datetime | None = None) -> dict:
         }
         if through is not None:
             result["evaluated_through_ns"] = str(horizon_ns)
-        if dividend_module is not None:
-            result["simulated_dividend_cash_usd"] = _usd(dividend_module.cash_received)
-            result["cash_dividend_events"] = list(dividend_module.receipts.values())
+        if replay.cash_dividends:
+            result["simulated_dividend_cash_usd"] = _usd(actions.cash_received)
+            result["cash_dividend_events"] = list(actions.receipts.values())
+        if replay.stock_splits:
+            result["stock_split_events"] = actions.split_events
+            result["split_marks_in_prior_units"] = sorted(
+                symbol for symbol in positions if not units.quote_is_current(marks[symbol], horizon)
+            )
         return result
     finally:
         engine.dispose()

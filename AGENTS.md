@@ -25,12 +25,18 @@ benchmark после комиссий, spread/slippage, chain fees, LLM, дан�
 Сейчас работает Python research M1: TradingAgents adapter, typed portfolio
 arbitration, JSON contracts, call budget, offline demo и native Nautilus probe.
 `DecisionBatch` версии `0.1` допускает только `execution_mode="research"`.
-Go control проверяет research batch без сохранения и с настроенной PostgreSQL
-принимает, читает и выдаёт research jobs по lease. Поддерживается durable
-публикация синтетического результата. Отдельный Compose-проект уведомлений
-принимает тестовые сообщения об исполнении через HTTP и доставляет их в Telegram
-через pgqueue и Kafka. Python worker, economic ledger, подписание, live execution
-и развёртывание торгового контура входят в следующие срезы.
+Go control проверяет research batch и с PostgreSQL ведёт задания, аренды,
+общий бюджет вызовов и результаты. Python worker исполняет pinned граф
+TradingAgents с офлайн-моделями и архивными снимками. Go ведёт виртуальный
+счёт, точные резервы, полные и частичные исполнения. `paper-apply` связывает
+результат research и виртуальное исполнение по тестовой котировке с policy
+владельца. Nautilus проверяет исторические сценарии в отдельном окружении.
+Go планировщик пересмотра создаёт durable research jobs из состояния
+paper-позиции и хешированных архивных событий. События исполнений paper ledger
+через отдельный режим relay попадают в pgqueue и Kafka. Отдельный Compose-проект
+содержит тестовый HTTP-вход и Telegram consumer.
+Подписание, live execution и развёртывание live-контура остаются в будущих
+срезах.
 [Результаты M1 и upstream-проверок](docs/verification.md) содержат evidence.
 
 Документы с целевой архитектурой не являются свидетельством её реализации.
@@ -80,7 +86,8 @@ balances, readiness зависимостей или результат плат�
    fills/cashflows/positions/costs. Outcome/reflection строится по фактам и
    доступному на тот момент benchmark, затем может попасть в следующий research.
 
-Это целевой поток. Существующий CLI реализует только исследовательскую часть.
+В локальном контуре исследование и виртуальное исполнение используют
+раздельные команды и явную политику владельца.
 
 ## Неизменяемые финансовые и security правила
 

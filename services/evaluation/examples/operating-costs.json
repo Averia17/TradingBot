@@ -1,0 +1,227 @@
+{
+  "basis": "additional_to_execution_net",
+  "coverage": [
+    {
+      "category": "llm",
+      "reference_id": "fixture-declaration.fixture-strategy.llm",
+      "series_id": "fixture-strategy",
+      "status": "complete"
+    },
+    {
+      "category": "data",
+      "reference_id": "fixture-declaration.fixture-strategy.data",
+      "series_id": "fixture-strategy",
+      "status": "complete"
+    },
+    {
+      "category": "infrastructure",
+      "reference_id": "fixture-declaration.fixture-strategy.infrastructure",
+      "series_id": "fixture-strategy",
+      "status": "complete"
+    },
+    {
+      "category": "chain_fees",
+      "reference_id": "fixture-declaration.fixture-strategy.chain_fees",
+      "series_id": "fixture-strategy",
+      "status": "zero"
+    },
+    {
+      "category": "additional_execution_fees",
+      "reference_id": "fixture-declaration.fixture-strategy.additional_execution_fees",
+      "series_id": "fixture-strategy",
+      "status": "zero"
+    },
+    {
+      "category": "fx",
+      "reference_id": "fixture-declaration.fixture-strategy.fx",
+      "series_id": "fixture-strategy",
+      "status": "zero"
+    },
+    {
+      "category": "issuer_drag",
+      "reference_id": "fixture-declaration.fixture-strategy.issuer_drag",
+      "series_id": "fixture-strategy",
+      "status": "zero"
+    },
+    {
+      "category": "other_operating",
+      "reference_id": "fixture-declaration.fixture-strategy.other_operating",
+      "series_id": "fixture-strategy",
+      "status": "zero"
+    },
+    {
+      "category": "llm",
+      "reference_id": "fixture-declaration.usd-cash.llm",
+      "series_id": "usd-cash",
+      "status": "zero"
+    },
+    {
+      "category": "data",
+      "reference_id": "fixture-declaration.usd-cash.data",
+      "series_id": "usd-cash",
+      "status": "zero"
+    },
+    {
+      "category": "infrastructure",
+      "reference_id": "fixture-declaration.usd-cash.infrastructure",
+      "series_id": "usd-cash",
+      "status": "zero"
+    },
+    {
+      "category": "chain_fees",
+      "reference_id": "fixture-declaration.usd-cash.chain_fees",
+      "series_id": "usd-cash",
+      "status": "zero"
+    },
+    {
+      "category": "additional_execution_fees",
+      "reference_id": "fixture-declaration.usd-cash.additional_execution_fees",
+      "series_id": "usd-cash",
+      "status": "zero"
+    },
+    {
+      "category": "fx",
+      "reference_id": "fixture-declaration.usd-cash.fx",
+      "series_id": "usd-cash",
+      "status": "zero"
+    },
+    {
+      "category": "issuer_drag",
+      "reference_id": "fixture-declaration.usd-cash.issuer_drag",
+      "series_id": "usd-cash",
+      "status": "zero"
+    },
+    {
+      "category": "other_operating",
+      "reference_id": "fixture-declaration.usd-cash.other_operating",
+      "series_id": "usd-cash",
+      "status": "zero"
+    },
+    {
+      "category": "llm",
+      "reference_id": "fixture-declaration.stock-hold.llm",
+      "series_id": "stock-hold",
+      "status": "zero"
+    },
+    {
+      "category": "data",
+      "reference_id": "fixture-declaration.stock-hold.data",
+      "series_id": "stock-hold",
+      "status": "zero"
+    },
+    {
+      "category": "infrastructure",
+      "reference_id": "fixture-declaration.stock-hold.infrastructure",
+      "series_id": "stock-hold",
+      "status": "zero"
+    },
+    {
+      "category": "chain_fees",
+      "reference_id": "fixture-declaration.stock-hold.chain_fees",
+      "series_id": "stock-hold",
+      "status": "zero"
+    },
+    {
+      "category": "additional_execution_fees",
+      "reference_id": "fixture-declaration.stock-hold.additional_execution_fees",
+      "series_id": "stock-hold",
+      "status": "zero"
+    },
+    {
+      "category": "fx",
+      "reference_id": "fixture-declaration.stock-hold.fx",
+      "series_id": "stock-hold",
+      "status": "zero"
+    },
+    {
+      "category": "issuer_drag",
+      "reference_id": "fixture-declaration.stock-hold.issuer_drag",
+      "series_id": "stock-hold",
+      "status": "zero"
+    },
+    {
+      "category": "other_operating",
+      "reference_id": "fixture-declaration.stock-hold.other_operating",
+      "series_id": "stock-hold",
+      "status": "zero"
+    },
+    {
+      "category": "llm",
+      "reference_id": "fixture-declaration.universe.llm",
+      "series_id": "universe",
+      "status": "zero"
+    },
+    {
+      "category": "data",
+      "reference_id": "fixture-declaration.universe.data",
+      "series_id": "universe",
+      "status": "zero"
+    },
+    {
+      "category": "infrastructure",
+      "reference_id": "fixture-declaration.universe.infrastructure",
+      "series_id": "universe",
+      "status": "zero"
+    },
+    {
+      "category": "chain_fees",
+      "reference_id": "fixture-declaration.universe.chain_fees",
+      "series_id": "universe",
+      "status": "zero"
+    },
+    {
+      "category": "additional_execution_fees",
+      "reference_id": "fixture-declaration.universe.additional_execution_fees",
+      "series_id": "universe",
+      "status": "zero"
+    },
+    {
+      "category": "fx",
+      "reference_id": "fixture-declaration.universe.fx",
+      "series_id": "universe",
+      "status": "zero"
+    },
+    {
+      "category": "issuer_drag",
+      "reference_id": "fixture-declaration.universe.issuer_drag",
+      "series_id": "universe",
+      "status": "zero"
+    },
+    {
+      "category": "other_operating",
+      "reference_id": "fixture-declaration.universe.other_operating",
+      "series_id": "universe",
+      "status": "zero"
+    }
+  ],
+  "expenses": [
+    {
+      "amount_usd": "0.12345678",
+      "category": "llm",
+      "cost_id": "api-1",
+      "incurred_at": "2026-10-02T10:00:00Z",
+      "reference_id": "fixture-usage-1",
+      "series_id": "fixture-strategy"
+    },
+    {
+      "amount_usd": "5.00",
+      "category": "data",
+      "cost_id": "data-1",
+      "incurred_at": "2026-10-03T10:00:00Z",
+      "reference_id": "fixture-data-1",
+      "series_id": "fixture-strategy"
+    },
+    {
+      "amount_usd": "0.05",
+      "category": "infrastructure",
+      "cost_id": "compute-1",
+      "incurred_at": "2026-10-04T00:30:00+03:00",
+      "reference_id": "fixture-compute-1",
+      "series_id": "fixture-strategy"
+    }
+  ],
+  "first_mark_day": "2026-10-01",
+  "last_mark_day": "2026-10-04",
+  "schema_version": "0.1",
+  "source_mode": "synthetic_fixture"
+}

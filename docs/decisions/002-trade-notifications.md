@@ -14,8 +14,7 @@ Kafka и транзакционный outbox на pgqueue.
 тестовую запись и очередь в одной транзакции. Ошибка enqueue приводит к
 rollback. Повтор того же ID и содержимого сохраняет прежнюю запись, изменение
 содержимого даёт конфликт. Каждый partial fill получает отдельный стабильный ID.
-Интеграция с авторитетной транзакцией ledger относится к S5. Research jobs
-используют свой PostgreSQL outbox.
+Research jobs используют свой PostgreSQL outbox.
 
 Relay внутри `trade-events` обрабатывает очередь `trade-filled-v1` через
 `github.com/goware/pgqueue`. PostgreSQL освобождает транзакцию claim перед
@@ -55,3 +54,19 @@ PostgreSQL и Kafka доступны внутри выделенных сете�
 тестового fill, `200` для повтора, `409` для изменения под тем же ID и `422`
 для `live`. В PostgreSQL остались одна запись fill и одна завершённая задача
 outbox. Telegram подтвердил одну отправку, Kafka зафиксировала offset с lag `0`.
+
+### Исполнения виртуального счёта
+
+Go ledger пишет каждое полное или частичное исполнение и его outbox-событие
+в одной транзакции. Kafka key имеет форму `paper:<account_uuid>:<fill_uuid>`.
+Версия 1.1 хранит целое количество raw units, точность инструмента, версию
+реестра, точные gross и fee, а также времена наблюдения и записи.
+[Контракт paper fill](../../contracts/paper-fill-event.schema.json).
+
+Режим `trade-events -paper-ledger` читает тот же PostgreSQL и атомарно
+переносит событие в отдельную очередь pgqueue. Relay публикует её в
+`tradingbot.trade.filled.paper.v1`. Consumer этого topic принимает
+`paper_ledger` 1.1. Очередь ручных тестовых исполнений продолжает использовать
+`exchange_fixture` 1.0 и собственный topic. Публикация и обработка по-прежнему
+гарантируют at-least-once. Интеграционный тест paper-ветки использует локальный
+Kafka и подставной приёмник сообщений.

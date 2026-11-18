@@ -93,4 +93,38 @@ func TestOutcomeProjectionMatchesPostgresLedger(t *testing.T) {
 	if view.RealizedNetPnLUSD != "5.33333331" || view.RecordedFeesUSD != "0.00000003" || view.OpenLots[0].CostBasisUSD != "3.33333335" {
 		t.Fatalf("unexpected amounts: %+v", view)
 	}
+
+	order, created, err := store.Reserve(ctx, ledger.ReservationRequest{
+		AccountID: testAccount, OrderID: eventID(6), DecisionID: eventID(106), QuoteID: eventID(206),
+		SnapshotVersion: account.Version, Instrument: testInstrument, Side: "BUY", QuantityRaw: "4",
+		GrossUSD: "16", MaxFeeUSD: "0.02", ExpiresAt: time.Now().UTC().Add(time.Minute),
+	})
+	if err != nil || !created {
+		t.Fatalf("reserve partial paper order: %v", err)
+	}
+	for _, fill := range []ledger.ResolutionRequest{
+		{AccountID: testAccount, OrderID: order.OrderID, EventID: eventID(7), Outcome: "partially_filled", QuantityRaw: "2", GrossUSD: "7", FeeUSD: "0.01", ObservedAt: order.CreatedAt},
+		{AccountID: testAccount, OrderID: order.OrderID, EventID: eventID(8), Outcome: "filled", GrossUSD: "8", FeeUSD: "0.01", ObservedAt: order.CreatedAt},
+	} {
+		if _, created, err := store.Resolve(ctx, fill); err != nil || !created {
+			t.Fatalf("settle paper quantity: %v", err)
+		}
+	}
+	events, err = store.Events(ctx, testAccount, 5, 100)
+	if err != nil || len(events) != 3 {
+		t.Fatalf("partial paper event history: len %d, err %v", len(events), err)
+	}
+	partial, err := Load(ctx, store, testAccount, events[1].RecordedAt)
+	if err != nil || len(partial.OpenLots) != 2 || partial.OpenLots[1].QuantityRaw != "2" || partial.OpenLots[1].CostBasisUSD != "7.01" {
+		t.Fatalf("unexpected partial snapshot: %+v, %v", partial, err)
+	}
+	final, err := Load(ctx, store, testAccount, events[2].RecordedAt)
+	if err != nil || len(final.OpenLots) != 3 || final.OpenLots[2].QuantityRaw != "2" || final.OpenLots[2].CostBasisUSD != "8.01" {
+		t.Fatalf("unexpected final snapshot: %+v, %v", final, err)
+	}
+	account, err = store.GetAccount(ctx, testAccount)
+	if err != nil || account.Version != final.AccountVersion || account.CashUSD != final.CashUSD || account.ReservedCashUSD != "0" ||
+		len(account.Positions) != 1 || account.Positions[0].QuantityRaw != "5" || final.RecordedFeesUSD != "0.02000003" {
+		t.Fatalf("final projection diverged from ledger: account %+v, view %+v, %v", account, final, err)
+	}
 }

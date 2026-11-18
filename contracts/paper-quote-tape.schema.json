@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Owner-pinned local synthetic paper quote tape 0.1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["paper_quote_tape_schema_version", "source_mode", "job_id", "scope", "observations"],
+  "properties": {
+    "paper_quote_tape_schema_version": {"const": "0.1"},
+    "source_mode": {"const": "synthetic_fixture"},
+    "job_id": {"$ref": "paper-account.schema.json#/$defs/AccountID"},
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["instrument", "side", "quantity_raw"],
+      "properties": {
+        "instrument": {"$ref": "paper-account.schema.json#/$defs/Instrument"},
+        "side": {"$ref": "paper-replay.schema.json#/$defs/Side"},
+        "quantity_raw": {"$ref": "paper-replay.schema.json#/$defs/Quantity"}
+      }
+    },
+    "observations": {
+      "type": "array",
+      "maxItems": 2048,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["available_at", "firmness", "quote"],
+        "properties": {
+          "available_at": {"type": "string", "format": "date-time", "description": "The supplied local archive availability timestamp."},
+          "firmness": {"enum": ["firm", "indicative"]},
+          "quote": {"$ref": "paper-replay.schema.json#/$defs/Quote", "description": "The embedded object bytes are published unchanged."}
+        }
+      }
+    }
+  },
+  "$defs": {
+    "PinReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["paper_quote_pin_result_schema_version", "source_mode", "job_id", "tape_sha256", "status"],
+      "properties": {
+        "paper_quote_pin_result_schema_version": {"const": "0.1"},
+        "source_mode": {"const": "synthetic_fixture"},
+        "job_id": {"$ref": "paper-account.schema.json#/$defs/AccountID"},
+        "tape_sha256": {"$ref": "paper-replay.schema.json#/$defs/SHA256"},
+        "status": {"enum": ["awaiting_research", "research_failed", "research_expired", "research_hold", "application_expired", "awaiting_quote", "pinned", "replayed"]},
+        "completed_at": {"type": "string", "format": "date-time"},
+        "observed_at": {"type": "string", "format": "date-time"},
+        "available_at": {"type": "string", "format": "date-time"},
+        "checked_at": {"type": "string", "format": "date-time"},
+        "quote": {"$ref": "paper-apply.schema.json#/$defs/QuotePin/properties/quote"}
+      },
+      "if": {"properties": {"status": {"enum": ["pinned", "replayed"]}}},
+      "then": {"required": ["quote", "completed_at", "observed_at", "available_at", "checked_at"]}
+    }
+  }
+}

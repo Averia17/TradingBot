@@ -101,3 +101,55 @@ func TestConsumerCommitsOnlyConfirmedRecords(t *testing.T) {
 		}
 	}
 }
+
+func TestConsumerDeliversExactPaperFillOnDedicatedTopic(t *testing.T) {
+	const topic, group = fill_event.PaperTopic, "paper-notification-test"
+	cluster, err := kfake.NewCluster(kfake.NumBrokers(1), kfake.SeedTopics(1, topic))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(cluster.Close)
+	producer, err := kgo.NewClient(kgo.SeedBrokers(cluster.ListenAddrs()...))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(producer.Close)
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+	defer cancel()
+	data, err := os.ReadFile("../../../../contracts/valid-paper-fill-event.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	event, err := fill_event.DecodePaper(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := os.ReadFile("../../../../contracts/valid-trade-event.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := producer.ProduceSync(ctx,
+		&kgo.Record{Topic: topic, Key: []byte(event.ID), Value: data},
+		&kgo.Record{Topic: topic, Key: []byte(event.ID), Value: legacy},
+	).FirstErr(); err != nil {
+		t.Fatal(err)
+	}
+	var delivered []string
+	for range 2 {
+		err := Consume(ctx, cluster.ListenAddrs(), topic, group, func(_ context.Context, message string) error {
+			delivered = append(delivered, message)
+			return nil
+		})
+		if err == nil || !strings.Contains(err.Error(), "invalid paper fill event") {
+			t.Fatalf("expected wrong-version record to remain uncommitted, got %v", err)
+		}
+	}
+	if len(delivered) != 1 {
+		t.Fatalf("successful deliveries = %d, want 1", len(delivered))
+	}
+	for _, want := range []string{"PAPER · СИМУЛЯЦИЯ", "0.000000000000000003", "1 USD", "0.00000001 USD", event.ID} {
+		if !strings.Contains(delivered[0], want) {
+			t.Fatalf("delivered message lacks %q: %s", want, delivered[0])
+		}
+	}
+}

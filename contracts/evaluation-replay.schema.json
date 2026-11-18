@@ -168,6 +168,13 @@
         "starting_cash_usd": {
           "pattern": "^(0|[1-9][0-9]{0,9})(\\.[0-9]{1,2})?$",
           "type": "string"
+        },
+        "stock_splits": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/StockSplit"
+          },
+          "type": "array"
         }
       },
       "required": [
@@ -179,6 +186,47 @@
         "orders"
       ],
       "title": "Replay",
+      "type": "object"
+    },
+    "StockSplit": {
+      "additionalProperties": false,
+      "properties": {
+        "action_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+          "type": "string"
+        },
+        "available_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "effective_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "new_shares": {
+          "maximum": 1000000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "old_shares": {
+          "maximum": 1000000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "symbol": {
+          "pattern": "^[A-Z][A-Z0-9.]{0,11}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "action_id",
+        "symbol",
+        "available_at",
+        "effective_at",
+        "new_shares",
+        "old_shares"
+      ],
+      "title": "StockSplit",
       "type": "object"
     }
   },

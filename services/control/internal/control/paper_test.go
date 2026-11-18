@@ -15,6 +15,16 @@ const paperID = "00000000-0000-0000-0000-000000000044"
 
 type paperAccountStub struct{}
 
+type paperReservationProbe struct {
+	paperOrderStore
+	writes int
+}
+
+func (p *paperReservationProbe) Reserve(context.Context, ledger.ReservationRequest) (ledger.Order, bool, error) {
+	p.writes++
+	return ledger.Order{}, true, nil
+}
+
 func (paperAccountStub) Ping(context.Context) error { return nil }
 
 func (paperAccountStub) CreateAccount(_ context.Context, in ledger.CreateAccount) (ledger.Account, bool, error) {
@@ -54,5 +64,33 @@ func TestPaperAccountEndpoint(t *testing.T) {
 	handler.ServeHTTP(fetched, httptest.NewRequest(http.MethodGet, path+"/"+paperID, nil))
 	if fetched.Code != http.StatusOK || !strings.Contains(fetched.Body.String(), `"cash_usd":"123.45"`) {
 		t.Fatalf("read paper account: %d %s", fetched.Code, fetched.Body)
+	}
+}
+
+func TestRawPaperReservationCannotAttachResearchProvenance(t *testing.T) {
+	probe := &paperReservationProbe{}
+	handler := paperOrderHTTP{store: probe}
+	body := `{"account_id":"` + paperID + `","order_id":"00000000-0000-0000-0000-000000000101",` +
+		`"decision_id":"00000000-0000-0000-0000-000000000102","quote_id":"00000000-0000-0000-0000-000000000103",` +
+		`"snapshot_version":1,"instrument":{"instrument_id":"fixture:TSLA","registry_version":"test","decimals":2},` +
+		`"side":"BUY","quantity_raw":"10","gross_usd":"10","max_fee_usd":"0","expires_at":"2026-11-17T16:00:00Z"}`
+	for _, test := range []struct {
+		body string
+		want int
+	}{
+		{strings.TrimSuffix(body, "}") + `,"research_job_id":"00000000-0000-0000-0000-000000000104"}`, http.StatusBadRequest},
+		{body, http.StatusCreated},
+	} {
+		req := httptest.NewRequest(http.MethodPost, "/v1/paper/accounts/"+paperID+"/orders", strings.NewReader(test.body))
+		req.Header.Set("Content-Type", "application/json")
+		req.SetPathValue("id", paperID)
+		res := httptest.NewRecorder()
+		handler.reserve(res, req)
+		if res.Code != test.want {
+			t.Fatalf("reserve status %d, want %d", res.Code, test.want)
+		}
+	}
+	if probe.writes != 1 {
+		t.Fatalf("forged provenance reached storage: %d writes", probe.writes)
 	}
 }

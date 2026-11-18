@@ -1,0 +1,40 @@
+{
+  "schema_version": "0.1",
+  "source_mode": "synthetic_fixture",
+  "captures": [
+    {
+      "kind": "sec_submissions",
+      "source": {
+        "ref": "sec-response.json",
+        "sha256": "c26a18e81b2c20731b2735133b83c70982ebee12aa4631171f7d1e7d02d16b69"
+      },
+      "captured_at": "2024-11-15T19:25:00Z",
+      "cik": "0000123456",
+      "symbol": "TEST",
+      "accessions": [
+        "0000123456-24-000001",
+        "0000123456-24-000002"
+      ]
+    },
+    {
+      "kind": "alfred_observations",
+      "source": {
+        "ref": "alfred-2024-11-14.json",
+        "sha256": "edec71aed436a50e801c7f312a5fb54b8b4027017903eae7d61af27a968e5d5e"
+      },
+      "captured_at": "2024-11-14T14:00:00Z",
+      "series_id": "CPI_FIXTURE",
+      "vintage_date": "2024-11-14"
+    },
+    {
+      "kind": "alfred_observations",
+      "source": {
+        "ref": "alfred-2024-11-15.json",
+        "sha256": "d3a7b17331187072c217be4316e79cd022b822b41d7a1951a33f4a72487c52c7"
+      },
+      "captured_at": "2024-11-15T14:00:00Z",
+      "series_id": "CPI_FIXTURE",
+      "vintage_date": "2024-11-15"
+    }
+  ]
+}

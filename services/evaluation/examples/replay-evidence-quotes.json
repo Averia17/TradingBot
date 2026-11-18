@@ -1,0 +1,90 @@
+{
+  "cash_dividends": [
+    {
+      "action_id": "dividend",
+      "available_at": "2026-10-02T15:00:00Z",
+      "cash_per_share_usd": "1.00",
+      "entitlement_at": "2026-10-03T12:00:00Z",
+      "paid_at": "2026-10-03T14:00:00Z",
+      "symbol": "TSLA"
+    }
+  ],
+  "commission_bps": 100,
+  "orders": [
+    {
+      "expires_at": "2026-10-02T15:00:00Z",
+      "intent_id": "enter",
+      "quantity": 2,
+      "ready_at": "2026-10-02T11:00:00Z",
+      "side": "BUY",
+      "symbol": "TSLA"
+    },
+    {
+      "expires_at": "2026-10-04T15:00:00Z",
+      "intent_id": "exit",
+      "quantity": 2,
+      "ready_at": "2026-10-04T11:00:00Z",
+      "side": "SELL",
+      "symbol": "TSLA"
+    }
+  ],
+  "quotes": [
+    {
+      "ask_size": 100,
+      "ask_usd": "100.00",
+      "available_at": "2026-10-01T12:00:00Z",
+      "bid_size": 100,
+      "bid_usd": "99.00",
+      "observed_at": "2026-10-01T12:00:00Z",
+      "symbol": "TSLA"
+    },
+    {
+      "ask_size": 100,
+      "ask_usd": "50.00",
+      "available_at": "2026-10-01T12:00:00Z",
+      "bid_size": 100,
+      "bid_usd": "49.00",
+      "observed_at": "2026-10-01T12:00:00Z",
+      "symbol": "NVDA"
+    },
+    {
+      "ask_size": 100,
+      "ask_usd": "100.00",
+      "available_at": "2026-10-02T12:00:00Z",
+      "bid_size": 100,
+      "bid_usd": "95.00",
+      "observed_at": "2026-10-02T12:00:00Z",
+      "symbol": "TSLA"
+    },
+    {
+      "ask_size": 100,
+      "ask_usd": "50.00",
+      "available_at": "2026-10-02T12:00:00Z",
+      "bid_size": 100,
+      "bid_usd": "49.00",
+      "observed_at": "2026-10-02T12:00:00Z",
+      "symbol": "NVDA"
+    },
+    {
+      "ask_size": 100,
+      "ask_usd": "900.00",
+      "available_at": "2026-10-04T10:00:00Z",
+      "bid_size": 100,
+      "bid_usd": "899.00",
+      "observed_at": "2026-10-03T12:00:00Z",
+      "symbol": "TSLA"
+    },
+    {
+      "ask_size": 100,
+      "ask_usd": "111.00",
+      "available_at": "2026-10-04T12:00:00Z",
+      "bid_size": 100,
+      "bid_usd": "110.00",
+      "observed_at": "2026-10-04T12:00:00Z",
+      "symbol": "TSLA"
+    }
+  ],
+  "schema_version": "0.1",
+  "source_mode": "synthetic_fixture",
+  "starting_cash_usd": "1000.00"
+}

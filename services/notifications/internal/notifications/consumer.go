@@ -57,26 +57,58 @@ func consumeOne(ctx context.Context, kafka *kgo.Client, send func(context.Contex
 	}
 	record := records.Next()
 	position := fmt.Sprintf("%s[%d]@%d", record.Topic, record.Partition, record.Offset)
-	event, err := fill_event.Decode(record.Value)
+	id, message, err := decodeMessage(record)
 	if err != nil {
-		return fmt.Errorf("Kafka record %s contains an invalid trade event", position)
+		return fmt.Errorf("Kafka record %s: %w", position, err)
 	}
-	if string(record.Key) != event.ID {
+	if string(record.Key) != id {
 		return fmt.Errorf("Kafka record %s key does not match the fill ID", position)
 	}
-	if err := send(ctx, tradeMessage(event)); err != nil {
-		return fmt.Errorf("send trade %s from Kafka record %s: %w", event.ID, position, err)
+	if err := send(ctx, message); err != nil {
+		return fmt.Errorf("send trade %s from Kafka record %s: %w", id, position, err)
 	}
 
 	// Finish the offset commit even if shutdown arrives after Telegram accepted the message.
 	commit, cancel := context.WithTimeout(context.WithoutCancel(ctx), 8*time.Second)
 	defer cancel()
 	if err := kafka.CommitRecords(commit, record); err != nil {
-		return fmt.Errorf("Telegram accepted trade %s but Kafka record %s was not confirmed committed: %w", event.ID, position, err)
+		return fmt.Errorf("Telegram accepted trade %s but Kafka record %s was not confirmed committed: %w", id, position, err)
 	}
-	slog.Info("trade notification delivered", "fill_id", event.ID, "topic", record.Topic,
+	slog.Info("trade notification delivered", "fill_id", id, "topic", record.Topic,
 		"partition", record.Partition, "offset", record.Offset)
 	return nil
+}
+
+func decodeMessage(record *kgo.Record) (id, message string, err error) {
+	if record.Topic == fill_event.PaperTopic {
+		event, err := fill_event.DecodePaper(record.Value)
+		if err != nil {
+			return "", "", fmt.Errorf("invalid paper fill event: %w", err)
+		}
+		return event.ID, paperMessage(event), nil
+	}
+	event, err := fill_event.Decode(record.Value)
+	if err != nil {
+		return "", "", fmt.Errorf("invalid trade event: %w", err)
+	}
+	return event.ID, tradeMessage(event), nil
+}
+
+func paperMessage(event fill_event.PaperEvent) string {
+	side := "Покупка"
+	if event.Side == "SELL" {
+		side = "Продажа"
+	}
+	quantity := event.QuantityRaw
+	if event.Decimals > 0 {
+		if len(quantity) <= event.Decimals {
+			quantity = strings.Repeat("0", event.Decimals+1-len(quantity)) + quantity
+		}
+		point := len(quantity) - event.Decimals
+		quantity = quantity[:point] + "." + quantity[point:]
+	}
+	return fmt.Sprintf("[PAPER · СИМУЛЯЦИЯ] %s %s\nКоличество: %s\nВаловая сумма: %s USD\nКомиссия: %s USD\nИсполнено: %s\nID исполнения: %s",
+		side, event.InstrumentID, quantity, event.GrossUSD, event.FeeUSD, event.FilledAt.Format(time.RFC3339Nano), event.ID)
 }
 
 func tradeMessage(event fill_event.Event) string {

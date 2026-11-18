@@ -1,0 +1,21 @@
+{
+  "policy_version": "fixture-paper-v1",
+  "max_order_usd": "120",
+  "min_free_cash_usd": "100",
+  "max_position_bps": 2500,
+  "max_group_bps": 5000,
+  "max_gross_bps": 9000,
+  "max_fee_bps": 30,
+  "max_mark_age_seconds": 60,
+  "instruments": [
+    {
+      "instrument": {
+        "instrument_id": "fixture:TSLA",
+        "registry_version": "fixture-v1",
+        "decimals": 2
+      },
+      "symbol": "TSLA",
+      "group": "tech"
+    }
+  ]
+}

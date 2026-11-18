@@ -1,0 +1,38 @@
+{
+  "review_schedule_schema_version": "0.1",
+  "opening_order_id": "22222222-2222-4222-8222-222222222222",
+  "snapshot_context": {
+    "account_id": "11111111-1111-4111-8111-111111111111",
+    "policy": {
+      "policy_version": "fixture-paper-v1",
+      "max_order_usd": "120",
+      "min_free_cash_usd": "100",
+      "max_position_bps": 2500,
+      "max_group_bps": 5000,
+      "max_gross_bps": 9000,
+      "max_fee_bps": 30,
+      "max_mark_age_seconds": 60,
+      "instruments": [
+        {
+          "instrument": {"instrument_id": "fixture:TSLA", "registry_version": "fixture-v1", "decimals": 2},
+          "symbol": "TSLA",
+          "group": "tech"
+        }
+      ]
+    },
+    "marks": [
+      {
+        "instrument": {"instrument_id": "fixture:TSLA", "registry_version": "fixture-v1", "decimals": 2},
+        "price_usd": "100.00000125",
+        "at": "2026-11-16T14:30:00Z",
+        "available_at": "2026-11-16T14:31:00Z"
+      }
+    ]
+  },
+  "data_manifest": {
+    "ref": "pit-archive.json",
+    "sha256": "025af0b0bcabd3b399b8abd0acc28303fe2de61bc6d4bed9beb17d722bee8be3"
+  },
+  "max_llm_calls": 20,
+  "event": {"kind": "report", "provider": "fixture", "record_id": "10q"}
+}

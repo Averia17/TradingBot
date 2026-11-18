@@ -33,6 +33,9 @@ var researchResultsMigration string
 //go:embed 004_research_call_budget.sql
 var researchCallBudgetMigration string
 
+//go:embed 005_paper_dispatch.sql
+var researchPaperDispatchMigration string
+
 type Store struct {
 	pool *pgxpool.Pool
 }
@@ -47,10 +50,11 @@ type Job struct {
 // CreateJob contains HTTP-validated canonical JSON for the versioned request
 // and its snapshot. Their exact bytes are persisted and compared on retry.
 type CreateJob struct {
-	ID         string
-	Request    json.RawMessage
-	SnapshotID string
-	Snapshot   json.RawMessage
+	ID            string
+	Request       json.RawMessage
+	SnapshotID    string
+	Snapshot      json.RawMessage
+	PaperDispatch *PaperDispatchInput
 }
 
 // Open connects to PostgreSQL and applies the schema before returning a store.
@@ -85,6 +89,15 @@ func (s *Store) Close() { s.pool.Close() }
 
 func (s *Store) Ping(ctx context.Context) error { return s.pool.Ping(ctx) }
 
+// Now returns the same accounting clock used to timestamp research receipts.
+func (s *Store) Now(ctx context.Context) (time.Time, error) {
+	var at time.Time
+	if err := s.pool.QueryRow(ctx, "SELECT clock_timestamp()").Scan(&at); err != nil {
+		return time.Time{}, fmt.Errorf("read research storage clock: %w", err)
+	}
+	return at.UTC(), nil
+}
+
 func (s *Store) migrate(ctx context.Context) error {
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
@@ -114,7 +127,7 @@ func (s *Store) migrate(ctx context.Context) error {
 	if err := tx.QueryRow(ctx, `SELECT coalesce(max(version), 0) FROM research_schema_migrations`).Scan(&version); err != nil {
 		return fmt.Errorf("read research schema version: %w", err)
 	}
-	migrations := []string{researchJobsMigration, researchLeasesMigration, researchResultsMigration, researchCallBudgetMigration}
+	migrations := []string{researchJobsMigration, researchLeasesMigration, researchResultsMigration, researchCallBudgetMigration, researchPaperDispatchMigration}
 	if version < 0 || version > len(migrations) {
 		return fmt.Errorf("unsupported research database schema version %d", version)
 	}
@@ -207,6 +220,11 @@ func (s *Store) Create(ctx context.Context, input CreateJob, admit func() error)
 		job.ID, job.CreatedAt); err != nil {
 		return Job{}, false, fmt.Errorf("store queued research job event: %w", err)
 	}
+	if input.PaperDispatch != nil {
+		if err := insertPaperDispatch(ctx, tx, job.ID, *input.PaperDispatch); err != nil {
+			return Job{}, false, err
+		}
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return Job{}, false, fmt.Errorf("commit research job: %w", err)
 	}
@@ -229,6 +247,15 @@ func existingJob(ctx context.Context, tx pgx.Tx, input CreateJob, requestHash, s
 	}
 	if !matched || !bytes.Equal(job.Request, input.Request) {
 		return Job{}, ErrConflict
+	}
+	if input.PaperDispatch != nil {
+		dispatch, err := readPaperDispatch(tx.QueryRow(ctx, selectPaperDispatch, input.ID))
+		if err != nil && !errors.Is(err, ErrNotFound) {
+			return Job{}, err
+		}
+		if err == nil && (dispatch.AccountID != input.PaperDispatch.AccountID || !bytes.Equal(dispatch.Request, input.PaperDispatch.Request)) {
+			return Job{}, ErrConflict
+		}
 	}
 	job.CreatedAt = job.CreatedAt.UTC()
 	return job, nil

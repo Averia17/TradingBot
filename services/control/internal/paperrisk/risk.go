@@ -2,6 +2,7 @@
 package paperrisk
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"math/big"
@@ -24,15 +25,17 @@ var (
 )
 
 type Policy struct {
-	Version           string           `json:"policy_version"`
-	MaxOrderUSD       string           `json:"max_order_usd"`
-	MinFreeCashUSD    string           `json:"min_free_cash_usd"`
-	MaxPositionBPS    int              `json:"max_position_bps"`
-	MaxGroupBPS       int              `json:"max_group_bps"`
-	MaxGrossBPS       int              `json:"max_gross_bps"`
-	MaxFeeBPS         int              `json:"max_fee_bps"`
-	MaxMarkAgeSeconds int              `json:"max_mark_age_seconds"`
-	Instruments       []InstrumentRule `json:"instruments"`
+	Version               string           `json:"policy_version"`
+	MaxOrderUSD           string           `json:"max_order_usd"`
+	MinFreeCashUSD        string           `json:"min_free_cash_usd"`
+	MaxPositionBPS        int              `json:"max_position_bps"`
+	MaxGroupBPS           int              `json:"max_group_bps"`
+	MaxGrossBPS           int              `json:"max_gross_bps"`
+	MaxFeeBPS             int              `json:"max_fee_bps"`
+	MaxMarkAgeSeconds     int              `json:"max_mark_age_seconds"`
+	Instruments           []InstrumentRule `json:"instruments"`
+	MaxDailyTurnoverUSD   string           `json:"max_daily_turnover_usd,omitempty"`
+	BlockNewBuysOnUnknown bool             `json:"block_new_buys_on_unknown,omitempty"`
 }
 
 type InstrumentRule struct {
@@ -52,7 +55,8 @@ func (p Policy) rules() (map[ledger.Instrument]string, error) {
 	if !idPattern.MatchString(p.Version) || amount(p.MaxOrderUSD) == nil || amount(p.MaxOrderUSD).Sign() <= 0 ||
 		amount(p.MinFreeCashUSD) == nil || !validLimit(p.MaxPositionBPS) || !validLimit(p.MaxGroupBPS) ||
 		!validLimit(p.MaxGrossBPS) || p.MaxFeeBPS < 0 || p.MaxFeeBPS > 10000 ||
-		p.MaxMarkAgeSeconds < 1 || p.MaxMarkAgeSeconds > 3600 || len(p.Instruments) == 0 || len(p.Instruments) > 100 {
+		p.MaxMarkAgeSeconds < 1 || p.MaxMarkAgeSeconds > 3600 || len(p.Instruments) == 0 || len(p.Instruments) > 100 ||
+		(p.MaxDailyTurnoverUSD != "" && amount(p.MaxDailyTurnoverUSD) == nil) {
 		return nil, ErrPolicy
 	}
 	groups := make(map[ledger.Instrument]string, len(p.Instruments))
@@ -82,11 +86,26 @@ func (p Policy) Validate() error {
 
 func validLimit(bps int) bool { return bps > 0 && bps <= 10000 }
 
-// Check validates against the exact account version. The subsequent ledger
+// ActivityReader supplies the current ledger activity required by an opted-in policy.
+type ActivityReader interface {
+	RiskActivity(context.Context, string, int64) (ledger.RiskActivity, error)
+}
+
+// RequiresActivity identifies intents that must pass the daily and unresolved order controls.
+func (p Policy) RequiresActivity(side string) bool {
+	return side == "BUY" && (p.MaxDailyTurnoverUSD != "" || p.BlockNewBuysOnUnknown)
+}
+
+// Check validates intents whose policy does not require ledger activity.
+func Check(account ledger.Account, intent papersim.Intent, policy Policy, marks []Mark, now time.Time) error {
+	return CheckWithActivity(account, intent, policy, marks, now, nil)
+}
+
+// CheckWithActivity validates against the exact account version. The subsequent ledger
 // reservation checks that same version under lock, rejecting races with fills
 // and reservations. An unclassified cash reserve counts toward every affected
 // BUY cap so missing pending-order details cannot amplify exposure.
-func Check(account ledger.Account, intent papersim.Intent, policy Policy, marks []Mark, now time.Time) error {
+func CheckWithActivity(account ledger.Account, intent papersim.Intent, policy Policy, marks []Mark, now time.Time, activity *ledger.RiskActivity) error {
 	groups, err := policy.rules()
 	if err != nil {
 		return err
@@ -113,7 +132,8 @@ func Check(account ledger.Account, intent papersim.Intent, policy Policy, marks 
 		return ErrSnapshot
 	}
 	notional := markedValue(units, price, intent.Instrument.Decimals)
-	if maxAmount(notional, grossLimit).Cmp(amount(policy.MaxOrderUSD)) > 0 {
+	maxNotional := maxAmount(notional, grossLimit)
+	if maxNotional.Cmp(amount(policy.MaxOrderUSD)) > 0 {
 		return fmt.Errorf("%w: order notional", ErrLimit)
 	}
 	if exceeds(fee, minAmount(notional, grossLimit), policy.MaxFeeBPS) {
@@ -129,6 +149,11 @@ func Check(account ledger.Account, intent papersim.Intent, policy Policy, marks 
 		}
 		return nil
 	}
+	if policy.RequiresActivity(intent.Side) {
+		if err := checkActivity(account, policy, prices, now, maxNotional, activity); err != nil {
+			return err
+		}
+	}
 	freeAfterBuy := new(big.Rat).Sub(cash, reserved)
 	freeAfterBuy.Sub(freeAfterBuy, grossLimit).Sub(freeAfterBuy, fee)
 	if freeAfterBuy.Cmp(amount(policy.MinFreeCashUSD)) < 0 {
@@ -136,7 +161,7 @@ func Check(account ledger.Account, intent papersim.Intent, policy Policy, marks 
 	}
 	nav := new(big.Rat).Add(cash, book.gross)
 	nav.Sub(nav, fee)
-	additional := new(big.Rat).Add(maxAmount(notional, grossLimit), reserved)
+	additional := new(big.Rat).Add(maxNotional, reserved)
 	for _, limit := range []struct {
 		exposure *big.Rat
 		bps      int
@@ -149,6 +174,38 @@ func Check(account ledger.Account, intent papersim.Intent, policy Policy, marks 
 		if nav.Sign() <= 0 || exceeds(new(big.Rat).Add(limit.exposure, additional), nav, limit.bps) {
 			return fmt.Errorf("%w: %s", ErrLimit, limit.label)
 		}
+	}
+	return nil
+}
+
+func checkActivity(account ledger.Account, policy Policy, prices map[ledger.Instrument]*big.Rat, now time.Time, candidate *big.Rat, activity *ledger.RiskActivity) error {
+	if activity == nil || activity.AccountID != account.ID || activity.AccountVersion != account.Version ||
+		!activity.DayUTC.Equal(now.UTC().Truncate(24*time.Hour)) {
+		return ErrSnapshot
+	}
+	if policy.BlockNewBuysOnUnknown && activity.HasUnknown {
+		return fmt.Errorf("%w: unresolved paper order", ErrLimit)
+	}
+	if policy.MaxDailyTurnoverUSD == "" {
+		return nil
+	}
+	turnover := amount(activity.SettledGrossUSD)
+	if turnover == nil {
+		return ErrSnapshot
+	}
+	turnover.Add(turnover, candidate)
+	for _, open := range activity.Pending {
+		units, remaining := rawUnits(open.QuantityRaw), rawUnits(open.RemainingQuantityRaw)
+		gross, price := amount(open.GrossUSD), prices[open.Instrument]
+		if units == nil || remaining == nil || remaining.Sign() <= 0 || units.Cmp(remaining) < 0 || gross == nil || gross.Sign() <= 0 || price == nil {
+			return ErrSnapshot
+		}
+		limit := new(big.Rat).Mul(gross, new(big.Rat).SetFrac(remaining, units))
+		marked := markedValue(remaining, price, open.Instrument.Decimals)
+		turnover.Add(turnover, maxAmount(limit, marked))
+	}
+	if turnover.Cmp(amount(policy.MaxDailyTurnoverUSD)) > 0 {
+		return fmt.Errorf("%w: daily gross turnover", ErrLimit)
 	}
 	return nil
 }

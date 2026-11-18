@@ -43,17 +43,22 @@ type Config struct {
 	Once         bool
 }
 
-type manifest struct {
+type ArchiveReference struct {
 	Ref    string `json:"ref"`
 	SHA256 string `json:"sha256"`
 }
 
+func (ref ArchiveReference) valid() bool {
+	return localRef.MatchString(ref.Ref) && fs.ValidPath(ref.Ref) && digest.MatchString(ref.SHA256)
+}
+
 type trigger struct {
-	At        time.Time       `json:"scheduled_at"`
-	Portfolio json.RawMessage `json:"portfolio"`
-	Symbols   []string        `json:"requested_symbols"`
-	Manifest  manifest        `json:"data_manifest"`
-	Budget    int             `json:"max_llm_calls"`
+	At        time.Time        `json:"scheduled_at"`
+	Event     json.RawMessage  `json:"event"`
+	Portfolio json.RawMessage  `json:"portfolio"`
+	Symbols   []string         `json:"requested_symbols"`
+	Manifest  ArchiveReference `json:"data_manifest"`
+	Budget    int              `json:"max_llm_calls"`
 }
 
 type definition struct {
@@ -68,7 +73,8 @@ type occurrence struct {
 	At       time.Time
 	ID       string
 	Body     []byte
-	Manifest manifest
+	Manifest ArchiveReference
+	Event    *eventAnchor
 }
 
 type Schedule struct {
@@ -81,7 +87,7 @@ type jobSubmission struct {
 	ID        string             `json:"job_id"`
 	Portfolio contract.Portfolio `json:"portfolio"`
 	Symbols   []string           `json:"requested_symbols"`
-	Manifest  manifest           `json:"data_manifest"`
+	Manifest  ArchiveReference   `json:"data_manifest"`
 	Policy    string             `json:"policy_version"`
 	Budget    int                `json:"max_llm_calls"`
 }
@@ -99,7 +105,7 @@ func Load(reader io.Reader) (Schedule, error) {
 	if err := contract.Decode(data, nil, &input); err != nil {
 		return Schedule{}, fmt.Errorf("decode schedule: %w", err)
 	}
-	if input.Version != "0.1" || !identifier.MatchString(input.ID) || !identifier.MatchString(input.Policy) ||
+	if (input.Version != "0.1" && input.Version != "0.2") || !identifier.MatchString(input.ID) || !identifier.MatchString(input.Policy) ||
 		input.Lateness < 1 || input.Lateness > 3600 || len(input.Occurrence) < 1 || len(input.Occurrence) > maxOccurrences {
 		return Schedule{}, errors.New("invalid schedule settings")
 	}
@@ -121,8 +127,7 @@ func Load(reader io.Reader) (Schedule, error) {
 }
 
 func prepare(input definition, item trigger) (occurrence, error) {
-	if item.At.IsZero() || item.Budget < 1 || item.Budget > 64 || contract.CheckSymbols(item.Symbols) != nil ||
-		!localRef.MatchString(item.Manifest.Ref) || !fs.ValidPath(item.Manifest.Ref) || !digest.MatchString(item.Manifest.SHA256) {
+	if item.At.IsZero() || item.Budget < 1 || item.Budget > 64 || contract.CheckSymbols(item.Symbols) != nil || !item.Manifest.valid() {
 		return occurrence{}, errors.New("invalid trigger or local archive reference")
 	}
 	portfolio, err := contract.ParsePortfolio(item.Portfolio)
@@ -133,6 +138,15 @@ func prepare(input definition, item trigger) (occurrence, error) {
 	portfolio.AsOf = portfolio.AsOf.UTC()
 	at := item.At.UTC()
 	jobID := occurrenceID(input.ID, at)
+	var event *eventAnchor
+	if len(item.Event) != 0 {
+		var reference EventReference
+		if input.Version != "0.2" || contract.Decode(item.Event, nil, &reference) != nil || !reference.valid() {
+			return occurrence{}, errors.New("invalid event reference for schedule version")
+		}
+		jobID = derivedJobID("tradingbot/research-event-v1\n" + input.ID + "\n" + reference.Provider + "\n" + reference.RecordID)
+		event = &eventAnchor{reference: reference, cutoff: portfolio.AsOf, symbols: item.Symbols}
+	}
 	body, err := json.Marshal(jobSubmission{"0.1", jobID, portfolio, item.Symbols, item.Manifest, input.Policy, item.Budget})
 	if err != nil {
 		return occurrence{}, fmt.Errorf("encode research job: %w", err)
@@ -140,15 +154,57 @@ func prepare(input definition, item trigger) (occurrence, error) {
 	if len(body) > maxJobBytes {
 		return occurrence{}, errors.New("research job exceeds the request size limit")
 	}
-	return occurrence{At: at, ID: jobID, Body: body, Manifest: item.Manifest}, nil
+	return occurrence{At: at, ID: jobID, Body: body, Manifest: item.Manifest, Event: event}, nil
+}
+
+// VerifyArchive proves the bytes of a pinned local research archive. An event
+// additionally requires its archived record to be visible at the cutoff.
+func VerifyArchive(archiveRoot string, reference ArchiveReference, cutoff time.Time, symbols []string, event *EventReference) (VerifiedEvent, error) {
+	if !reference.valid() || cutoff.IsZero() || contract.CheckSymbols(symbols) != nil {
+		return VerifiedEvent{}, errors.New("invalid research archive reference or cutoff")
+	}
+	job := occurrence{Manifest: reference}
+	if event != nil {
+		if !event.valid() {
+			return VerifiedEvent{}, errors.New("invalid archive event reference")
+		}
+		job.Event = &eventAnchor{reference: *event, cutoff: cutoff, symbols: symbols}
+	}
+	root, err := os.OpenRoot(archiveRoot)
+	if err != nil {
+		return VerifiedEvent{}, fmt.Errorf("open local archive root: %w", err)
+	}
+	defer root.Close()
+	return verifyArchive(root, job)
 }
 
 func occurrenceID(id string, at time.Time) string {
 	// Input changes keep the same ID and must conflict with an accepted job.
-	hash := sha256.Sum256([]byte("tradingbot/research-calendar-v1\n" + id + "\n" + at.Format(time.RFC3339Nano)))
+	return derivedJobID("tradingbot/research-calendar-v1\n" + id + "\n" + at.Format(time.RFC3339Nano))
+}
+
+func derivedJobID(key string) string {
+	hash := sha256.Sum256([]byte(key))
 	hash[6] = hash[6]&0x0f | 0x80 // UUID version 8
 	hash[8] = hash[8]&0x3f | 0x80
 	return fmt.Sprintf("%x-%x-%x-%x-%x", hash[:4], hash[4:6], hash[6:8], hash[8:10], hash[10:16])
+}
+
+// VerifyEvent validates and resolves one event already defined in the schedule.
+// It neither submits a research job nor changes schedule state.
+func (schedule Schedule) VerifyEvent(archiveRoot, provider, recordID string) (VerifiedEvent, error) {
+	for _, occurrence := range schedule.jobs {
+		if occurrence.Event == nil || occurrence.Event.reference.Provider != provider || occurrence.Event.reference.RecordID != recordID {
+			continue
+		}
+		root, err := os.OpenRoot(archiveRoot)
+		if err != nil {
+			return VerifiedEvent{}, fmt.Errorf("open local archive root: %w", err)
+		}
+		defer root.Close()
+		return verifyArchive(root, occurrence)
+	}
+	return VerifiedEvent{}, errors.New("event is not present in the frozen schedule")
 }
 
 // Run exits after the last occurrence, after one pass when Once is set, or on cancellation.
@@ -193,7 +249,7 @@ func Run(ctx context.Context, schedule Schedule, config Config) error {
 				slog.Info("research occurrence outside scheduling window", "job_id", job.ID, "scheduled_at", job.At)
 				break
 			}
-			if err := verifyArchive(archive, job.Manifest); err != nil {
+			if _, err := verifyArchive(archive, job); err != nil {
 				return fmt.Errorf("job %s: %w", job.ID, err)
 			}
 			if time.Since(job.At) > schedule.window {
@@ -231,22 +287,31 @@ func wait(ctx context.Context, duration time.Duration) bool {
 	}
 }
 
-func verifyArchive(root *os.Root, reference manifest) error {
+func verifyArchive(root *os.Root, job occurrence) (VerifiedEvent, error) {
+	reference := job.Manifest
 	info, err := root.Stat(reference.Ref)
 	if err != nil || !info.Mode().IsRegular() || info.Size() > maxArchiveBytes {
-		return errors.New("archive is missing, oversized or outside the configured root")
+		return VerifiedEvent{}, errors.New("archive is missing, oversized or outside the configured root")
 	}
 	file, err := root.Open(reference.Ref)
 	if err != nil {
-		return errors.New("cannot open local archive")
+		return VerifiedEvent{}, errors.New("cannot open local archive")
 	}
 	defer file.Close()
 	hasher := sha256.New()
-	n, err := io.Copy(hasher, io.LimitReader(file, maxArchiveBytes+1))
-	if err != nil || n > maxArchiveBytes || fmt.Sprintf("%x", hasher.Sum(nil)) != reference.SHA256 {
-		return errors.New("cannot verify local archive SHA-256")
+	var evidence bytes.Buffer
+	var writer io.Writer = hasher
+	if job.Event != nil {
+		writer = io.MultiWriter(hasher, &evidence)
 	}
-	return nil
+	n, err := io.Copy(writer, io.LimitReader(file, maxArchiveBytes+1))
+	if err != nil || n > maxArchiveBytes || fmt.Sprintf("%x", hasher.Sum(nil)) != reference.SHA256 {
+		return VerifiedEvent{}, errors.New("cannot verify local archive SHA-256")
+	}
+	if job.Event != nil {
+		return job.Event.verify(evidence.Bytes(), reference.SHA256)
+	}
+	return VerifiedEvent{}, nil
 }
 
 func controlEndpoint(value string) (string, error) {
@@ -281,6 +346,11 @@ func submit(ctx context.Context, client *http.Client, endpoint string, job occur
 	if err != nil || len(data) > receiptLimit || json.Unmarshal(data, &receipt) != nil || receipt.ID != job.ID {
 		return true, errors.New("Control receipt did not confirm the scheduled job ID")
 	}
-	slog.Info("research occurrence confirmed", "job_id", job.ID, "scheduled_at", job.At, "http_status", response.StatusCode)
+	logger := slog.Default()
+	if job.Event != nil {
+		event := job.Event.reference
+		logger = logger.With("event_kind", event.Kind, "event_provider", event.Provider, "event_record_id", event.RecordID)
+	}
+	logger.Info("research occurrence confirmed", "job_id", job.ID, "scheduled_at", job.At, "http_status", response.StatusCode)
 	return false, nil
 }

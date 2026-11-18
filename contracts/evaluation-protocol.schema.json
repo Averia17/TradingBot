@@ -1,0 +1,298 @@
+{
+  "$defs": {
+    "BlockBootstrap": {
+      "additionalProperties": false,
+      "properties": {
+        "block_marks": {
+          "maximum": 252,
+          "minimum": 2,
+          "type": "integer"
+        },
+        "family_alpha_bps": {
+          "maximum": 2500,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "minimum_blocks": {
+          "maximum": 1000,
+          "minimum": 2,
+          "type": "integer"
+        },
+        "replications": {
+          "maximum": 10000,
+          "minimum": 100,
+          "type": "integer"
+        },
+        "seed": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "block_marks",
+        "minimum_blocks",
+        "replications",
+        "seed",
+        "family_alpha_bps"
+      ],
+      "title": "BlockBootstrap",
+      "type": "object"
+    },
+    "Comparison": {
+      "additionalProperties": false,
+      "properties": {
+        "benchmark": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+          "type": "string"
+        },
+        "benchmark_access": {
+          "enum": [
+            "synthetic_fixture",
+            "theoretical_reference",
+            "unknown"
+          ]
+        },
+        "comparison_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+          "type": "string"
+        },
+        "minimum_daily_excess_bps": {
+          "maximum": 10000,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "strategy": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "comparison_id",
+        "strategy",
+        "benchmark",
+        "benchmark_access",
+        "minimum_daily_excess_bps"
+      ],
+      "title": "Comparison",
+      "type": "object"
+    },
+    "EvaluationProtocol": {
+      "additionalProperties": false,
+      "properties": {
+        "bootstrap": {
+          "$ref": "#/$defs/BlockBootstrap"
+        },
+        "comparisons": {
+          "items": {
+            "$ref": "#/$defs/Comparison"
+          },
+          "maxItems": 16,
+          "minItems": 1,
+          "type": "array"
+        },
+        "configuration_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "type": "string"
+        },
+        "expected_nav_dates": {
+          "items": {
+            "format": "date",
+            "type": "string"
+          },
+          "maxItems": 4096,
+          "minItems": 2,
+          "type": "array"
+        },
+        "experiment_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+          "type": "string"
+        },
+        "model_training_cutoff": {
+          "anyOf": [
+            {
+              "format": "date",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "nav_basis": {
+          "enum": [
+            "execution_net",
+            "gross",
+            "operating_net"
+          ]
+        },
+        "operating_costs_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "type": "string"
+        },
+        "paper_nav_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "type": "string"
+        },
+        "primary_comparison_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+          "type": "string"
+        },
+        "replay_source": {
+          "$ref": "#/$defs/ReplaySource"
+        },
+        "schema_version": {
+          "enum": [
+            "0.1",
+            "0.2"
+          ]
+        },
+        "source_mode": {
+          "enum": [
+            "retrospective",
+            "synthetic_fixture"
+          ]
+        },
+        "splits": {
+          "$ref": "#/$defs/SplitWindows"
+        }
+      },
+      "required": [
+        "schema_version",
+        "experiment_id",
+        "configuration_sha256",
+        "source_mode",
+        "model_training_cutoff",
+        "nav_basis",
+        "splits",
+        "expected_nav_dates",
+        "primary_comparison_id",
+        "comparisons",
+        "bootstrap"
+      ],
+      "title": "EvaluationProtocol",
+      "type": "object"
+    },
+    "ReplayBenchmark": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "enum": [
+            "buy_and_hold",
+            "cash",
+            "equal_weight_once",
+            "trend_momentum"
+          ]
+        },
+        "lookback_quotes": {
+          "anyOf": [
+            {
+              "maximum": 252,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "max_gap_seconds": {
+          "anyOf": [
+            {
+              "maximum": 2592000,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "series_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+          "type": "string"
+        },
+        "symbol": {
+          "anyOf": [
+            {
+              "pattern": "^[A-Z][A-Z0-9.]{0,11}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "series_id",
+        "kind"
+      ],
+      "title": "ReplayBenchmark",
+      "type": "object"
+    },
+    "ReplaySource": {
+      "additionalProperties": false,
+      "properties": {
+        "benchmarks": {
+          "items": {
+            "$ref": "#/$defs/ReplayBenchmark"
+          },
+          "maxItems": 4,
+          "minItems": 1,
+          "type": "array"
+        },
+        "replay_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "replay_sha256",
+        "benchmarks"
+      ],
+      "title": "ReplaySource",
+      "type": "object"
+    },
+    "SplitWindows": {
+      "additionalProperties": false,
+      "properties": {
+        "embargo_calendar_days": {
+          "maximum": 366,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "end_exclusive": {
+          "format": "date",
+          "type": "string"
+        },
+        "test_start": {
+          "format": "date",
+          "type": "string"
+        },
+        "train_start": {
+          "format": "date",
+          "type": "string"
+        },
+        "validation_start": {
+          "format": "date",
+          "type": "string"
+        }
+      },
+      "required": [
+        "train_start",
+        "validation_start",
+        "test_start",
+        "end_exclusive",
+        "embargo_calendar_days"
+      ],
+      "title": "SplitWindows",
+      "type": "object"
+    }
+  },
+  "$ref": "#/$defs/EvaluationProtocol",
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
+}

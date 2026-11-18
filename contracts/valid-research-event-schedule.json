@@ -1,0 +1,28 @@
+{
+  "schema_version": "0.2",
+  "schedule_id": "fixture-paper-research",
+  "policy_version": "fixture-paper-v1",
+  "max_lateness_seconds": 120,
+  "occurrences": [
+    {
+      "scheduled_at": "2026-11-16T15:00:00Z",
+      "event": {"kind": "report", "provider": "fixture", "record_id": "10q"},
+      "portfolio": {
+        "snapshot_id": "00000000-0000-0000-0000-000000000098",
+        "as_of": "2026-11-16T14:59:00Z",
+        "currency": "USD",
+        "cash_asset": "USD",
+        "cash_usd": "1000",
+        "reserved_cash_usd": "0",
+        "max_position_pct": "0.25",
+        "positions": []
+      },
+      "requested_symbols": ["TSLA"],
+      "data_manifest": {
+        "ref": "pit-archive.json",
+        "sha256": "025af0b0bcabd3b399b8abd0acc28303fe2de61bc6d4bed9beb17d722bee8be3"
+      },
+      "max_llm_calls": 20
+    }
+  ]
+}

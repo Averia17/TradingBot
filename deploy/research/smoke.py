@@ -1,10 +1,12 @@
 """Verify the isolated Compose project and print its local image manifest."""
 
 import argparse
+import hashlib
 import json
 import os
 import socket
 import subprocess
+import tempfile
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -31,22 +33,48 @@ def request(origin, path, expected, body=None):
     except HTTPError as exc:
         with exc:
             status, raw = exc.code, exc.read()
-    checked(status == expected, f"{path} returned HTTP {status}, expected {expected}")
+    statuses = expected if isinstance(expected, tuple) else (expected,)
+    checked(status in statuses, f"{path} returned HTTP {status}, expected {expected}")
     return json.loads(raw) if raw else None
 
 
-def enqueue(origin, label):
+def enqueue(origin, label, archive_root=None):
     portfolio = json.loads((ROOT / "contracts/valid-portfolio.json").read_text(encoding="utf-8"))
     portfolio.update(
         snapshot_id=str(uuid4()), as_of=(datetime.now(UTC) - timedelta(seconds=5)).isoformat()
     )
+    manifest = {"ref": f"offline/smoke/{label}", "sha256": "a" * 64}
+    if archive_root is not None:
+        observed = portfolio["as_of"]
+        archive = {
+            "schema_version": "0.1",
+            "source_mode": "synthetic_fixture",
+            "records": [
+                {
+                    "kind": "bar",
+                    "provider": "compose-paper",
+                    "record_id": "pinned-mark",
+                    "symbol": "TSLA",
+                    "revision": 1,
+                    "event_time": observed,
+                    "available_at": observed,
+                    "ingested_at": observed,
+                    "payload": {"close": "102.12345678"},
+                }
+            ],
+        }
+        raw = json.dumps(archive).encode()
+        path = archive_root / "paper-smoke.json"
+        path.write_bytes(raw)
+        path.chmod(0o644)
+        manifest = {"ref": path.name, "sha256": hashlib.sha256(raw).hexdigest()}
     job = {
         "job_schema_version": "0.1",
         "job_id": str(uuid4()),
         "portfolio": portfolio,
         "requested_symbols": ["TSLA"],
         "max_llm_calls": 20,
-        "data_manifest": {"ref": f"offline/smoke/{label}", "sha256": "a" * 64},
+        "data_manifest": manifest,
         "policy_version": "packaging-smoke-v1",
     }
     request(origin, JOBS, 201, job)
@@ -201,6 +229,22 @@ def main():
     try:
         if not args.skip_build:
             compose("--profile", "evaluation", "build")
+        compose("--profile", "paper", "config", "--quiet")
+        for binary, arguments in (
+            ("paper-apply", ("dispatch", "--help")),
+            ("paper-nav", ("--help",)),
+            ("paper-quote-pin", ("--help",)),
+        ):
+            docker(
+                "run",
+                "--rm",
+                "--network",
+                "none",
+                "--entrypoint",
+                f"/usr/local/bin/{binary}",
+                images["control"],
+                *arguments,
+            )
         compose("up", "-d", "--wait", "--wait-timeout", "60", "--no-build", "postgres", "control")
         capabilities = request(origin, "/v1/capabilities", 200)
         checked(capabilities["research_job_call_budget"], "missing durable budget capability")
@@ -260,6 +304,23 @@ def main():
             request(origin, paper_path, 200) == paper_account,
             "paper account changed after worker rollback",
         )
+        compose("stop", "research")
+        with tempfile.TemporaryDirectory(prefix="tradingbot-paper-archive-") as scratch:
+            archive_root = Path(scratch)
+            archive_root.chmod(0o755)
+            env["TRADINGBOT_PAPER_ARCHIVE_DIR"] = str(archive_root)
+            archive_job = enqueue(origin, "paper-profile", archive_root)
+            try:
+                compose("--profile", "paper", "up", "-d", "--no-build", "paper-research")
+                archive_result = completed_result(origin, archive_job)["result"]
+                checked(
+                    archive_result["metadata"]["provenance"]["data_manifest"]
+                    == archive_job["data_manifest"]
+                    and "102.12345678" in archive_result["reports"]["TSLA"]["market_report"],
+                    "paper archive input did not reach the isolated worker",
+                )
+            finally:
+                compose("--profile", "paper", "stop", "paper-research")
         compose("--profile", "evaluation", "run", "--rm", "--pull", "never", "evaluation")
         evaluation = json.loads(
             compose(
@@ -306,12 +367,13 @@ def main():
                     "research": provenance,
                     "evaluation": evaluation,
                     "control_capabilities": capabilities,
+                    "paper_profile_archive_job_completed": archive_job["job_id"],
                 },
                 indent=2,
             )
         )
     finally:
-        compose("--profile", "evaluation", "down", "--volumes")
+        compose("--profile", "evaluation", "--profile", "paper", "down", "--volumes")
 
 
 if __name__ == "__main__":

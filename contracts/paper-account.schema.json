@@ -1,11 +1,12 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "Virtual paper account HTTP contract 0.1",
+  "title": "Virtual paper account HTTP contract 0.2",
   "$ref": "#/$defs/Account",
   "$defs": {
     "AccountID": {"type": "string", "pattern": "^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$"},
     "USD": {"type": "string", "pattern": "^(?:0|[1-9][0-9]{0,29})(?:\\.[0-9]{1,8})?$"},
     "RawQuantity": {"type": "string", "pattern": "^(?:0|[1-9][0-9]*)$"},
+    "PositiveRawQuantity": {"type": "string", "pattern": "^[1-9][0-9]{0,37}$"},
     "Instrument": {
       "type": "object",
       "additionalProperties": false,
@@ -44,11 +45,12 @@
         "account_id": {"$ref": "#/$defs/AccountID"},
         "order_id": {"$ref": "#/$defs/AccountID"},
         "decision_id": {"$ref": "#/$defs/AccountID"},
+        "research_job_id": {"$ref": "#/$defs/AccountID", "description": "Durable source for a reservation authorized through paper-apply."},
         "quote_id": {"$ref": "#/$defs/AccountID"},
         "snapshot_version": {"type": "integer", "minimum": 1},
         "instrument": {"$ref": "#/$defs/Instrument"},
         "side": {"enum": ["BUY", "SELL"]},
-        "quantity_raw": {"type": "string", "pattern": "^[1-9][0-9]{0,37}$"},
+        "quantity_raw": {"$ref": "#/$defs/PositiveRawQuantity"},
         "gross_usd": {"$ref": "#/$defs/USD"},
         "max_fee_usd": {"$ref": "#/$defs/USD"},
         "expires_at": {"type": "string", "format": "date-time"}
@@ -56,6 +58,7 @@
     },
     "Reserve": {
       "$ref": "#/$defs/ReservationFields",
+      "not": {"required": ["research_job_id"]},
       "unevaluatedProperties": false
     },
     "Resolve": {
@@ -66,16 +69,30 @@
         "account_id": {"$ref": "#/$defs/AccountID"},
         "order_id": {"$ref": "#/$defs/AccountID"},
         "event_id": {"$ref": "#/$defs/AccountID"},
-        "outcome": {"enum": ["unknown", "cancelled", "filled"]},
+        "outcome": {"enum": ["unknown", "cancelled", "partially_filled", "filled"]},
+        "quantity_raw": {"$ref": "#/$defs/PositiveRawQuantity", "description": "Required for a partial fill. A final fill consumes the entire residual when omitted."},
         "gross_usd": {"$ref": "#/$defs/USD"},
         "fee_usd": {"$ref": "#/$defs/USD"},
         "observed_at": {"type": "string", "format": "date-time"}
       },
-      "if": {"properties": {"outcome": {"const": "filled"}}},
+      "if": {"properties": {"outcome": {"enum": ["partially_filled", "filled"]}}},
       "then": {"required": ["gross_usd", "fee_usd", "observed_at"]},
-      "else": {"not": {"anyOf": [{"required": ["gross_usd"]}, {"required": ["fee_usd"]}, {"required": ["observed_at"]}]}}
+      "else": {"not": {"anyOf": [{"required": ["quantity_raw"]}, {"required": ["gross_usd"]}, {"required": ["fee_usd"]}, {"required": ["observed_at"]}]}},
+      "allOf": [{"if": {"properties": {"outcome": {"const": "partially_filled"}}}, "then": {"required": ["quantity_raw"]}}]
     },
     "Fill": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["event_id", "quantity_raw", "gross_usd", "fee_usd", "observed_at"],
+      "properties": {
+        "event_id": {"$ref": "#/$defs/AccountID"},
+        "quantity_raw": {"$ref": "#/$defs/PositiveRawQuantity"},
+        "gross_usd": {"$ref": "#/$defs/USD"},
+        "fee_usd": {"$ref": "#/$defs/USD"},
+        "observed_at": {"type": "string", "format": "date-time"}
+      }
+    },
+    "LegacyFill": {
       "type": "object",
       "additionalProperties": false,
       "required": ["event_id", "gross_usd", "fee_usd", "observed_at"],
@@ -86,14 +103,31 @@
         "observed_at": {"type": "string", "format": "date-time"}
       }
     },
-    "Order": {
+    "LegacyOrder": {
       "$ref": "#/$defs/ReservationFields",
       "required": ["status", "account_version", "created_at"],
       "properties": {
         "status": {"enum": ["reserved", "unknown", "cancelled", "filled"]},
         "account_version": {"type": "integer", "minimum": 1},
         "created_at": {"type": "string", "format": "date-time"},
-        "fill": {"$ref": "#/$defs/Fill"}
+        "fill": {"$ref": "#/$defs/LegacyFill"}
+      },
+      "unevaluatedProperties": false
+    },
+    "Order": {
+      "oneOf": [{"$ref": "#/$defs/OrderWithFills"}, {"$ref": "#/$defs/LegacyOrder"}]
+    },
+    "OrderWithFills": {
+      "$ref": "#/$defs/ReservationFields",
+      "required": ["status", "account_version", "created_at", "remaining_quantity_raw", "filled_quantity_raw", "fills"],
+      "properties": {
+        "status": {"enum": ["reserved", "unknown", "cancelled", "partially_filled", "filled"]},
+        "account_version": {"type": "integer", "minimum": 1},
+        "created_at": {"type": "string", "format": "date-time"},
+        "remaining_quantity_raw": {"$ref": "#/$defs/RawQuantity", "description": "Original less executed quantity, including any cancelled residual."},
+        "filled_quantity_raw": {"$ref": "#/$defs/RawQuantity"},
+        "fills": {"type": "array", "items": {"$ref": "#/$defs/Fill"}},
+        "fill": {"$ref": "#/$defs/Fill", "description": "Most recent fill in recorded order."}
       },
       "unevaluatedProperties": false
     },

@@ -28,6 +28,12 @@ from tradingbot.adapters.tradingagents import (
 )
 from tradingbot.budget import CallBudget
 from tradingbot.contracts import Contract, DecisionBatch, IntentProposals, PortfolioSnapshot, Symbol
+from tradingbot.paper_memory import (
+    PAPER_CONTEXT_BYTES,
+    PAPER_CONTEXT_RECORDS,
+    PAPER_KIND,
+    build_contexts,
+)
 from tradingbot.research import collect_reports, create_decisions
 from tradingbot.snapshots import ArchiveRecord, PointInTimeSnapshot, load_snapshot
 from tradingbot.upstream import verify
@@ -177,7 +183,8 @@ def _verified_upstream() -> tuple[str, str]:
 def _archive_contexts(snapshot: PointInTimeSnapshot, symbols: list[str]) -> dict[str, str]:
     grouped: dict[str | None, list[ArchiveRecord]] = defaultdict(list)
     for record in snapshot.records:
-        grouped[record.symbol].append(record)
+        if record.kind != PAPER_KIND:
+            grouped[record.symbol].append(record)
 
     # Encode the available records once, including the records shared across
     # symbols. ASCII serialization makes the byte limit independent of Unicode.
@@ -197,6 +204,7 @@ def _archive_contexts(snapshot: PointInTimeSnapshot, symbols: list[str]) -> dict
         "source_mode": snapshot.source_mode,
         "snapshot_sha256": snapshot.sha256,
         "as_of": snapshot.as_of.isoformat(),
+        "visibility": "locally_ingested",
     }
     contexts = {}
     for symbol in symbols:
@@ -221,7 +229,11 @@ def _archive_contexts(snapshot: PointInTimeSnapshot, symbols: list[str]) -> dict
 
 
 def _offline_graph(
-    config: dict, model: ScriptedModel, budget: OfflineBudget, archive_contexts: dict[str, str]
+    config: dict,
+    model: ScriptedModel,
+    budget: OfflineBudget,
+    archive_contexts: dict[str, str],
+    memory_contexts: dict[str, str],
 ):
     from tradingagents.graph import trading_graph
 
@@ -232,7 +244,11 @@ def _offline_graph(
             return f"Offline fixture: {ticker} ({asset_type}) as of {trade_date}. No market lookup."
 
         def _memory_step(self, state):
-            return {"past_context": "", "memory_note": "Offline fixture skips settlement."}
+            past = memory_contexts.get(state["company_of_interest"], "")
+            return {
+                "past_context": past,
+                "memory_note": "Offline fixture reads eligible paper outcomes from the pinned archive." if past else "",
+            }
 
         def record_decision(self, company_name, trade_date, final_state):
             # Only the versioned result is published. Offline lessons are never stored.
@@ -273,11 +289,17 @@ def analyze_offline(
     if len(set(symbols)) != len(symbols) or job.portfolio.as_of > datetime.now(UTC):
         raise ValueError("invalid offline universe or future portfolio")
     archive_contexts = {}
+    memory_contexts = {}
     if archive_root is not None:
         snapshot = load_snapshot(
-            archive_root, job.data_manifest.model_dump(), job.portfolio.as_of, symbols=symbols
+            archive_root,
+            job.data_manifest.model_dump(),
+            job.portfolio.as_of,
+            symbols=symbols,
+            visibility="locally_ingested",
         )
         archive_contexts = _archive_contexts(snapshot, symbols)
+        memory_contexts = build_contexts(snapshot, symbols, job.policy_version)
         ensure_active()
     upstream_version, upstream_sha = _verified_upstream()
     ensure_active()
@@ -313,16 +335,22 @@ def analyze_offline(
             stable_config["offline_archive_context_limits"] = [
                 ARCHIVE_CONTEXT_BYTES, ARCHIVE_CONTEXT_RECORDS,
             ]
+        if memory_contexts:
+            stable_config["paper_memory_context_limits"] = [
+                PAPER_CONTEXT_BYTES, PAPER_CONTEXT_RECORDS,
+            ]
         config_hash = hashlib.sha256(
             json.dumps({"config": stable_config, "analysts": ANALYSTS}, sort_keys=True).encode()
         ).hexdigest()
-        graph = _offline_graph(config, model, budget, archive_contexts)
+        graph = _offline_graph(config, model, budget, archive_contexts, memory_contexts)
         reports = collect_reports(
             TradingAgentsAdapter(graph), symbols, job.portfolio.as_of.date().isoformat(), job.portfolio
         )
         for symbol, context in archive_contexts.items():
             market = reports[symbol].get("market_report")
             reports[symbol]["market_report"] = f"{market}\n\n{context}" if market else context
+        for symbol, context in memory_contexts.items():
+            reports[symbol]["final_trade_decision"] += f"\n\n{context}"
         budget.check_active()
         decision = create_decisions(model, reports, job.portfolio)
         budget.check_active()

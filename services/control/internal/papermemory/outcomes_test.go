@@ -130,6 +130,44 @@ func TestLoadUsesRecordingTimeAndStopsAtFutureHistoryPrefix(t *testing.T) {
 	}
 }
 
+func TestLoadUsesExecutionQuantityForPartialsAndImplicitRemainingFill(t *testing.T) {
+	partial := func(id, orderID int, version int64, quantity, gross, fee string) ledger.Event {
+		return event(t, id, version, "paper_order.partially_filled", ledger.ResolutionRequest{
+			AccountID: testAccount, OrderID: eventID(orderID), EventID: eventID(id), Outcome: "partially_filled",
+			QuantityRaw: quantity, GrossUSD: gross, FeeUSD: fee, ObservedAt: testTime.Add(time.Duration(version-1) * time.Minute),
+		})
+	}
+	history := eventHistory{
+		account(t),
+		reserve(t, 2, 2, "BUY", "3", "21", "0.03"),
+		partial(3, 2, 3, "1", "6", "0.01"),
+		event(t, 4, 4, "paper_order.unknown", ledger.ResolutionRequest{AccountID: testAccount, OrderID: eventID(2), EventID: eventID(4), Outcome: "unknown"}),
+		fill(t, 5, 2, 5, "14", "0.02", testTime.Add(4*time.Minute)),
+		reserve(t, 6, 6, "SELL", "3", "24", "0.03"),
+		partial(7, 6, 7, "2", "16", "0.02"),
+		event(t, 8, 8, "paper_order.cancelled", ledger.ResolutionRequest{AccountID: testAccount, OrderID: eventID(6), EventID: eventID(8), Outcome: "cancelled"}),
+	}
+	view, err := Load(context.Background(), history, testAccount, history[3].RecordedAt)
+	if err != nil || view.CashUSD != "993.99" || len(view.OpenLots) != 1 || view.OpenLots[0].QuantityRaw != "1" {
+		t.Fatalf("unexpected partial cutoff: %+v, %v", view, err)
+	}
+	view, err = Load(context.Background(), history, testAccount, history[7].RecordedAt)
+	if err != nil || view.CashUSD != "995.95" || view.RecordedFeesUSD != "0.05" || view.RealizedNetPnLUSD != "2.96" || len(view.Realized) != 1 || len(view.OpenLots) != 1 {
+		t.Fatalf("unexpected settled accounting: %+v, %v", view, err)
+	}
+	if view.Realized[0].QuantityRaw != "2" || view.Realized[0].CostBasisUSD != "13.02" || view.OpenLots[0].QuantityRaw != "1" || view.OpenLots[0].CostBasisUSD != "7.01" {
+		t.Fatalf("incorrect FIFO allocation: %+v", view)
+	}
+	for _, invalid := range []ledger.Event{
+		partial(3, 2, 3, "3", "21", "0.03"),
+		partial(3, 2, 3, "", "6", "0.01"),
+	} {
+		if _, err := Load(context.Background(), eventHistory{history[0], history[1], invalid}, testAccount, invalid.RecordedAt); err == nil {
+			t.Fatal("accepted an inconsistent partial fill")
+		}
+	}
+}
+
 func TestLoadRejectsInconsistentHistory(t *testing.T) {
 	for name, history := range map[string]eventHistory{
 		"absent account":           {},

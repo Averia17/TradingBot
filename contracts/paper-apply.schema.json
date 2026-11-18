@@ -1,0 +1,199 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Local paper application contract 0.1",
+  "$ref": "#/$defs/Request",
+  "$defs": {
+    "Identifier": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9:._-]{0,127}$"},
+    "CapBPS": {"type": "integer", "minimum": 1, "maximum": 10000},
+    "Policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["policy_version", "max_order_usd", "min_free_cash_usd", "max_position_bps", "max_group_bps", "max_gross_bps", "max_fee_bps", "max_mark_age_seconds", "instruments"],
+      "properties": {
+        "policy_version": {"$ref": "#/$defs/Identifier"},
+        "max_order_usd": {"$ref": "paper-account.schema.json#/$defs/USD"},
+        "min_free_cash_usd": {"$ref": "paper-account.schema.json#/$defs/USD"},
+        "max_position_bps": {"$ref": "#/$defs/CapBPS"},
+        "max_group_bps": {"$ref": "#/$defs/CapBPS"},
+        "max_gross_bps": {"$ref": "#/$defs/CapBPS"},
+        "max_fee_bps": {"type": "integer", "minimum": 0, "maximum": 10000},
+        "max_mark_age_seconds": {"type": "integer", "minimum": 1, "maximum": 3600},
+        "max_daily_turnover_usd": {"$ref": "paper-account.schema.json#/$defs/USD"},
+        "block_new_buys_on_unknown": {"type": "boolean"},
+        "instruments": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 100,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["instrument", "symbol", "group"],
+            "properties": {
+              "instrument": {"$ref": "paper-account.schema.json#/$defs/Instrument"},
+              "symbol": {"type": "string", "pattern": "^[A-Z][A-Z0-9.\\-]{0,15}$"},
+              "group": {"$ref": "#/$defs/Identifier"}
+            }
+          }
+        }
+      }
+    },
+    "Marks": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 100,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["instrument", "price_usd", "at", "available_at"],
+        "properties": {
+          "instrument": {"$ref": "paper-account.schema.json#/$defs/Instrument"},
+          "price_usd": {"$ref": "paper-account.schema.json#/$defs/USD"},
+          "at": {"type": "string", "format": "date-time"},
+          "available_at": {"type": "string", "format": "date-time"}
+        }
+      }
+    },
+    "SnapshotContext": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["account_id", "snapshot_version", "policy", "marks"],
+      "properties": {
+        "account_id": {"$ref": "paper-account.schema.json#/$defs/AccountID"},
+        "snapshot_version": {"type": "integer", "minimum": 1},
+        "policy": {"$ref": "#/$defs/Policy"},
+        "marks": {"$ref": "#/$defs/Marks"}
+      }
+    },
+    "SnapshotBundle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["snapshot_context", "portfolio"],
+      "properties": {
+        "snapshot_context": {"$ref": "#/$defs/SnapshotContext"},
+        "portfolio": {"$ref": "portfolio.schema.json"}
+      }
+    },
+    "ReviewScheduleRequest": {
+      "description": "Submit a due paper thesis review to the ordinary research queue. If portfolio is omitted, derive the snapshot at the database clock and reuse the first accepted input on an identical configuration replay.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["review_schedule_schema_version", "opening_order_id", "snapshot_context", "data_manifest", "max_llm_calls"],
+      "properties": {
+        "review_schedule_schema_version": {"const": "0.1"},
+        "opening_order_id": {"$ref": "paper-account.schema.json#/$defs/AccountID"},
+        "snapshot_context": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["account_id", "policy", "marks"],
+          "properties": {
+            "account_id": {"$ref": "paper-account.schema.json#/$defs/AccountID"},
+            "snapshot_version": {"type": "integer", "minimum": 0},
+            "policy": {"$ref": "#/$defs/Policy", "properties": {"policy_version": {"pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"}}},
+            "marks": {"$ref": "#/$defs/Marks"}
+          }
+        },
+        "portfolio": {"$ref": "portfolio.schema.json"},
+        "data_manifest": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["ref", "sha256"],
+          "properties": {
+            "ref": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]{0,511}$", "not": {"pattern": "(^|/)([.]|[.][.])(/|$)|//|/$"}},
+            "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+          }
+        },
+        "max_llm_calls": {"type": "integer", "minimum": 1, "maximum": 64},
+        "event": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "provider", "record_id"],
+          "properties": {
+            "kind": {"enum": ["report", "news", "price", "liquidity", "policy", "review"]},
+            "provider": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"},
+            "record_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"}
+          }
+        }
+      },
+      "if": {"required": ["portfolio"]},
+      "then": {"properties": {"snapshot_context": {"required": ["snapshot_version"], "properties": {"snapshot_version": {"minimum": 1}}}}},
+      "else": {"properties": {"snapshot_context": {"properties": {"snapshot_version": {"const": 0}}}}}
+    },
+    "ReviewScheduleReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["review_schedule_schema_version", "status", "created"],
+      "properties": {
+        "review_schedule_schema_version": {"const": "0.1"},
+        "status": {"enum": ["not_due", "queued", "leased", "failed", "expired", "completed"]},
+        "created": {"type": "boolean"},
+        "trigger": {"$ref": "paper-thesis.schema.json#/$defs/Trigger"},
+        "job_id": {"$ref": "paper-account.schema.json#/$defs/AccountID"},
+        "created_at": {"type": "string", "format": "date-time"},
+        "snapshot": {"$ref": "#/$defs/SnapshotBundle"}
+      },
+      "if": {"properties": {"status": {"const": "not_due"}}},
+      "then": {
+        "properties": {"created": {"const": false}},
+        "not": {"anyOf": [{"required": ["trigger"]}, {"required": ["job_id"]}, {"required": ["created_at"]}, {"required": ["snapshot"]}]}
+      },
+      "else": {"required": ["trigger", "job_id", "created_at", "snapshot"]}
+    },
+    "Request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["paper_apply_schema_version", "job_id", "snapshot_context"],
+      "properties": {
+        "paper_apply_schema_version": {"const": "0.1"},
+        "job_id": {"$ref": "paper-account.schema.json#/$defs/AccountID"},
+        "snapshot_context": {"$ref": "#/$defs/SnapshotContext"},
+        "intent": {"anyOf": [{"$ref": "paper-replay.schema.json#/$defs/Intent"}, {"type": "null"}]}
+      }
+    },
+    "QuotePin": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["paper_quote_pin_schema_version", "job_id", "quote"],
+      "properties": {
+        "paper_quote_pin_schema_version": {"const": "0.1"},
+        "job_id": {"$ref": "paper-account.schema.json#/$defs/AccountID"},
+        "quote": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["ref", "sha256"],
+          "properties": {
+            "ref": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]{0,511}$", "not": {"pattern": "(^|/)([.]|[.][.])(/|$)|//|/$"}},
+            "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+          }
+        }
+      }
+    },
+    "FollowReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["paper_follow_schema_version", "job_id", "status"],
+      "properties": {
+        "paper_follow_schema_version": {"const": "0.1"},
+        "job_id": {"$ref": "paper-account.schema.json#/$defs/AccountID"},
+        "status": {"enum": ["awaiting_research", "awaiting_quote", "awaiting_recovery", "quote_expired", "snapshot_stale", "research_failed", "research_expired", "expired", "hold", "applied"]},
+        "application": {"$ref": "#/$defs/Result"}
+      },
+      "if": {"properties": {"status": {"enum": ["hold", "applied"]}}},
+      "then": {"required": ["application"]},
+      "else": {"not": {"required": ["application"]}}
+    },
+    "Result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["paper_apply_schema_version", "job_id", "status"],
+      "properties": {
+        "paper_apply_schema_version": {"const": "0.1"},
+        "job_id": {"$ref": "paper-account.schema.json#/$defs/AccountID"},
+        "status": {"enum": ["hold", "applied"]},
+        "execution": {"$ref": "paper-replay.schema.json#/$defs/Result"}
+      },
+      "if": {"properties": {"status": {"const": "applied"}}},
+      "then": {"required": ["execution"]},
+      "else": {"not": {"required": ["execution"]}}
+    }
+  }
+}

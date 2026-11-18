@@ -1,0 +1,154 @@
+{
+  "$defs": {
+    "CostCoverage": {
+      "additionalProperties": false,
+      "properties": {
+        "category": {
+          "enum": [
+            "additional_execution_fees",
+            "chain_fees",
+            "data",
+            "fx",
+            "infrastructure",
+            "issuer_drag",
+            "llm",
+            "other_operating"
+          ]
+        },
+        "reference_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+          "type": "string"
+        },
+        "series_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "complete",
+            "unknown",
+            "zero"
+          ]
+        }
+      },
+      "required": [
+        "series_id",
+        "category",
+        "status",
+        "reference_id"
+      ],
+      "title": "CostCoverage",
+      "type": "object"
+    },
+    "Expense": {
+      "additionalProperties": false,
+      "properties": {
+        "amount_usd": {
+          "anyOf": [
+            {
+              "pattern": "^(0|[1-9][0-9]{0,11})(\\.[0-9]{1,8})?$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "category": {
+          "enum": [
+            "additional_execution_fees",
+            "chain_fees",
+            "data",
+            "fx",
+            "infrastructure",
+            "issuer_drag",
+            "llm",
+            "other_operating"
+          ]
+        },
+        "cost_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+          "type": "string"
+        },
+        "incurred_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "reference_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+          "type": "string"
+        },
+        "series_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "cost_id",
+        "series_id",
+        "category",
+        "incurred_at",
+        "amount_usd",
+        "reference_id"
+      ],
+      "title": "Expense",
+      "type": "object"
+    },
+    "OperatingCosts": {
+      "additionalProperties": false,
+      "properties": {
+        "basis": {
+          "enum": [
+            "additional_to_execution_net"
+          ]
+        },
+        "coverage": {
+          "items": {
+            "$ref": "#/$defs/CostCoverage"
+          },
+          "maxItems": 256,
+          "type": "array"
+        },
+        "expenses": {
+          "items": {
+            "$ref": "#/$defs/Expense"
+          },
+          "maxItems": 10000,
+          "type": "array"
+        },
+        "first_mark_day": {
+          "format": "date",
+          "type": "string"
+        },
+        "last_mark_day": {
+          "format": "date",
+          "type": "string"
+        },
+        "schema_version": {
+          "enum": [
+            "0.1"
+          ]
+        },
+        "source_mode": {
+          "enum": [
+            "archived_local",
+            "synthetic_fixture"
+          ]
+        }
+      },
+      "required": [
+        "schema_version",
+        "source_mode",
+        "basis",
+        "first_mark_day",
+        "last_mark_day",
+        "expenses",
+        "coverage"
+      ],
+      "title": "OperatingCosts",
+      "type": "object"
+    }
+  },
+  "$ref": "#/$defs/OperatingCosts",
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
+}

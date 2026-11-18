@@ -51,6 +51,71 @@ services:
     tmpfs:
       - /tmp
 
+  paper-research:
+    extends:
+      service: research
+    profiles: [paper]
+    command: [worker, --control-url, 'http://control:8080', --archive-root, /archive]
+    volumes:
+      - type: bind
+        source: ${TRADINGBOT_PAPER_ARCHIVE_DIR:-./paper-archive}
+        target: /archive
+        read_only: true
+        bind:
+          create_host_path: false
+
+  paper-review:
+    profiles: [paper]
+    image: ${TRADINGBOT_CONTROL_IMAGE:-tradingbot-control:local}
+    entrypoint: [/usr/local/bin/paper-apply]
+    command: [schedule-review, --config, /paper-config/review.json, --archive-root, /archive, --poll-interval, 30s]
+    environment:
+      TRADINGBOT_DATABASE_URL: postgresql://research_control@postgres:5432/tradingbot?sslmode=disable
+    depends_on:
+      control:
+        condition: service_healthy
+    networks: [storage]
+    read_only: true
+    volumes:
+      - type: bind
+        source: ${TRADINGBOT_PAPER_CONFIG_DIR:-./paper-config}
+        target: /paper-config
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${TRADINGBOT_PAPER_ARCHIVE_DIR:-./paper-archive}
+        target: /archive
+        read_only: true
+        bind:
+          create_host_path: false
+
+  paper-dispatch:
+    profiles: [paper]
+    image: ${TRADINGBOT_CONTROL_IMAGE:-tradingbot-control:local}
+    entrypoint: [/usr/local/bin/paper-apply]
+    command: [dispatch, --account, '${TRADINGBOT_PAPER_ACCOUNT_ID:-}', --policy, /paper-config/policy.json, --quote-root, /quotes, --poll-interval, 5s]
+    environment:
+      TRADINGBOT_DATABASE_URL: postgresql://research_control@postgres:5432/tradingbot?sslmode=disable
+    depends_on:
+      control:
+        condition: service_healthy
+    networks: [storage]
+    read_only: true
+    volumes:
+      - type: bind
+        source: ${TRADINGBOT_PAPER_CONFIG_DIR:-./paper-config}
+        target: /paper-config
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${TRADINGBOT_PAPER_QUOTES_DIR:-./paper-quotes}
+        target: /quotes
+        read_only: true
+        bind:
+          create_host_path: false
+
   evaluation:
     profiles: [evaluation]
     image: ${TRADINGBOT_EVALUATION_IMAGE:-tradingbot-evaluation:local}

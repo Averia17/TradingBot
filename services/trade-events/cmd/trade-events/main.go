@@ -17,22 +17,24 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"tradingbot/trade-events/internal/exchange_fixture"
+	"tradingbot/trade-events/internal/fill_event"
 	"tradingbot/trade-events/internal/kafka"
 	"tradingbot/trade-events/internal/outbox"
 )
 
 func main() {
 	requeue := flag.Int64("requeue-task", 0, "requeue a failed trade outbox task by ID and exit")
+	paperLedger := flag.Bool("paper-ledger", false, "relay authoritative virtual paper fills from Control's PostgreSQL database")
 	flag.Parse()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	if err := run(ctx, *requeue); err != nil && ctx.Err() == nil {
+	if err := run(ctx, *requeue, *paperLedger); err != nil && ctx.Err() == nil {
 		slog.Error("trade events stopped", "error", err)
 		os.Exit(1)
 	}
 }
 
-func run(ctx context.Context, requeue int64) error {
+func run(ctx context.Context, requeue int64, paperLedger bool) error {
 	dsn := os.Getenv("TRADINGBOT_DATABASE_URL")
 	if dsn == "" {
 		return errors.New("TRADINGBOT_DATABASE_URL is required")
@@ -46,6 +48,13 @@ func run(ctx context.Context, requeue int64) error {
 	kafkaConfig, err := kafka.ReadConfig()
 	if err != nil {
 		return err
+	}
+	address := os.Getenv("TRADINGBOT_TEST_EXCHANGE_ADDR")
+	if paperLedger && (address != "" || kafkaConfig.Topic != fill_event.PaperTopic) {
+		return errors.New("-paper-ledger requires the dedicated paper topic and an unset TRADINGBOT_TEST_EXCHANGE_ADDR")
+	}
+	if !paperLedger && kafkaConfig.Topic == fill_event.PaperTopic {
+		return errors.New("dedicated paper topic requires -paper-ledger")
 	}
 	producer, err := kgo.NewClient(kgo.SeedBrokers(kafkaConfig.Brokers...), kgo.RequiredAcks(kgo.AllISRAcks()),
 		kgo.RecordDeliveryTimeout(10*time.Second))
@@ -64,7 +73,9 @@ func run(ctx context.Context, requeue int64) error {
 		return errors.New("Kafka unreachable at startup")
 	}
 	slog.Info("trade relay started", "topic", kafkaConfig.Topic)
-	address := os.Getenv("TRADINGBOT_TEST_EXCHANGE_ADDR")
+	if paperLedger {
+		return queue.RelayPaper(ctx, producer)
+	}
 	if address == "" {
 		return queue.Relay(ctx, producer, kafkaConfig.Topic)
 	}

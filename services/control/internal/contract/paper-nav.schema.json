@@ -1,0 +1,115 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Virtual paper portfolio valuation 0.1",
+  "$ref": "#/$defs/Request",
+  "$defs": {
+    "Identifier": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9:._-]{0,127}$"},
+    "AccountID": {"type": "string", "pattern": "^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$"},
+    "SHA256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "USD": {"type": "string", "pattern": "^(?:0|[1-9][0-9]{0,29})(?:\\.[0-9]{1,8})?$"},
+    "DecimalNAV": {"type": "string", "pattern": "^(?:0|[1-9][0-9]*)\\.[0-9]{8}$"},
+    "Day": {"type": "string", "format": "date"},
+    "Time": {"type": "string", "format": "date-time"},
+    "AgeSeconds": {"type": "integer", "minimum": 1, "maximum": 604800},
+    "Source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "id"],
+      "properties": {
+        "kind": {"enum": ["synthetic_fixture", "local_archive"]},
+        "id": {"$ref": "#/$defs/Identifier"}
+      }
+    },
+    "Instrument": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["instrument_id", "registry_version", "decimals"],
+      "properties": {
+        "instrument_id": {"$ref": "#/$defs/Identifier"},
+        "registry_version": {"$ref": "#/$defs/Identifier"},
+        "decimals": {"type": "integer", "minimum": 0, "maximum": 18}
+      }
+    },
+    "Mark": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mark_id", "instrument", "price_usd", "observed_at", "available_at"],
+      "properties": {
+        "mark_id": {"$ref": "#/$defs/Identifier"},
+        "instrument": {"$ref": "#/$defs/Instrument"},
+        "price_usd": {"$ref": "#/$defs/USD"},
+        "observed_at": {"$ref": "#/$defs/Time"},
+        "available_at": {"$ref": "#/$defs/Time"}
+      }
+    },
+    "Request": {
+      "description": "Value every closed UTC day in an inclusive range from an immutable local mark file and the paper ledger.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "account_id", "start_day", "end_day", "mark_max_age_seconds", "valuation_source", "marks"],
+      "properties": {
+        "schema_version": {"const": "0.1"},
+        "account_id": {"$ref": "#/$defs/AccountID"},
+        "start_day": {"$ref": "#/$defs/Day"},
+        "end_day": {"$ref": "#/$defs/Day"},
+        "mark_max_age_seconds": {"$ref": "#/$defs/AgeSeconds"},
+        "valuation_source": {"$ref": "#/$defs/Source"},
+        "marks": {"type": "array", "maxItems": 8192, "items": {"$ref": "#/$defs/Mark"}}
+      }
+    },
+    "Position": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["instrument", "quantity_raw"],
+      "properties": {
+        "instrument": {"$ref": "#/$defs/Instrument"},
+        "quantity_raw": {"type": "string", "pattern": "^[1-9][0-9]*$"},
+        "mark": {"$ref": "#/$defs/Mark"},
+        "issue": {"enum": ["mark_missing", "mark_stale"]}
+      }
+    },
+    "Row": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["day", "cutoff", "account_version", "last_event_id", "ledger_prefix_sha256", "cash_usd", "recorded_fees_usd", "nav_usd", "positions"],
+      "properties": {
+        "day": {"$ref": "#/$defs/Day"},
+        "cutoff": {"$ref": "#/$defs/Time"},
+        "account_version": {"type": "integer", "minimum": 1},
+        "last_event_id": {"$ref": "#/$defs/AccountID"},
+        "ledger_prefix_sha256": {"$ref": "#/$defs/SHA256"},
+        "cash_usd": {"$ref": "#/$defs/USD"},
+        "recorded_fees_usd": {"$ref": "#/$defs/USD"},
+        "nav_usd": {"anyOf": [{"$ref": "#/$defs/DecimalNAV"}, {"type": "null"}]},
+        "positions": {"type": "array", "items": {"$ref": "#/$defs/Position"}}
+      }
+    },
+    "Report": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "status", "account_id", "input_sha256", "valuation_source", "mark_max_age_seconds", "nav_basis", "external_costs_usd", "mark_policy", "ledger_hash_policy", "initial_funding", "daily_nav"],
+      "properties": {
+        "schema_version": {"const": "0.1"},
+        "status": {"enum": ["complete", "incomplete"]},
+        "account_id": {"$ref": "#/$defs/AccountID"},
+        "input_sha256": {"$ref": "#/$defs/SHA256"},
+        "valuation_source": {"$ref": "#/$defs/Source"},
+        "mark_max_age_seconds": {"$ref": "#/$defs/AgeSeconds"},
+        "nav_basis": {"const": "execution_net"},
+        "external_costs_usd": {"type": "null"},
+        "mark_policy": {"const": "last_locally_available_observation_at_utc_day_end"},
+        "ledger_hash_policy": {"const": "recorded_event_json_lines_v1"},
+        "initial_funding": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["cash_usd", "recorded_at"],
+          "properties": {
+            "cash_usd": {"$ref": "#/$defs/USD"},
+            "recorded_at": {"$ref": "#/$defs/Time"}
+          }
+        },
+        "daily_nav": {"type": "array", "minItems": 1, "maxItems": 366, "items": {"$ref": "#/$defs/Row"}}
+      }
+    }
+  }
+}

@@ -1,0 +1,78 @@
+{
+  "schema_version": "0.1",
+  "source_mode": "synthetic_fixture",
+  "as_of": "2026-10-02T13:30:08Z",
+  "market": {
+    "underlying_id": "fixture:TSLA",
+    "chain": "fixture:chain-a",
+    "side": "BUY",
+    "target_shares": "1.25",
+    "max_age_seconds": 30,
+    "allowed_issuers": ["fixture:issuer-a", "fixture:issuer-b"]
+  },
+  "registry": {
+    "snapshot_version": "fixture-registry-v1",
+    "wrappers": [
+      {
+        "token": {"chain": "fixture:chain-a", "mint": "fixture:TSLAx", "program": "fixture:token-program-a", "decimals": 6},
+        "underlying_id": "fixture:TSLA",
+        "issuer_id": "fixture:issuer-a",
+        "revision": "tslax-r1",
+        "available_at": "2026-09-30T13:30:00Z",
+        "effective_at": "2026-10-01T13:30:00Z",
+        "shares_per_token": {"numerator": "1", "denominator": "1"}
+      },
+      {
+        "token": {"chain": "fixture:chain-a", "mint": "fixture:TSLAon", "program": "fixture:token-program-b", "decimals": 8},
+        "underlying_id": "fixture:TSLA",
+        "issuer_id": "fixture:issuer-b",
+        "revision": "tslaon-r1",
+        "available_at": "2026-09-30T13:30:00Z",
+        "effective_at": "2026-10-01T13:30:00Z",
+        "shares_per_token": {"numerator": "5", "denominator": "2"}
+      }
+    ]
+  },
+  "reference": {
+    "observed_at": "2026-10-02T13:30:00Z",
+    "expires_at": "2026-10-02T13:30:30Z",
+    "usd_per_share": "80",
+    "settlements": [
+      {"token": {"chain": "fixture:chain-a", "mint": "fixture:USDC", "program": "fixture:token-program-a", "decimals": 6}, "usd_per_token": "1"},
+      {"token": {"chain": "fixture:chain-a", "mint": "fixture:USDon", "program": "fixture:token-program-b", "decimals": 8}, "usd_per_token": "1.03"}
+    ]
+  },
+  "quotes": [
+    {
+      "id": "pay-usdon",
+      "mode": "synthetic_firm",
+      "side": "BUY",
+      "wrapper": {"chain": "fixture:chain-a", "mint": "fixture:TSLAon", "program": "fixture:token-program-b", "decimals": 8},
+      "registry_revision": "tslaon-r1",
+      "settlement": {"chain": "fixture:chain-a", "mint": "fixture:USDon", "program": "fixture:token-program-b", "decimals": 8},
+      "input_raw": "9800000000",
+      "expected_output_raw": "51000000",
+      "min_output_raw": "50000000",
+      "observed_at": "2026-10-02T13:30:05Z",
+      "expires_at": "2026-10-02T13:30:12Z",
+      "fees": []
+    },
+    {
+      "id": "pay-usdc",
+      "mode": "synthetic_firm",
+      "side": "BUY",
+      "wrapper": {"chain": "fixture:chain-a", "mint": "fixture:TSLAx", "program": "fixture:token-program-a", "decimals": 6},
+      "registry_revision": "tslax-r1",
+      "settlement": {"chain": "fixture:chain-a", "mint": "fixture:USDC", "program": "fixture:token-program-a", "decimals": 6},
+      "input_raw": "100000000",
+      "expected_output_raw": "1251000",
+      "min_output_raw": "1250000",
+      "observed_at": "2026-10-02T13:30:05Z",
+      "expires_at": "2026-10-02T13:30:12Z",
+      "fees": [
+        {"id": "venue-fee", "treatment": "embedded", "amount_usd": "1"},
+        {"id": "network-fee", "treatment": "additional", "amount_usd": "0.25"}
+      ]
+    }
+  ]
+}

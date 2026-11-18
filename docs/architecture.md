@@ -8,7 +8,7 @@
 разрешение из общего бюджета задания перед каждым вызовом. Локальный Compose
 упаковывает Go control, PostgreSQL и worker. Nautilus запускается в отдельно
 закреплённом evaluation окружении. Go paper ledger ведёт виртуальные счета и
-полные симулированные исполнения через локальный API.
+частичные и полные симулированные исполнения через локальный API.
 Правила для разработчиков: [AGENTS.md](../AGENTS.md).
 
 ## Ответственность компонентов
@@ -19,10 +19,11 @@
 | Fixture worker | Go | Claim, heartbeat и публикация синтетического результата по выданному снимку | `services/control/cmd/research-fixture-worker`, отдельная офлайн-команда |
 | Research worker | Python | TradingAgents graph, provider SDK/callbacks, portfolio arbitration, evidence, usage; выдаёт research batch | `tradingbot worker` забирает job, продлевает lease и публикует результат офлайн-графа |
 | Evaluation worker | Python | Nautilus replay/backtest/paper evaluation, execution-cost models, benchmarks | `services/evaluation` с собственным lock; native probe и синтетический хронологический replay |
-| Paper ledger | Go | Виртуальные деньги, позиции, резервы и журнал исполнений | `services/control/internal/ledger` с PostgreSQL, версиями состояния и полными paper fills |
+| Paper ledger | Go | Виртуальные деньги, позиции, резервы и журнал исполнений | `services/control/internal/ledger` с PostgreSQL, версиями состояния и историей paper fills |
+| Paper application | Go | Связь операционного снимка, сохранённого исследования, политики и тестовой котировки | Локальная команда `paper-apply` сверяет полномочия и резервирует через paper ledger |
 | Execution worker | Go | Allowed venue quotes/build/submit/status; без ключа и права менять policy | Будущий модуль control, затем отдельный process |
 | Independent verifier/signer | Go | Decode transaction, owner limits/allowlists, approval exact hash, signing | Отдельный future live host/identity |
-| Trade events | Go | Принимает тестовые fills и публикует события через pgqueue и Kafka | `services/trade-events/`, независимый образ в Compose-профиле `test` |
+| Trade events | Go | Публикует события через pgqueue и Kafka | `services/trade-events/` с тестовым входом и отдельным relay для outbox paper ledger |
 | Notifications | Go | Читает события из Kafka, отправляет в личный Telegram | `services/notifications/`, независимый образ |
 | PostgreSQL | SQL | Durable state/jobs/events и constraints; economic writes только через control | Локальные migrations для research snapshots/jobs/outbox, production deployment впереди |
 
@@ -80,6 +81,27 @@ Research сохраняет решения без блокировки реал�
 его reservations отделены от live account. Резервирование реальных cash/tokens
 появляется только в разрешённом live протоколе и не выводится из research DTO.
 
+В локальном режиме `paper-apply snapshot` выпускает research-портфель из
+версии бумажного счёта. ID снимка включает точные значения портфеля, policy
+и доступные на момент снимка цены. Команда применения сверяет завершённое
+задание, хеши evidence, источник результата и действующую политику владельца.
+Тестовая котировка связывается с решением по идентичности инструмента и
+времени после завершения research. Ledger повторно проверяет версию счёта
+под блокировкой при резервировании. [Контракт команды](../contracts/paper-apply.schema.json).
+
+`schedule-review` пишет контекст применения и задание одной транзакцией
+в PostgreSQL. `paper-apply dispatch` читает завершённые записи своего
+счёта и использует тот же `follow`, что доступен для отдельного задания.
+Проверенная котировка фиксируется атомарно с резервом. До подтверждения
+диспетчеру ledger сохраняет квитанцию, позволяющую продолжить после сбоя.
+В профиле `paper` контейнер research видит только архив и HTTP Control.
+
+Планировщик пересмотра берёт факт открытия и актуальный снимок из ledger.
+При наступившем сроке или архивном катализаторе он создаёт research job с
+устойчивым ID триггера. В исходах `paper-memory` для следующего research
+остаются только сверенные FIFO-исполнения, записанные к cutoff. Источник и
+комиссии передаются вместе с исходом. [Порядок запуска](../README.md#виртуальный-paper-счёт).
+
 ## Межсервисный contract
 
 Начинаем с HTTP/JSON и явного protocol version. Длительный LLM/backtest workflow
@@ -101,8 +123,10 @@ Go fixture worker публикует без обращения к моделям
 snapshot и universe. При потере ответа он повторяет тот же claim ID или payload
 completion. Control сравнивает batch с сохранённым snapshot и universe, пересчитывает
 evidence hashes из текста и проверяет lease перед записью. Результат, статус
-и outbox commit атомарно. Для тестовых моделей USD billing неизвестен,
-проверка содержимого архива впереди. Research DTO
+и outbox commit атомарно. Для тестовых моделей USD billing неизвестен.
+Для локального PIT-архива worker сверяет хеш и доступность каждой записи
+и её локальное получение к моменту снимка. Архивная диагностика позволяет
+отдельно воспроизвести срез по времени публикации источника. Research DTO
 содержит `run_id`, `portfolio_snapshot_id`, `as_of`, `created_at`, `expires_at`,
 `evidence_hashes`, `intents` и `schema_version="0.1"`.
 

@@ -1,0 +1,213 @@
+{
+  "$defs": {
+    "DailyNav": {
+      "additionalProperties": false,
+      "properties": {
+        "day": {
+          "format": "date",
+          "type": "string"
+        },
+        "nav_usd": {
+          "additionalProperties": {
+            "pattern": "^(0|[1-9][0-9]{0,11})(\\.[0-9]{1,8})?$",
+            "type": "string"
+          },
+          "propertyNames": {
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"
+          },
+          "type": "object"
+        }
+      },
+      "required": [
+        "day",
+        "nav_usd"
+      ],
+      "title": "DailyNav",
+      "type": "object"
+    },
+    "DecisionInput": {
+      "additionalProperties": false,
+      "properties": {
+        "available_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "factual_memory",
+            "market_observation"
+          ]
+        },
+        "observed_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "reference_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "reference_id",
+        "kind",
+        "observed_at",
+        "available_at"
+      ],
+      "title": "DecisionInput",
+      "type": "object"
+    },
+    "DecisionWindow": {
+      "additionalProperties": false,
+      "properties": {
+        "as_of": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "decision_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+          "type": "string"
+        },
+        "inputs": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/DecisionInput"
+          },
+          "type": "array"
+        },
+        "label_available_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "label_end": {
+          "format": "date-time",
+          "type": "string"
+        }
+      },
+      "required": [
+        "decision_id",
+        "as_of",
+        "label_end",
+        "label_available_at"
+      ],
+      "title": "DecisionWindow",
+      "type": "object"
+    },
+    "EvaluationEvidence": {
+      "additionalProperties": false,
+      "properties": {
+        "daily_nav": {
+          "items": {
+            "$ref": "#/$defs/DailyNav"
+          },
+          "maxItems": 4096,
+          "minItems": 2,
+          "type": "array"
+        },
+        "daily_nav_basis": {
+          "enum": [
+            "execution_net"
+          ]
+        },
+        "decisions": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/DecisionWindow"
+          },
+          "type": "array"
+        },
+        "paper_nav_provenance": {
+          "$ref": "#/$defs/PaperNavProvenance"
+        },
+        "protocol_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "type": "string"
+        },
+        "replay_provenance": {
+          "$ref": "#/$defs/ReplayProvenance"
+        },
+        "schema_version": {
+          "enum": [
+            "0.1",
+            "0.2"
+          ]
+        }
+      },
+      "required": [
+        "schema_version",
+        "protocol_sha256",
+        "daily_nav"
+      ],
+      "title": "EvaluationEvidence",
+      "type": "object"
+    },
+    "PaperNavProvenance": {
+      "additionalProperties": false,
+      "properties": {
+        "account_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+          "type": "string"
+        },
+        "method": {
+          "enum": [
+            "paper_ledger_export"
+          ]
+        },
+        "paper_nav_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "method",
+        "paper_nav_sha256",
+        "account_id"
+      ],
+      "title": "PaperNavProvenance",
+      "type": "object"
+    },
+    "ReplayProvenance": {
+      "additionalProperties": false,
+      "properties": {
+        "execution_costs": {
+          "enum": [
+            "bid_ask_and_simulated_commission"
+          ]
+        },
+        "external_costs_usd": {
+          "type": "null"
+        },
+        "mark_policy": {
+          "enum": [
+            "last_known_bid_at_utc_day_end"
+          ]
+        },
+        "method": {
+          "enum": [
+            "nautilus_prefix"
+          ]
+        },
+        "nautilus_version": {
+          "maxLength": 32,
+          "minLength": 1,
+          "type": "string"
+        },
+        "normalized_replay_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "method",
+        "normalized_replay_sha256",
+        "nautilus_version",
+        "mark_policy",
+        "execution_costs",
+        "external_costs_usd"
+      ],
+      "title": "ReplayProvenance",
+      "type": "object"
+    }
+  },
+  "$ref": "#/$defs/EvaluationEvidence",
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
+}

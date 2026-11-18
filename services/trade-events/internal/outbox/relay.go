@@ -36,13 +36,17 @@ func (r *relay) RunTask(ctx context.Context, job *pgqueue.Job[fill_event.Event])
 	if err != nil {
 		return pgqueue.Fail(fmt.Errorf("encode fill event: %w", err))
 	}
+	return r.publish(ctx, job.Task.ID, event.ID, payload)
+}
+
+func (r *relay) publish(ctx context.Context, taskID int64, id string, payload []byte) pgqueue.Result {
 	ctx, cancel := context.WithTimeout(ctx, 12*time.Second)
 	defer cancel()
-	record := &kgo.Record{Topic: r.topic, Key: []byte(event.ID), Value: payload}
+	record := &kgo.Record{Topic: r.topic, Key: []byte(id), Value: payload}
 	if err := r.producer.ProduceSync(ctx, record).FirstErr(); err != nil {
-		return pgqueue.Retry(fmt.Errorf("publish fill %s to Kafka: %w", event.ID, err))
+		return pgqueue.Retry(fmt.Errorf("publish fill %s to Kafka: %w", id, err))
 	}
-	slog.Info("fill event acknowledged by Kafka", "event_id", event.ID, "task_id", job.Task.ID,
+	slog.Info("fill event acknowledged by Kafka", "event_id", id, "task_id", taskID,
 		"topic", r.topic, "partition", record.Partition, "offset", record.Offset)
 	return pgqueue.Done()
 }

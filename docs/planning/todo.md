@@ -136,7 +136,7 @@ Research и текущая диагностика Nautilus находятся в
 
 ### [ ] P2-01 — PostgreSQL event ledger and migrations
 
-- **Текущий прогресс:** Go paper ledger хранит виртуальные счета, полные fills, резервы и журнал. Проверены перезапуск, восстановление копии и точные суммы через HTTP.
+- **Текущий прогресс:** Go paper ledger хранит виртуальные счета, частичные и полные fills, резервы и журнал. Проверены перезапуск, восстановление копии, миграция исполнений из 0.1 и точные суммы через HTTP.
 - **Goal:** authoritative cash/intent/event identifiers.
 - **Context:** mutable Markdown не accounting ledger.
 - **Files/components:** `services/control/internal/ledger/`, PostgreSQL ledger migrations, `contracts/events.json`.
@@ -146,6 +146,7 @@ Research и текущая диагностика Nautilus находятся в
 
 ### [ ] P2-02 — SEC acceptance and vintage ingestion
 
+- **Текущий прогресс:** локальный импорт проверяет SHA-256 сохранённых ответов EDGAR и ALFRED, сохраняет время приёма, accession, поправки, даты винтажей и десятичные значения. Архив использует зафиксированное в манифесте локальное время получения. Сбор, покрытие и права на реальные данные ещё предстоит подтвердить.
 - **Goal:** point-in-time fundamentals/macro.
 - **Context:** filed date/revised latest series недостаточны.
 - **Files/components:** `services/research/tradingbot/ingest/sec.py`, `fred.py`, `data/manifests/`.
@@ -164,7 +165,7 @@ Research и текущая диагностика Nautilus находятся в
 
 ### [ ] P2-04 — Nautilus compatibility spike
 
-- **Текущий прогресс:** изолированный pinned Nautilus runtime выполняет синтетический multi-asset replay и cash benchmark. Корпоративные действия и token multipliers остаются открыты.
+- **Текущий прогресс:** изолированный pinned Nautilus runtime выполняет синтетический multi-asset replay и бенчмарки, включая денежные дивиденды и сплиты акций. Токенные множители и дробные компенсации требуют отдельной модели.
 - **Goal:** подтвердить reuse engine до большого adapter.
 - **Context:** token multiplier/actions не доказаны engine defaults.
 - **Files/components:** `services/evaluation/engine.py`, `services/research/tests/fixtures/actions/`, `docs/adr/evaluator.md`.
@@ -183,6 +184,7 @@ Research и текущая диагностика Nautilus находятся в
 
 ### [ ] P2-06 — Deterministic and investment benchmarks
 
+- **Текущий прогресс:** синтетический native replay строит cash, buy-and-hold, equal-weight и трендовый long/cash по одному инструменту. Тренд использует зафиксированные lookback и максимальный пропуск котировок. Рыночные затраты и доступность эталонов ещё предстоит подтвердить.
 - **Goal:** сопоставить сложный AI с простыми стратегиями.
 - **Context:** nominal return не alpha.
 - **Files/components:** `services/evaluation/benchmarks.py`, `reports.py`.
@@ -192,6 +194,7 @@ Research и текущая диагностика Nautilus находятся в
 
 ### [ ] P2-07 — Leakage and statistical protocol audit
 
+- **Текущий прогресс:** замороженный локальный протокол проверяет границы выборок, пересечение меток, эмбарго, доступность входов и даты NAV. На парной дневной избыточной доходности воспроизводит интервалы блочного bootstrap с поправкой на зарегистрированные сравнения. Синтетический набор и неизвестная история обучения модели маркируются в отчёте.
 - **Goal:** честно классифицировать retrospective evidence.
 - **Context:** LLM weights могут содержать test outcomes.
 - **Files/components:** `docs/leakage-register.md`, `services/evaluation/statistics.py`, experiment split manifest.
@@ -225,6 +228,7 @@ Research и текущая диагностика Nautilus находятся в
 
 ### [ ] P3-03 — Share-equivalent routing comparison
 
+- **Текущий прогресс:** `paper-quote-compare` проверяет версию коэффициента и точную идентичность инструмента, размер, срок и settlement FX. Синтетические сравнения не подтверждают реальные котировки, asset registry и доступность площадки.
 - **Goal:** корректно сравнить wrappers/held SELL.
 - **Context:** token amounts разных issuers не взаимозаменяемы.
 - **Files/components:** `services/control/internal/venues/normalize/`, `services/evaluation/quote_compare.py`.
@@ -234,6 +238,7 @@ Research и текущая диагностика Nautilus находятся в
 
 ### [ ] P3-04 — Fee/impact/failure cost replay
 
+- **Текущий прогресс:** отчёт с замороженным cost ledger воспроизводит execution-net и operating-net NAV, сохраняя неизвестные расходы. Затраты вычитаются после симуляции. Измеренные chain, impact и failure costs нужны для полной фазы.
 - **Goal:** evaluator uses full economic costs.
 - **Context:** nominal 0-fee claims hide spread/gas.
 - **Files/components:** `services/evaluation/costs.py`, `services/control/internal/venues/costs/`.
@@ -243,6 +248,7 @@ Research и текущая диагностика Nautilus находятся в
 
 ### [ ] P3-05 — Cheap scorer with budgeted candidate selection
 
+- **Текущий прогресс:** PIT-отбор по закреплённому stockstats ROC, допуску, свежести, обороту и спреду готовит стандартное durable research-задание в пределах явно заданных слотов. Глобальный дневной остаток передаёт вызывающая сторона.
 - **Goal:** не анализировать500 equities full debate ежедневно.
 - **Context:** universe prefilter, не замена AI trade decision.
 - **Files/components:** existing Qlib workflow/config adapter либо existing TA indicator-ranking adapter, `services/research/tradingbot/universe/scorer.py`, `config/universe.yaml`.
@@ -281,6 +287,7 @@ Research и текущая диагностика Nautilus находятся в
 
 ### [ ] P4-03 — Bounded factual retrieval and reflection
 
+- **Текущий прогресс:** `paper-memory` переносит сверенные FIFO-исходы до cutoff в хешированный архив. Граф читает ограниченный контекст по тикеру и группе риска. Отдельный прогон PostgreSQL → Python подтвердил точный отрицательный исход. Уроки и сравнение с бенчмарком остаются открыты.
 - **Goal:** полезный auditably sourced context.
 - **Context:** reflection может усилить luck/anchoring.
 - **Files/components:** `services/research/tradingbot/memory/retrieval.py`, `reflection.py`.
@@ -315,6 +322,7 @@ Research и текущая диагностика Nautilus находятся в
 
 ### [ ] P5-01 — Paper scheduling over durable research jobs
 
+- **Текущий прогресс:** календарь, подготовленные архивные события и пересмотры открытых позиций создают durable jobs с устойчивым ID. На PostgreSQL проверены повтор после рестарта и конфликт изменившегося содержимого. Сигналы для детектора событий поступают из подготовленного архива.
 - **Goal:** dependable event scheduling без Redis/Kafka.
 - **Context:** duplicate triggers не должны создавать двойные trades.
 - **Files/components:** Go scheduler поверх jobs/leases/outbox из S2 и research worker из S3.
@@ -324,6 +332,7 @@ Research и текущая диагностика Nautilus находятся в
 
 ### [ ] P5-02 — Position/thesis review lifecycle
 
+- **Текущий прогресс:** Go восстанавливает срок и триггер из сохранённого research-решения, исполнения и открытых FIFO-лотов. `schedule-review` автоматически фиксирует актуальный снимок и ставит одно задание на триггер. Детектирование событий из наблюдаемого потока и измеренные затраты выхода остаются открыты.
 - **Goal:** автономные holds/adds/reductions по horizon/event.
 - **Context:** без forced daily exit и basis anchoring.
 - **Files/components:** `services/research/tradingbot/positions.py`, `review.py`.
@@ -337,6 +346,7 @@ Research и текущая диагностика Nautilus находятся в
 
 ### [ ] P5-03 — Deterministic risk and reservations
 
+- **Текущий прогресс:** `paper-apply` проверяет policy, версию снимка, точный инструмент, расходы, TTL, достаточность средств и концентрацию. На PostgreSQL проверены исполнение по сохранённому решению, частичные fills и повтор без двойного списания.
 - **Goal:** account limits перед simulated execution.
 - **Context:** AI decides signal, kernel only safety.
 - **Files/components:** `services/control/internal/risk/`, SQL reservation transactions, `config/risk.yaml`.
@@ -346,6 +356,7 @@ Research и текущая диагностика Nautilus находятся в
 
 ### [ ] P5-04 — Forward paper venue and ledger reconciliation
 
+- **Текущий прогресс:** бумажный ledger сохраняет fill и событие уведомления в одной транзакции. Relay и consumer проверены с PostgreSQL, локальным Kafka и подставным приёмником. Для forward оценки нужны наблюдавшиеся рыночные котировки и согласованный ряд NAV с полными расходами.
 - **Goal:** prospective feasible fills, not rating-only results.
 - **Context:** quotes recorded after decision completion.
 - **Files/components:** `services/control/internal/venues/paper/`, `services/evaluation/forward.py`.
@@ -356,6 +367,7 @@ Research и текущая диагностика Nautilus находятся в
 
 ### [ ] P5-05 — Monitoring, backup and recovery
 
+- **Текущий прогресс:** восстановление логического архива PostgreSQL проверено на чистом экземпляре. Сохранились резервы, история сделок, завершённые jobs и выданные разрешения. Прерванное задание продолжилось после истечения lease. `paper-check` проверяет нарушения сверки, сроки заявок и бюджет выбранного задания. [Процедура проверки](../runbooks/paper.md).
 - **Goal:** наблюдаемая эксплуатация и восстановление.
 - **Context:** paper выявляет operational problems до funds.
 - **Files/components:** `services/research/tradingbot/observability.py`, `services/control/internal/telemetry/`, `docs/runbooks/paper.md`, `deploy/`.
@@ -365,6 +377,7 @@ Research и текущая диагностика Nautilus находятся в
 
 ### [ ] P5-06 — Forward evidence and power review
 
+- **Текущий прогресс:** дневной NAV виртуального счёта воспроизводится по доступным на конец дня UTC ценам и версиям ledger. Оценка сверяет ряд с эталоном свободного USD и считает наблюдаемую просадку, волатильность и net excess. Полная forward-выборка и дата предварительной регистрации пока неизвестны.
 - **Goal:** принять go/hold/stop по пререгистрированным данным.
 - **Context:** 8–12 weeks reliability не автоматически alpha proof.
 - **Files/components:** `experiments/forward/reports/`, `docs/gates/G5.md`.

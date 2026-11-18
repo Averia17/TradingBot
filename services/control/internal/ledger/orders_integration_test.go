@@ -58,7 +58,7 @@ func TestPaperUnknownKeepsReservationAndSettleDebitsExactAmounts(t *testing.T) {
 	if _, _, err := store.Reserve(ctx, conflict); !errors.Is(err, ErrConflict) {
 		t.Fatalf("changed order identity = %v", err)
 	}
-	fill := ResolutionRequest{AccountID: testAccountID, OrderID: request.OrderID, EventID: identifier(52), Outcome: "filled", GrossUSD: "20.12345677", FeeUSD: "0.00000003", ObservedAt: time.Now().UTC()}
+	fill := ResolutionRequest{AccountID: testAccountID, OrderID: request.OrderID, EventID: identifier(52), Outcome: "filled", GrossUSD: "20.12345677", FeeUSD: "0.00000003", ObservedAt: reserved.CreatedAt}
 	if _, _, err := store.Resolve(ctx, fill); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("fee above reservation = %v", err)
 	}
@@ -85,10 +85,11 @@ func TestPaperSellCannotShortOrSpendFutureProceeds(t *testing.T) {
 	store := openLedger(t, ctx, dsn)
 	createFixture(t, ctx, store, "25")
 	buy := reserveFixture(1, 1)
-	if _, _, err := store.Reserve(ctx, buy); err != nil {
+	opening, _, err := store.Reserve(ctx, buy)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := store.Resolve(ctx, ResolutionRequest{AccountID: testAccountID, OrderID: buy.OrderID, EventID: identifier(51), Outcome: "filled", GrossUSD: "20", FeeUSD: "0.00000001", ObservedAt: time.Now().UTC()}); err != nil {
+	if _, _, err := store.Resolve(ctx, ResolutionRequest{AccountID: testAccountID, OrderID: buy.OrderID, EventID: identifier(51), Outcome: "filled", GrossUSD: "20", FeeUSD: "0.00000001", ObservedAt: opening.CreatedAt}); err != nil {
 		t.Fatal(err)
 	}
 	sell := reserveFixture(2, 3)
@@ -116,10 +117,11 @@ func TestPaperSellCannotShortOrSpendFutureProceeds(t *testing.T) {
 	}
 	sell = reserveFixture(4, account.Version)
 	sell.Side = "SELL"
-	if _, _, err := store.Reserve(ctx, sell); err != nil {
+	resale, _, err := store.Reserve(ctx, sell)
+	if err != nil {
 		t.Fatal(err)
 	}
-	settlement := ResolutionRequest{AccountID: testAccountID, OrderID: sell.OrderID, EventID: identifier(54), Outcome: "filled", GrossUSD: "21", FeeUSD: "0.00000002", ObservedAt: time.Now().UTC()}
+	settlement := ResolutionRequest{AccountID: testAccountID, OrderID: sell.OrderID, EventID: identifier(54), Outcome: "filled", GrossUSD: "21", FeeUSD: "0.00000002", ObservedAt: resale.CreatedAt}
 	if _, _, err := store.Resolve(ctx, settlement); err != nil {
 		t.Fatal(err)
 	}

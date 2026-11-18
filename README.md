@@ -158,9 +158,39 @@ research. Тест собирает Go control и запускает worker от
 
 В режиме `tradingbot worker --archive-root <путь>` worker сверяет SHA-256
 `data_manifest` с локальным файлом, выбирает только доступные к `as_of`
-ревизии и передаёт ограниченный источниками контекст в TradingAgents. Хеш
-выбранного снимка входит в отчёт. Пример формата есть в
+и уже полученные локально ревизии. Он передаёт ограниченный контекст в
+TradingAgents. Хеш выбранного снимка входит в отчёт. Пример формата есть в
 [синтетическом архиве](services/research/examples/pit-archive.json).
+
+Для импорта сохранённых JSON SEC EDGAR и ALFRED передайте манифест с SHA-256
+исходных файлов. Импорт оставляет время приёма SEC и каждый accession,
+включая поправки. Для ALFRED он сохраняет исходное значение и день винтажа.
+Моментом доступности считается зафиксированное время получения ответа.
+Запуск с локальными синтетическими примерами выводит архив в stdout.
+
+```powershell
+uv --directory services/research run --offline --frozen python -m tradingbot.ingest --root examples/pit-import --manifest examples/pit-import/manifest.json
+```
+
+Сохраните stdout в UTF-8 и вычислите SHA-256 итогового файла для
+`data_manifest`. Импорт проверяет байты и переданные времена, а достоверность
+сбора, права использования и покрытие требуют собственных подтверждений.
+[Схема манифеста](contracts/pit-capture-manifest.schema.json) · [SEC EDGAR API](https://www.sec.gov/search-filings/edgar-application-programming-interfaces) · [Документация ALFRED](https://fred.stlouisfed.org/docs/api/fred/realtime_period.html).
+
+Для предварительного отбора используйте SHA-256 архива и снимок счёта.
+Команда фильтрует кандидатов по допуску, свежести, обороту и спреду. Она
+отдаёт приоритет открытой позиции со свежим событием и ранжирует остальные
+по ROC из stockstats. Вывод содержит `job` для Go Control либо `null`,
+если подходящий набор не укладывается в лимит. Владелец указывает остаток
+дневных слотов. Сформированное задание несёт собственный durable лимит
+вызовов, включая один вызов на распределение портфеля.
+
+```powershell
+uv --directory services/research run --offline --frozen python -m tradingbot.selection --root examples/selection --request examples/selection/request.json
+```
+
+Пример использует синтетические raw bars в USD. Оборот, bid и ask
+должны относиться к заявленной записи. [Схема отбора](contracts/research-selection.schema.json).
 
 ## Локальный офлайн-контур в Docker Compose
 
@@ -173,6 +203,21 @@ Control доступен на `127.0.0.1:18080`. PostgreSQL доступна т�
 docker compose -f deploy/research/compose.yaml up -d --build --wait
 docker compose -f deploy/research/compose.yaml --profile evaluation run --rm --build evaluation
 ```
+
+Для автоматического paper-контура задайте абсолютные пути к существующим
+локальным директориям через `TRADINGBOT_PAPER_ARCHIVE_DIR`,
+`TRADINGBOT_PAPER_CONFIG_DIR` и `TRADINGBOT_PAPER_QUOTES_DIR`. В директории
+конфига нужны `review.json` для открытой позиции и `policy.json` владельца.
+`TRADINGBOT_PAPER_ACCOUNT_ID` задаёт UUID того же виртуального счёта.
+Запустите paper worker с архивом, планировщиком и применением решений.
+
+```powershell
+docker compose -f deploy/research/compose.yaml --profile paper up -d --build postgres control paper-research paper-review paper-dispatch
+```
+
+Если в этом же Compose-проекте уже работает сервис `research` для
+синтетических smoke jobs, остановите его перед запуском `paper-research`.
+Оба читают одну очередь, а paper worker требует архив снимка.
 
 Для отдельной проверки сборки, совместимости, замены и отката worker запустите
 `python deploy/research/smoke.py` с Python 3.12 и Docker. Скрипт создаёт временный
@@ -196,8 +241,11 @@ Control с PostgreSQL может создать виртуальный счёт 
 `GET /v1/paper/accounts/{id}`. Резервируйте полную BUY или SELL заявку через
 `POST /v1/paper/accounts/{id}/orders`. Она связана с версией счёта, инструментом,
 ID решения и котировки, предельной комиссией и сроком. `POST .../orders/{order}/resolve`
-пишет только виртуальный исход `filled`, `unknown` или `cancelled`. Неопределённый
-исход сохраняет резерв до сверки. Для журнала используйте
+пишет виртуальный исход `partially_filled`, `filled`, `unknown` или `cancelled`.
+Для частичного исполнения укажите `quantity_raw`. Полное исполнение без
+`quantity_raw` закрывает остаток. `unknown` удерживает оставшийся резерв до
+сверки. Ответ по ордеру содержит историю `fills` и исполненное и оставшееся
+количество. Для журнала используйте
 `GET /v1/paper/accounts/{id}/events?after_version=0&limit=25`.
 `GET /v1/paper/accounts/{id}/outcomes?as_of=<UTC>` восстанавливает FIFO-результаты
 с учётом fees и себестоимости ещё открытых лотов по доступной на тот момент
@@ -209,8 +257,104 @@ ID решения и котировки, предельной комиссией
 --intent <intent.json> --quote <quote.json>` применяет к ledger локальную тестовую
 котировку, которую intent привязывает по SHA-256. Нужна `TRADINGBOT_DATABASE_URL`
 для Control DB с созданным paper account. Повторы используют устойчивые ID.
-Политика концентрации и частичные исполнения дорабатываются в S5.
 [Формат входа и результата](contracts/paper-replay.schema.json).
+Котировка 0.2 с `execution: "partial"` указывает `executed_quantity_raw` и
+цену всей заявки. Симулятор рассчитывает пропорциональную сумму и комиссию
+исполненной части. Неисполненное количество остаётся в резерве до сверки.
+
+Для применения сохранённого research-решения сначала подготовьте policy
+владельца и массив наблюдавшихся цен с `at` и `available_at`. Передайте
+абсолютные пути к файлам при запуске через `go -C`.
+
+```powershell
+go -C services/control run ./cmd/paper-apply snapshot --account $accountId --policy $policyPath --marks $marksPath
+go -C services/control run ./cmd/paper-apply apply --policy $policyPath --request $requestPath --quote $quotePath
+```
+
+Первая команда выдаёт `portfolio` для research job и `snapshot_context` для
+последующего применения. Во второй команде передайте в запросе `job_id`,
+`snapshot_context` и `paper_apply_schema_version: "0.1"`. Go выбирает решение
+для точного инструмента из сохранённого результата и использует тестовую
+котировку, наблюдавшуюся после его записи. При HOLD по всему портфелю
+`--quote` можно опустить. Если версия счёта изменилась, следующее новое
+исполнение требует свежего снимка и решения. Повтор исходных файлов
+возвращает прежний результат по ордеру.
+[Пример политики](contracts/valid-paper-policy.json) и [схема команды](contracts/paper-apply.schema.json).
+
+`paper-apply follow` отслеживает результат привязанного задания. Если в
+записанном результате все решения HOLD, команда сохраняет квитанцию без
+заявки. Для исполнения она читает `<job_id>.json` из явно заданного
+`--quote-root`. Этот файл фиксирует путь и SHA-256 локальной котировки.
+После резерва PostgreSQL хранит принятые байты. При перезапуске можно
+продолжить тот же ордер даже при удалённом исходном файле.
+
+```powershell
+go -C services/control run ./cmd/paper-apply follow --request $requestPath --policy $policyPath --quote-root $quoteRoot --poll-interval 5s
+```
+
+Файл для `follow` или `dispatch` может выпустить `paper-quote-pin` из
+сохранённой синтетической ленты. Для задания пересмотра контекст читается
+из durable записи в PostgreSQL. Используется подходящая котировка,
+наблюдавшаяся и полученная после завершения задания и ещё не истёкшая.
+
+```powershell
+go -C services/control run ./cmd/paper-quote-pin --job $jobId --tape $tapePath --sha256 $tapeHash --quote-root $quoteRoot
+```
+
+Для сравнения синтетических котировок на одной экспозиции запустите
+`paper-quote-compare`. Формат фиксирует chain, mint, программу, decimals,
+историю коэффициента shares per token и курс settlement к USD. Команда
+исключает устаревшие или indicative котировки и при SELL сверяет held mint.
+В расчёте к сумме котировки добавляются только внешние комиссии.
+
+```powershell
+go -C services/control run ./cmd/paper-quote-compare --input ../../contracts/valid-paper-quote-comparison.json
+```
+
+`paper-apply review --account $accountId --order $openingOrderId` показывает
+фактический остаток, резерв, ближайший пересмотр и срок тезиса. Время считается
+от первого исполнения, включая частичное. Чтобы проверить катализатор из
+готового расписания, добавьте `--schedule`, `--archive-root`,
+`--event-provider` и `--event-record-id`. Команда возвращает устойчивый ID
+положенного пересмотра. [Схема результата пересмотра](contracts/paper-thesis.schema.json).
+
+`schedule-review` сам строит актуальный снимок для открытой позиции и
+создаёт задание по сроку или подтверждённому архивному катализатору. Один
+триггер получает один job ID. При повторе команда возвращает уже сохранённый
+снимок. Укажите абсолютные пути к конфигу и директории архива.
+
+```powershell
+go -C services/control run ./cmd/paper-apply schedule-review --config $reviewConfig --archive-root $archiveRoot --poll-interval 30s
+```
+
+С `--poll-interval` конфиг перечитывается перед каждым проходом. Передайте
+актуальные наблюдавшиеся цены и хеш архива. Без интервала выполняется один
+проход. Воркеры читают созданные задания из обычной очереди.
+[Пример конфига](contracts/valid-paper-review-schedule.json).
+
+Новые задания пересмотра получают durable запись для `dispatch` в той же
+транзакции. Диспетчер выбирает завершённые задания заданного счёта,
+сопоставляет policy владельца и выполняет `follow`. Подтверждение наступает
+после записи результата применения. Если процесс сбился между этими шагами,
+следующий проход читает ту же квитанцию. Без готовой котировки заявка
+остаётся невыполненной.
+
+```powershell
+go -C services/control run ./cmd/paper-apply dispatch --account $accountId --policy $policyPath --quote-root $quoteRoot --poll-interval 5s
+```
+
+Чтобы передать фактические исходы в следующее исследование, экспортируйте
+их из paper ledger к заданному `as_of`. Команда добавит в новый архив
+ограниченное число реализованных исходов с ID исполнения и точными суммами.
+
+```powershell
+go -C services/control run ./cmd/paper-memory --account $accountId --as-of $snapshotAsOf --policy $policyPath --input $marketArchivePath --input-sha256 $marketArchiveHash --output $newArchivePath
+```
+
+Запишите новый файл в корень архива worker и используйте напечатанный
+`{ref,sha256}` как `data_manifest` задания. Paper-исходы идут отдельным
+контекстом, в котором учтены зафиксированные комиссии. Бенчмарк и OPEX
+в эти исходы не входят. [Схема исхода](contracts/paper-outcome.schema.json).
 
 Для создания заданий по готовому расписанию запустите `go -C services/control run
 ./cmd/research-scheduler --once --config <schedule.json> --archive-root <путь>`.
@@ -218,15 +362,64 @@ ID решения и котировки, предельной комиссией
 Повтор того же запуска возвращает существующее задание. Для собственного прогона
 укажите актуальные `scheduled_at` и `portfolio.as_of` и вычислите SHA-256 текущих
 байтов архива. Формат показан в [примере расписания](contracts/valid-research-schedule.json).
+Версия 0.2 также принимает ссылку на событие из архива. Событие должно уже быть
+известно и загружено к `portfolio.as_of`. ID задания для события привязан к имени
+расписания, источнику и ID записи, даже если время запуска отредактировали.
+[Пример событийного расписания](contracts/valid-research-event-schedule.json).
 
 Независимый Nautilus replay читает подготовленные тестовые котировки и заявки.
-Денежные дивиденды учитываются по времени права и выплаты. `benchmarks` на том же
-горизонте сравнивает cash, buy-and-hold и равную начальную аллокацию.
+Денежные дивиденды учитываются по времени права и выплаты. Сплиты и обратные
+сплиты меняют количество на границе события, сохраняя исходные цены сделок.
+Вычисления требуют точного представления в сетке Nautilus для исходных акций
+и центов USD. `benchmarks` на том же горизонте сравнивает cash, buy-and-hold
+и равную начальную аллокацию. Дополнительный трендовый бенчмарк использует
+прошлые доступные midpoints, деньги счёта и следующую подходящую котировку.
+Порог длительности пропуска и длина истории задаются до прогона.
 
 ```powershell
 uv --directory services/evaluation run --frozen tradingbot-evaluation replay examples/quote-replay.json
 uv --directory services/evaluation run --frozen tradingbot-evaluation benchmarks examples/quote-replay.json --start-at 2026-10-02T13:30:10Z --buy-and-hold-symbol TSLA
+uv --directory services/evaluation run --frozen tradingbot-evaluation benchmarks examples/quote-replay.json --start-at 2026-10-02T13:30:10Z --buy-and-hold-symbol TSLA --trend-symbol TSLA --trend-lookback-quotes 1 --trend-max-gap-seconds 60
 ```
+
+Для проверки протокола сравнения `freeze-statistics` выводит SHA-256
+заранее зарегистрированных периодов, бенчмарков и параметров блочного bootstrap.
+Команда `statistics` сверяет этот хеш, даты NAV и доступность входов. Пример
+формирует отчёт на синтетическом наборе.
+
+```powershell
+uv --directory services/evaluation run --frozen tradingbot-evaluation freeze-statistics examples/statistics-protocol.json
+uv --directory services/evaluation run --frozen tradingbot-evaluation statistics examples/statistics-protocol.json examples/statistics-evidence.json --protocol-sha256 b05ddb0e27ed22643300a46ede0df85e33a4d795d3eb9cf95730e8fa1b5f1b39
+```
+
+`replay-evidence` строит вход для `statistics` непосредственно из нативного
+Nautilus replay. Используйте пару `examples/replay-evidence-protocol.json` и
+`examples/replay-evidence-quotes.json` в том же окружении. Передайте хеш из
+`freeze-statistics` через `--protocol-sha256` и сохраните JSON-вывод. Дневные
+NAV учитывают симулированный спред и комиссии. Внешние расходы неизвестны.
+
+Дневной NAV виртуального счёта экспортирует `paper-nav`. Хеш входного
+файла фиксирует точные наблюдавшиеся цены и допустимый возраст. Если
+какая-либо позиция не оценена, вывод сохраняет дату и причину, а команда
+возвращает код 1. Для сопоставимого ряда `paper-evidence` сверяет хеш отчёта,
+полный календарь UTC, cash и оценку позиций и добавляет эталон
+`uninvested-cash` с тем же стартовым капиталом.
+
+```powershell
+go -C services/control run ./cmd/paper-nav --input $paperNavInput --sha256 $inputHash
+uv --directory services/evaluation run --offline --frozen tradingbot-evaluation paper-evidence examples/paper-cash-protocol.json examples/paper-cash-nav.json --protocol-sha256 811c97f1b0d0c36d9473ab8612af964d6e2e8fc1d759728e5d46c89db35e417f
+```
+
+Для `operating_net` используйте протокол 0.2 с хешем cost ledger и
+передайте `--operating-costs` в `statistics`. Команда учитывает отнесённые
+расходы после построения execution-net NAV. Прежние спред и комиссия
+Nautilus уже входят в этот ряд. Если часть расходов неизвестна,
+доступен только execution-net. Обе панели содержат просадку и риск
+за наблюдаемый интервал.
+[Пример протокола](services/evaluation/examples/operating-costs-protocol.json) · [Схема затрат](contracts/evaluation-operating-costs.schema.json).
+
+Для проверки копии PostgreSQL и возобновления работы есть отдельное
+локальное упражнение. [Порядок восстановления paper-контура](docs/runbooks/paper.md).
 
 ## Уведомления о сделках
 

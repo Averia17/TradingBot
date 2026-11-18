@@ -29,9 +29,17 @@ func (l *recordingLedger) Reserve(_ context.Context, r ledger.ReservationRequest
 
 func (l *recordingLedger) Resolve(_ context.Context, r ledger.ResolutionRequest) (ledger.Order, bool, error) {
 	l.resolve = append(l.resolve, r)
-	order := ledger.Order{ReservationRequest: l.reserve[len(l.reserve)-1], Status: r.Outcome, AccountVersion: 3, CreatedAt: l.created}
+	reservation := l.reserve[len(l.reserve)-1]
+	order := ledger.Order{
+		ReservationRequest: reservation, Status: r.Outcome, AccountVersion: 3, CreatedAt: l.created,
+		FilledQuantityRaw: "0", RemainingQuantityRaw: reservation.QuantityRaw, Fills: []ledger.Fill{},
+	}
 	if r.Outcome == "filled" {
-		order.Fill = &ledger.Fill{EventID: r.EventID, GrossUSD: r.GrossUSD, FeeUSD: r.FeeUSD, ObservedAt: r.ObservedAt}
+		fill := ledger.Fill{
+			EventID: r.EventID, QuantityRaw: reservation.QuantityRaw, GrossUSD: r.GrossUSD, FeeUSD: r.FeeUSD, ObservedAt: r.ObservedAt,
+		}
+		order.FilledQuantityRaw, order.RemainingQuantityRaw = fill.QuantityRaw, "0"
+		order.Fills, order.Fill = []ledger.Fill{fill}, &fill
 	}
 	return order, len(l.resolve) == 1, nil
 }

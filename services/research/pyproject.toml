@@ -7,7 +7,7 @@ name = "self-custody-ai-trader"
 version = "0.1.0"
 description = "Portfolio-aware TradingAgents research boundary; no live execution"
 requires-python = ">=3.12,<3.13"
-dependencies = ["pydantic>=2.10,<3", "tradingagents==0.7.1"]
+dependencies = ["pandas>=3.0,<4", "pydantic>=2.10,<3", "stockstats>=0.6.9,<0.7", "tradingagents==0.7.1"]
 
 [project.optional-dependencies]
 evaluation = ["nautilus_trader==1.231.0"]

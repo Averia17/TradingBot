@@ -1,0 +1,60 @@
+{
+  "bootstrap": {
+    "block_marks": 2,
+    "family_alpha_bps": 500,
+    "minimum_blocks": 4,
+    "replications": 500,
+    "seed": 137
+  },
+  "comparisons": [
+    {
+      "benchmark": "baseline",
+      "benchmark_access": "synthetic_fixture",
+      "comparison_id": "main",
+      "minimum_daily_excess_bps": 5,
+      "strategy": "agent"
+    },
+    {
+      "benchmark": "baseline",
+      "benchmark_access": "synthetic_fixture",
+      "comparison_id": "variant",
+      "minimum_daily_excess_bps": 5,
+      "strategy": "variant"
+    }
+  ],
+  "configuration_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "expected_nav_dates": [
+    "2026-01-01",
+    "2026-01-02",
+    "2026-01-03",
+    "2026-01-04",
+    "2026-01-05",
+    "2026-01-06",
+    "2026-01-07",
+    "2026-01-08",
+    "2026-01-09",
+    "2026-01-10",
+    "2026-01-11",
+    "2026-01-12",
+    "2026-01-13",
+    "2026-01-14",
+    "2026-01-15",
+    "2026-01-16",
+    "2026-01-17",
+    "2026-01-18",
+    "2026-01-19"
+  ],
+  "experiment_id": "synthetic-2026",
+  "model_training_cutoff": null,
+  "nav_basis": "operating_net",
+  "primary_comparison_id": "main",
+  "schema_version": "0.1",
+  "source_mode": "synthetic_fixture",
+  "splits": {
+    "embargo_calendar_days": 1,
+    "end_exclusive": "2026-01-20",
+    "test_start": "2026-01-07",
+    "train_start": "2026-01-01",
+    "validation_start": "2026-01-04"
+  }
+}

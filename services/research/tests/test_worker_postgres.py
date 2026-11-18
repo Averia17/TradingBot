@@ -15,6 +15,8 @@ from uuid import uuid4
 
 import pytest
 
+from tradingbot.selection import plan_research
+
 ROOT = Path(__file__).resolve().parents[3]
 DATABASE_URL = os.environ.get("TRADINGBOT_E2E_DATABASE_URL")
 CONNECT = socket.socket.connect
@@ -71,15 +73,87 @@ def wait_for_resource(port, path, *children):
     pytest.fail(f"timed out waiting for {path}")
 
 
-@pytest.mark.parametrize("archive_mode", [False, True], ids=["fixture", "archive"])
-def test_python_graph_result_is_persisted_by_go_control(tmp_path, archive_mode):
-    executable = tmp_path / ("control.exe" if os.name == "nt" else "control")
+def build_go_command(tmp_path, name):
+    executable = tmp_path / (name + ".exe" if os.name == "nt" else name)
     subprocess.run(
-        ["go", "build", "-mod=readonly", "-o", str(executable), "./cmd/control"],
+        ["go", "build", "-mod=readonly", "-o", str(executable), f"./cmd/{name}"],
         cwd=ROOT / "services/control",
         check=True,
         timeout=90,
     )
+    return str(executable)
+
+
+def paper_command(executable, policy, env, *arguments):
+    result = subprocess.run(
+        [executable, *arguments, "--policy", str(policy)],
+        env=env,
+        stdout=subprocess.PIPE,
+        check=True,
+        timeout=40,
+    )
+    return json.loads(result.stdout)
+
+
+def research_environment():
+    database_variables = {
+        "TRADINGBOT_DATABASE_URL",
+        "TRADINGBOT_TEST_DATABASE_URL",
+        "TRADINGBOT_E2E_DATABASE_URL",
+    }
+    return {key: value for key, value in os.environ.items() if key not in database_variables}
+
+
+def settle_paper_round_trip(port, account_id, instrument):
+    orders = f"/v1/paper/accounts/{account_id}/orders"
+    for version, side, gross in ((1, "BUY", "10.00000001"), (3, "SELL", "8.00000001")):
+        order_id = str(uuid4())
+        code, order = request(
+            port,
+            orders,
+            {
+                "account_id": account_id,
+                "order_id": order_id,
+                "decision_id": str(uuid4()),
+                "quote_id": str(uuid4()),
+                "snapshot_version": version,
+                "instrument": instrument,
+                "side": side,
+                "quantity_raw": "1",
+                "gross_usd": gross,
+                "max_fee_usd": "0.00000002",
+                "expires_at": (datetime.now(UTC) + timedelta(minutes=1)).isoformat(),
+            },
+        )
+        assert code == 201 and order["status"] == "reserved"
+        code, settled = request(
+            port,
+            f"{orders}/{order_id}/resolve",
+            {
+                "account_id": account_id,
+                "order_id": order_id,
+                "event_id": str(uuid4()),
+                "outcome": "filled",
+                "observed_at": order["created_at"],
+                "gross_usd": gross,
+                "fee_usd": "0.00000002",
+            },
+        )
+        assert code == 200 and settled["status"] == "filled"
+    return settled["fill"]["event_id"]
+
+
+@pytest.mark.parametrize("archive_mode", [False, True], ids=["fixture", "archive"])
+def test_python_graph_result_is_persisted_by_go_control(tmp_path, archive_mode):
+    executable = build_go_command(tmp_path, "control")
+    if archive_mode:
+        paper_apply = build_go_command(tmp_path, "paper-apply")
+        paper_memory = build_go_command(tmp_path, "paper-memory")
+        policy_path = ROOT / "contracts/valid-paper-policy.json"
+        policy = json.loads(policy_path.read_text(encoding="utf-8"))
+        instrument = next(
+            rule["instrument"] for rule in policy["instruments"] if rule["symbol"] == "TSLA"
+        )
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
         listener.bind(("127.0.0.1", 0))
         port = listener.getsockname()[1]
@@ -100,18 +174,8 @@ def test_python_graph_result_is_persisted_by_go_control(tmp_path, archive_mode):
         "policy_version": "offline-policy",
     }
     path = f"/v1/research/jobs/{job_id}/result"
-    ctl = [str(executable), "-listen", f"127.0.0.1:{port}"]
+    ctl = [executable, "-listen", f"127.0.0.1:{port}"]
     env = os.environ | {"TRADINGBOT_DATABASE_URL": DATABASE_URL}
-    worker_env = {
-        key: value
-        for key, value in os.environ.items()
-        if key
-        not in {
-            "TRADINGBOT_DATABASE_URL",
-            "TRADINGBOT_TEST_DATABASE_URL",
-            "TRADINGBOT_E2E_DATABASE_URL",
-        }
-    }
     worker = [
         sys.executable,
         "-m",
@@ -124,23 +188,34 @@ def test_python_graph_result_is_persisted_by_go_control(tmp_path, archive_mode):
     ]
     if archive_mode:
         observed = book["as_of"]
+        bars = []
+        for age, close in [(120, "96"), (60, "97"), (0, "98.12345678")]:
+            at = (datetime.fromisoformat(observed) - timedelta(seconds=age)).isoformat()
+            bars.append(
+                {
+                    "kind": "bar",
+                    "provider": "e2e-fixture",
+                    "record_id": f"snapshot-mark-{age}",
+                    "symbol": "TSLA",
+                    "revision": 1,
+                    "event_time": at,
+                    "available_at": at,
+                    "ingested_at": at,
+                    "payload": {
+                        "close": close,
+                        "volume": 5000,
+                        "currency": "USD",
+                        "price_basis": "raw",
+                        "bid": "98.10",
+                        "ask": "98.15",
+                    },
+                }
+            )
         archive_bytes = json.dumps(
             {
                 "schema_version": "0.1",
                 "source_mode": "synthetic_fixture",
-                "records": [
-                    {
-                        "kind": "bar",
-                        "provider": "e2e-fixture",
-                        "record_id": "snapshot-mark",
-                        "symbol": "TSLA",
-                        "revision": 1,
-                        "event_time": observed,
-                        "available_at": observed,
-                        "ingested_at": observed,
-                        "payload": {"close": "98.12345678"},
-                    }
-                ],
+                "records": bars,
             }
         ).encode()
         (tmp_path / "market.json").write_bytes(archive_bytes)
@@ -151,8 +226,102 @@ def test_python_graph_result_is_persisted_by_go_control(tmp_path, archive_mode):
         worker.extend(["--archive-root", str(tmp_path)])
     with process(ctl, env) as control:
         wait_for_resource(port, "/readyz", control)
+        if archive_mode:
+            account_id = str(uuid4())
+            account_path = f"/v1/paper/accounts/{account_id}"
+            code, account = request(
+                port, "/v1/paper/accounts", {"account_id": account_id, "initial_cash_usd": "1000"}
+            )
+            assert code == 201 and account["version"] == 1
+            code, initial_events = request(port, account_path + "/events")
+            assert code == 200 and [event["kind"] for event in initial_events] == [
+                "paper_account.created"
+            ]
+            fill_id = settle_paper_round_trip(port, account_id, instrument)
+            code, account = request(port, account_path)
+            assert code == 200 and account["cash_usd"] == "997.99999996"
+            code, expected_events = request(port, account_path + "/events")
+            assert code == 200 and len(expected_events) == 5
+            # The sell fill was recorded by PostgreSQL. Use that cutoff,
+            # allowing a short clock difference with the local Go process.
+            cutoff = expected_events[-1]["recorded_at"]
+            delay = (datetime.fromisoformat(cutoff) - datetime.now(UTC)).total_seconds()
+            assert delay <= 5, "paper database clock is more than five seconds ahead"
+            if delay > 0:
+                time.sleep(delay)
+            memory_path = tmp_path / "paper-market.json"
+            manifest = paper_command(
+                paper_memory,
+                policy_path,
+                env,
+                "--account",
+                account_id,
+                "--as-of",
+                cutoff,
+                "--input",
+                str(tmp_path / "market.json"),
+                "--input-sha256",
+                job["data_manifest"]["sha256"],
+                "--output",
+                str(memory_path),
+            )
+            assert manifest == {
+                "ref": memory_path.name,
+                "sha256": hashlib.sha256(memory_path.read_bytes()).hexdigest(),
+            }
+            marks_path = tmp_path / "marks.json"
+            marks_path.write_text(
+                json.dumps(
+                    [
+                        {
+                            "instrument": instrument,
+                            "price_usd": "98.12345678",
+                            "at": observed,
+                            "available_at": observed,
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            bound = paper_command(
+                paper_apply,
+                policy_path,
+                env,
+                "snapshot",
+                "--account",
+                account_id,
+                "--marks",
+                str(marks_path),
+                "--as-of",
+                cutoff,
+            )
+            book = bound["portfolio"]
+            assert book["cash_usd"] == account["cash_usd"] and not book["positions"]
+            plan = plan_research(
+                tmp_path,
+                {
+                    "schema_version": "0.1",
+                    "job_id": job_id,
+                    "portfolio": book,
+                    "policy_version": policy["policy_version"],
+                    "data_manifest": manifest,
+                    "candidates": [{"symbol": "TSLA", "allowed": True}],
+                    "top_k": 1,
+                    "remaining_analysis_slots": 1,
+                    "calls_per_symbol": 31,
+                    "max_llm_calls": 32,
+                    "roc_periods": 2,
+                    "max_bar_age_seconds": 60,
+                    "max_bar_gap_seconds": 60,
+                    "max_catalyst_age_seconds": 60,
+                    "min_bar_turnover_usd": "10000",
+                    "max_spread_bps": 25,
+                },
+            )
+            job = plan["job"]
+            assert job is not None and job["requested_symbols"] == ["TSLA"]
         assert request(port, "/v1/research/jobs", job)[0] == 201
-        with process(worker, worker_env) as running:
+        with process(worker, research_environment()) as running:
             receipt = wait_for_resource(port, path, control, running)
 
     result = receipt["result"]
@@ -180,9 +349,325 @@ def test_python_graph_result_is_persisted_by_go_control(tmp_path, archive_mode):
     if archive_mode:
         report = result["reports"]["TSLA"]["market_report"]
         assert "98.12345678" in report and "snapshot_sha256" in report
-        assert result["batch"]["evidence_hashes"]["TSLA:market_report"] == hashlib.sha256(
-            report.encode()
-        ).hexdigest()
+        assert "paper_simulated_ledger" not in report
+        assert (
+            result["batch"]["evidence_hashes"]["TSLA:market_report"]
+            == hashlib.sha256(report.encode()).hexdigest()
+        )
+        final = result["reports"]["TSLA"]["final_trade_decision"]
+        assert "paper_simulated_ledger" in final
+        assert '"net_pnl_usd":"-2.00000004"' in final
+        assert fill_id in final
+        assert (
+            result["batch"]["evidence_hashes"]["TSLA:final_trade_decision"]
+            == hashlib.sha256(final.encode()).hexdigest()
+        )
 
     with process(ctl, env) as restarted:
         assert wait_for_resource(port, path, restarted) == receipt
+        if archive_mode:
+            decisions = [(item["symbol"], item["action"]) for item in result["batch"]["intents"]]
+            assert decisions == [("TSLA", "HOLD")]
+            apply_path = tmp_path / "apply.json"
+            apply_path.write_text(
+                json.dumps(
+                    {
+                        "paper_apply_schema_version": "0.1",
+                        "job_id": job_id,
+                        "snapshot_context": bound["snapshot_context"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            applied = paper_command(
+                paper_apply, policy_path, env, "apply", "--request", str(apply_path)
+            )
+            assert applied == {
+                "paper_apply_schema_version": "0.1",
+                "job_id": job_id,
+                "status": "hold",
+            }
+            assert request(port, account_path) == (200, account)
+            assert request(port, account_path + "/events") == (200, expected_events)
+
+
+def test_archived_catalyst_requeues_an_open_paper_position_for_offline_worker(tmp_path):
+    control_exe = build_go_command(tmp_path, "control")
+    paper_apply = build_go_command(tmp_path, "paper-apply")
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.bind(("127.0.0.1", 0))
+        port = listener.getsockname()[1]
+
+    def save(name, payload):
+        path = tmp_path / name
+        data = json.dumps(payload).encode()
+        path.write_bytes(data)
+        return {"ref": name, "sha256": hashlib.sha256(data).hexdigest()}
+
+    account_id, opening_job_id, decision_id = (str(uuid4()) for _ in range(3))
+    account_path = f"/v1/paper/accounts/{account_id}"
+    policy_path = ROOT / "contracts/valid-paper-policy.json"
+    policy = json.loads(policy_path.read_text(encoding="utf-8"))
+    instrument = next(
+        rule["instrument"] for rule in policy["instruments"] if rule["symbol"] == "TSLA"
+    )
+    env = os.environ | {"TRADINGBOT_DATABASE_URL": DATABASE_URL}
+    control = [control_exe, "-listen", f"127.0.0.1:{port}"]
+    worker = [
+        sys.executable,
+        "-m",
+        "tradingbot",
+        "worker",
+        "--control-url",
+        f"http://127.0.0.1:{port}",
+        "--archive-root",
+        str(tmp_path),
+    ]
+
+    with process(control, env) as api:
+        wait_for_resource(port, "/readyz", api)
+        assert (
+            request(
+                port,
+                "/v1/paper/accounts",
+                {
+                    "account_id": account_id,
+                    "initial_cash_usd": "1000",
+                },
+            )[0]
+            == 201
+        )
+        cutoff = request(port, account_path + "/events")[1][0]["recorded_at"]
+        observed = (datetime.fromisoformat(cutoff) - timedelta(seconds=1)).isoformat()
+        delay = (datetime.fromisoformat(cutoff) - datetime.now(UTC)).total_seconds()
+        assert delay <= 5, "paper database clock is more than five seconds ahead"
+        if delay > 0:
+            time.sleep(delay)
+        save(
+            "marks.json",
+            [
+                {
+                    "instrument": instrument,
+                    "price_usd": "100",
+                    "at": observed,
+                    "available_at": observed,
+                }
+            ],
+        )
+        opening = paper_command(
+            paper_apply,
+            policy_path,
+            env,
+            "snapshot",
+            "--account",
+            account_id,
+            "--marks",
+            str(tmp_path / "marks.json"),
+            "--as-of",
+            cutoff,
+        )
+        portfolio = opening["portfolio"]
+        code, queued = request(
+            port,
+            "/v1/research/jobs",
+            {
+                "job_schema_version": "0.1",
+                "job_id": opening_job_id,
+                "portfolio": portfolio,
+                "requested_symbols": ["TSLA"],
+                "policy_version": policy["policy_version"],
+                "max_llm_calls": 32,
+                "data_manifest": {"ref": "synthetic/opening", "sha256": "a" * 64},
+            },
+        )
+        assert code == 201
+        code, lease = request(
+            port,
+            "/v1/research/jobs/claim",
+            {
+                "worker_id": "opening-fixture",
+                "claim_id": str(uuid4()),
+            },
+        )
+        assert code == 200 and lease["job_id"] == opening_job_id
+        evidence_id, report = "TSLA:final_trade_decision", "Synthetic opening BUY fixture."
+        expiry = (datetime.fromisoformat(queued["created_at"]) + timedelta(minutes=1)).isoformat()
+        code, completion = request(
+            port,
+            f"/v1/research/jobs/{opening_job_id}/complete",
+            {
+                "result_schema_version": "0.1",
+                "worker_id": "opening-fixture",
+                "lease_token": lease["lease_token"],
+                "batch": {
+                    "schema_version": "0.1",
+                    "execution_mode": "research",
+                    "run_id": str(uuid4()),
+                    "portfolio_snapshot_id": portfolio["snapshot_id"],
+                    "as_of": portfolio["as_of"],
+                    "created_at": queued["created_at"],
+                    "expires_at": expiry,
+                    "evidence_hashes": {evidence_id: hashlib.sha256(report.encode()).hexdigest()},
+                    "intents": [
+                        {
+                            "decision_id": decision_id,
+                            "symbol": "TSLA",
+                            "action": "BUY",
+                            "notional_usd": "100",
+                            "confidence": 0.75,
+                            "expected_return_pct": 1.0,
+                            "horizon": {"min_hours": 2, "max_hours": 24},
+                            "thesis": ["Opening fixture"],
+                            "invalidation_conditions": ["Catalyst fixture"],
+                            "evidence_ids": [evidence_id],
+                            "max_execution_cost_bps": 30,
+                        }
+                    ],
+                },
+                "reports": {"TSLA": {"final_trade_decision": report}},
+                "metadata": {
+                    "source_mode": "synthetic_fixture",
+                    "llm_calls": 0,
+                    "alpha_measured": False,
+                },
+            },
+        )
+        assert code == 201, completion
+        quote_at = datetime.fromisoformat(completion["completed_at"]) + timedelta(microseconds=1)
+        delay = (quote_at - datetime.now(UTC)).total_seconds()
+        assert delay <= 5, "paper database clock is more than five seconds ahead"
+        if delay > 0:
+            time.sleep(delay)
+        save(
+            "opening-request.json",
+            {
+                "paper_apply_schema_version": "0.1",
+                "job_id": opening_job_id,
+                "snapshot_context": opening["snapshot_context"],
+            },
+        )
+        save(
+            "opening-quote.json",
+            {
+                "paper_quote_schema_version": "0.1",
+                "source_mode": "synthetic_fixture",
+                "instrument": instrument,
+                "side": "BUY",
+                "quantity_raw": "100",
+                "gross_usd": "100",
+                "fee_bps": 0,
+                "fixed_fee_usd": "0",
+                "observed_at": quote_at.isoformat(),
+                "expires_at": expiry,
+                "execution": "fill",
+            },
+        )
+        opened = paper_command(
+            paper_apply,
+            policy_path,
+            env,
+            "apply",
+            "--request",
+            str(tmp_path / "opening-request.json"),
+            "--quote",
+            str(tmp_path / "opening-quote.json"),
+        )["execution"]["order"]
+        assert opened["status"] == "filled"
+        event_at = request(port, account_path + "/events")[1][-1]["recorded_at"]
+        review_event = {"kind": "news", "provider": "review-fixture", "record_id": "review-news"}
+        known = {
+            "symbol": "TSLA",
+            "revision": 1,
+            "event_time": event_at,
+            "available_at": event_at,
+            "ingested_at": event_at,
+        }
+        archive = save(
+            "review-archive.json",
+            {
+                "schema_version": "0.1",
+                "source_mode": "synthetic_fixture",
+                "records": [
+                    review_event | known | {"payload": {"headline": "Paper review catalyst."}},
+                    known
+                    | {
+                        "kind": "bar",
+                        "provider": "review-fixture",
+                        "record_id": "mark",
+                        "payload": {"close": "100"},
+                    },
+                ],
+            },
+        )
+        save(
+            "review-schedule.json",
+            {
+                "review_schedule_schema_version": "0.1",
+                "opening_order_id": opened["order_id"],
+                "snapshot_context": {
+                    "account_id": account_id,
+                    "policy": policy,
+                    "marks": [
+                        {
+                            "instrument": instrument,
+                            "price_usd": "100",
+                            "at": event_at,
+                            "available_at": event_at,
+                        }
+                    ],
+                },
+                "max_llm_calls": 32,
+                "data_manifest": archive,
+                "event": review_event,
+            },
+        )
+
+        def schedule():
+            command = subprocess.run(
+                [
+                    paper_apply,
+                    "schedule-review",
+                    "--config",
+                    str(tmp_path / "review-schedule.json"),
+                    "--archive-root",
+                    str(tmp_path),
+                ],
+                env=env,
+                stdout=subprocess.PIPE,
+                check=True,
+                timeout=40,
+            )
+            return json.loads(command.stdout)
+
+        first = schedule()
+        review_id = first["job_id"]
+        assert first["created"] is True and review_id == first["trigger"]["trigger_id"]
+        assert first["snapshot"]["portfolio"]["positions"][0]["quantity"] == "1.00000000"
+        with process(worker, research_environment()) as running:
+            path = f"/v1/research/jobs/{review_id}/result"
+            receipt = wait_for_resource(port, path, api, running)
+        assert receipt["result"]["metadata"]["provenance"]["data_manifest"] == archive
+        assert receipt["result"]["batch"]["intents"][0]["action"] == "HOLD"
+
+    with process(control, env) as restarted:
+        assert wait_for_resource(port, path, restarted) == receipt
+        replayed = schedule()
+        assert replayed["job_id"] == review_id and replayed["created"] is False
+        assert replayed["snapshot"] == first["snapshot"]
+        _, account_before_hold = request(port, account_path)
+
+        def dispatch():
+            run = subprocess.run(
+                [paper_apply, "dispatch", "--account", account_id, "--policy", str(policy_path)],
+                env=env,
+                stdout=subprocess.PIPE,
+                check=True,
+                timeout=40,
+            )
+            return run.stdout
+
+        result = json.loads(dispatch())
+        assert result["job_id"] == review_id
+        assert result["status"] == "hold" and result["application"]["status"] == "hold"
+        assert not dispatch().strip()
+        assert request(port, account_path) == (200, account_before_hold)

@@ -1,0 +1,71 @@
+{
+  "bootstrap": {
+    "block_marks": 2,
+    "family_alpha_bps": 500,
+    "minimum_blocks": 2,
+    "replications": 500,
+    "seed": 0
+  },
+  "comparisons": [
+    {
+      "benchmark": "usd-cash",
+      "benchmark_access": "synthetic_fixture",
+      "comparison_id": "usd-cash",
+      "minimum_daily_excess_bps": 0,
+      "strategy": "fixture-strategy"
+    },
+    {
+      "benchmark": "stock-hold",
+      "benchmark_access": "synthetic_fixture",
+      "comparison_id": "stock-hold",
+      "minimum_daily_excess_bps": 0,
+      "strategy": "fixture-strategy"
+    },
+    {
+      "benchmark": "universe",
+      "benchmark_access": "synthetic_fixture",
+      "comparison_id": "universe",
+      "minimum_daily_excess_bps": 0,
+      "strategy": "fixture-strategy"
+    }
+  ],
+  "configuration_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+  "expected_nav_dates": [
+    "2026-10-01",
+    "2026-10-02",
+    "2026-10-03",
+    "2026-10-04"
+  ],
+  "experiment_id": "local-quote-evaluation",
+  "model_training_cutoff": null,
+  "nav_basis": "operating_net",
+  "operating_costs_sha256": "098778f76c99690b0fa0c1469db5416f6dabe2efd53d52f5f997587d9df7bfce",
+  "primary_comparison_id": "stock-hold",
+  "replay_source": {
+    "benchmarks": [
+      {
+        "kind": "cash",
+        "series_id": "usd-cash"
+      },
+      {
+        "kind": "buy_and_hold",
+        "series_id": "stock-hold",
+        "symbol": "TSLA"
+      },
+      {
+        "kind": "equal_weight_once",
+        "series_id": "universe"
+      }
+    ],
+    "replay_sha256": "b7a5b26caa1fc621089e1635cb625c76da962a8fac222299666ae772889453c2"
+  },
+  "schema_version": "0.2",
+  "source_mode": "synthetic_fixture",
+  "splits": {
+    "embargo_calendar_days": 0,
+    "end_exclusive": "2026-10-05",
+    "test_start": "2026-10-03",
+    "train_start": "2026-10-01",
+    "validation_start": "2026-10-02"
+  }
+}

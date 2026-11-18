@@ -176,6 +176,7 @@ def test_verified_archive_observations_reach_actual_graph_prompts_and_evidence(t
             archived_bar("early", "123.45678901"),
             archived_bar("oversized", "7" * 8000),
             archived_bar("future", "future-value", at="2020-01-03T16:00:00Z"),
+            archived_bar("late-receipt", "locally-unseen") | {"ingested_at": "2020-01-03T16:00:00Z"},
             archived_bar("other", "other-symbol-value", symbol="NVDA"),
         ],
     )
@@ -199,6 +200,7 @@ def test_verified_archive_observations_reach_actual_graph_prompts_and_evidence(t
         request["data_manifest"],
         datetime.fromisoformat(request["portfolio"]["as_of"]),
         symbols=["TSLA"],
+        visibility="locally_ingested",
     )
     assert expected_snapshot.sha256 in market
     assert "123.45678901" in market and '"omitted_records":1' in market
@@ -206,7 +208,9 @@ def test_verified_archive_observations_reach_actual_graph_prompts_and_evidence(t
     # value in at least one earlier call made by the upstream graph itself.
     assert any("123.45678901" in text for call in observed_calls[:-1] for text in call)
     for text in [market, *(text for call in observed_calls for text in call)]:
-        assert "future-value" not in text and "other-symbol-value" not in text
+        assert all(
+            value not in text for value in ("future-value", "other-symbol-value", "locally-unseen")
+        )
         assert "7" * 8000 not in text
     assert result["batch"]["evidence_hashes"]["TSLA:market_report"] == hashlib.sha256(
         market.encode()

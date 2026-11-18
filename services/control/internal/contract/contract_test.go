@@ -23,6 +23,8 @@ func TestEmbeddedSchemasMatchPublishedContracts(t *testing.T) {
 		"schema.json":               batchSchema,
 		"portfolio.schema.json":     portfolioSchema,
 		"paper-account.schema.json": paperSchema,
+		"paper-apply.schema.json":   paperApplySchema,
+		"paper-replay.schema.json":  paperReplaySchema,
 	} {
 		t.Run(name, func(t *testing.T) {
 			published, err := os.ReadFile("../../../../contracts/" + name)

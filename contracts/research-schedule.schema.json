@@ -1,12 +1,12 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "Frozen local research occurrence schedule 0.1",
-  "description": "An occurrence uses the stable schedule ID and scheduled UTC instant as its durable job identity. Inputs for an accepted occurrence are immutable. Runtime checks cover duplicate instants, portfolio time, archive containment and digest, and the scheduling window.",
+  "title": "Frozen local research occurrence schedules 0.1 and 0.2",
+  "description": "Calendar job identity uses schedule_id and the scheduled UTC instant. An event job instead uses schedule_id, provider and record_id, independent of dispatch time. Inputs for an accepted occurrence are immutable. Runtime verifies the archive digest, portfolio cutoff, uniqueness and scheduling window.",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "schedule_id", "policy_version", "max_lateness_seconds", "occurrences"],
   "properties": {
-    "schema_version": {"const": "0.1"},
+    "schema_version": {"enum": ["0.1", "0.2"]},
     "schedule_id": {"$ref": "research-job.schema.json#/$defs/Identifier"},
     "policy_version": {"$ref": "research-job.schema.json#/$defs/Identifier"},
     "max_lateness_seconds": {"type": "integer", "minimum": 1, "maximum": 3600},
@@ -20,6 +20,7 @@
         "required": ["scheduled_at", "portfolio", "requested_symbols", "data_manifest", "max_llm_calls"],
         "properties": {
           "scheduled_at": {"type": "string", "format": "date-time"},
+          "event": {"$ref": "#/$defs/Event"},
           "portfolio": {"$ref": "portfolio.schema.json"},
           "requested_symbols": {"$ref": "research-job.schema.json#/$defs/JobRequest/properties/requested_symbols"},
           "data_manifest": {
@@ -28,6 +29,21 @@
           },
           "max_llm_calls": {"$ref": "research-job.schema.json#/$defs/JobRequest/properties/max_llm_calls"}
         }
+      }
+    }
+  },
+  "if": {"properties": {"schema_version": {"const": "0.1"}}},
+  "then": {"properties": {"occurrences": {"items": {"not": {"required": ["event"]}}}}},
+  "$defs": {
+    "Event": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "provider", "record_id"],
+      "description": "An event must identify one archived record series by provider and record_id across the referenced archive. The selected revision and its ingestion must be available by portfolio.as_of. Report, news and price reference filing, news and bar records. Liquidity, policy and review reference macro records whose payload.trigger_kind matches kind. The runtime rejects ambiguous or absent records.",
+      "properties": {
+        "kind": {"enum": ["report", "news", "price", "liquidity", "policy", "review"]},
+        "provider": {"$ref": "research-job.schema.json#/$defs/Identifier"},
+        "record_id": {"$ref": "research-job.schema.json#/$defs/Identifier"}
       }
     }
   }

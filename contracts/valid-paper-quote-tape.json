@@ -1,0 +1,29 @@
+{
+  "paper_quote_tape_schema_version": "0.1",
+  "source_mode": "synthetic_fixture",
+  "job_id": "22222222-2222-4222-8222-222222222222",
+  "scope": {
+    "instrument": {"instrument_id":"fixture:TSLA","registry_version":"fixture-v1","decimals":2},
+    "side": "BUY",
+    "quantity_raw": "500"
+  },
+  "observations": [
+    {
+      "available_at": "2026-01-03T15:00:04Z",
+      "firmness": "firm",
+      "quote": {
+        "paper_quote_schema_version": "0.1",
+        "source_mode": "synthetic_fixture",
+        "instrument": {"instrument_id":"fixture:TSLA","registry_version":"fixture-v1","decimals":2},
+        "side": "BUY",
+        "quantity_raw": "500",
+        "gross_usd": "100",
+        "fee_bps": 0,
+        "fixed_fee_usd": "0",
+        "observed_at": "2026-01-03T15:00:03Z",
+        "expires_at": "2026-01-03T15:00:35Z",
+        "execution": "fill"
+      }
+    }
+  ]
+}

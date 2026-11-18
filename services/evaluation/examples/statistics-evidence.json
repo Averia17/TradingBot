@@ -1,0 +1,216 @@
+{
+  "daily_nav": [
+    {
+      "day": "2026-01-01",
+      "nav_usd": {
+        "agent": "1000.00",
+        "baseline": "1000.00",
+        "variant": "1000.00"
+      }
+    },
+    {
+      "day": "2026-01-02",
+      "nav_usd": {
+        "agent": "1012.00000000",
+        "baseline": "1010.00000000",
+        "variant": "1008.00000000"
+      }
+    },
+    {
+      "day": "2026-01-03",
+      "nav_usd": {
+        "agent": "1004.00520000",
+        "baseline": "999.90000000",
+        "variant": "995.80320000"
+      }
+    },
+    {
+      "day": "2026-01-04",
+      "nav_usd": {
+        "agent": "996.07355892",
+        "baseline": "989.90100000",
+        "variant": "983.75398128"
+      }
+    },
+    {
+      "day": "2026-01-05",
+      "nav_usd": {
+        "agent": "1008.02644163",
+        "baseline": "999.80001000",
+        "variant": "991.62401313"
+      }
+    },
+    {
+      "day": "2026-01-06",
+      "nav_usd": {
+        "agent": "1020.12275893",
+        "baseline": "1009.79801010",
+        "variant": "999.55700524"
+      }
+    },
+    {
+      "day": "2026-01-07",
+      "nav_usd": {
+        "agent": "1012.06378913",
+        "baseline": "999.70003000",
+        "variant": "987.46236548"
+      }
+    },
+    {
+      "day": "2026-01-08",
+      "nav_usd": {
+        "agent": "1004.06848520",
+        "baseline": "989.70302970",
+        "variant": "975.51407086"
+      }
+    },
+    {
+      "day": "2026-01-09",
+      "nav_usd": {
+        "agent": "1016.11730702",
+        "baseline": "999.60006000",
+        "variant": "983.31818343"
+      }
+    },
+    {
+      "day": "2026-01-10",
+      "nav_usd": {
+        "agent": "1028.31071470",
+        "baseline": "1009.59606060",
+        "variant": "991.18472890"
+      }
+    },
+    {
+      "day": "2026-01-11",
+      "nav_usd": {
+        "agent": "1020.18706005",
+        "baseline": "999.50009999",
+        "variant": "979.19139368"
+      }
+    },
+    {
+      "day": "2026-01-12",
+      "nav_usd": {
+        "agent": "1012.12758228",
+        "baseline": "989.50509899",
+        "variant": "967.34317782"
+      }
+    },
+    {
+      "day": "2026-01-13",
+      "nav_usd": {
+        "agent": "1024.27311327",
+        "baseline": "999.40014998",
+        "variant": "975.08192324"
+      }
+    },
+    {
+      "day": "2026-01-14",
+      "nav_usd": {
+        "agent": "1036.56439063",
+        "baseline": "1009.39415148",
+        "variant": "982.88257863"
+      }
+    },
+    {
+      "day": "2026-01-15",
+      "nav_usd": {
+        "agent": "1028.37553194",
+        "baseline": "999.30020997",
+        "variant": "970.98969943"
+      }
+    },
+    {
+      "day": "2026-01-16",
+      "nav_usd": {
+        "agent": "1020.25136524",
+        "baseline": "989.30720787",
+        "variant": "959.24072407"
+      }
+    },
+    {
+      "day": "2026-01-17",
+      "nav_usd": {
+        "agent": "1032.49438162",
+        "baseline": "999.20027995",
+        "variant": "966.91464986"
+      }
+    },
+    {
+      "day": "2026-01-18",
+      "nav_usd": {
+        "agent": "1044.88431420",
+        "baseline": "1009.19228275",
+        "variant": "974.64996706"
+      }
+    },
+    {
+      "day": "2026-01-19",
+      "nav_usd": {
+        "agent": "1036.62972812",
+        "baseline": "999.10035992",
+        "variant": "962.85670246"
+      }
+    }
+  ],
+  "decisions": [
+    {
+      "as_of": "2026-01-01T00:00:00Z",
+      "decision_id": "train",
+      "inputs": [],
+      "label_available_at": "2026-01-02T11:00:00Z",
+      "label_end": "2026-01-02T10:00:00Z"
+    },
+    {
+      "as_of": "2026-01-02T00:00:00Z",
+      "decision_id": "horizon_leak",
+      "inputs": [],
+      "label_available_at": "2026-01-04T11:00:00Z",
+      "label_end": "2026-01-04T10:00:00Z"
+    },
+    {
+      "as_of": "2026-01-02T00:00:00Z",
+      "decision_id": "late_label",
+      "inputs": [],
+      "label_available_at": "2026-01-04T11:00:00Z",
+      "label_end": "2026-01-03T10:00:00Z"
+    },
+    {
+      "as_of": "2026-01-04T00:00:00Z",
+      "decision_id": "embargo_val",
+      "inputs": [],
+      "label_available_at": "2026-01-05T11:00:00Z",
+      "label_end": "2026-01-05T10:00:00Z"
+    },
+    {
+      "as_of": "2026-01-05T00:00:00Z",
+      "decision_id": "val",
+      "inputs": [],
+      "label_available_at": "2026-01-06T11:00:00Z",
+      "label_end": "2026-01-06T10:00:00Z"
+    },
+    {
+      "as_of": "2026-01-07T00:00:00Z",
+      "decision_id": "embargo_test",
+      "inputs": [],
+      "label_available_at": "2026-01-08T11:00:00Z",
+      "label_end": "2026-01-08T10:00:00Z"
+    },
+    {
+      "as_of": "2026-01-08T00:00:00Z",
+      "decision_id": "test",
+      "inputs": [],
+      "label_available_at": "2026-01-09T11:00:00Z",
+      "label_end": "2026-01-09T10:00:00Z"
+    },
+    {
+      "as_of": "2026-01-19T00:00:00Z",
+      "decision_id": "untested_label",
+      "inputs": [],
+      "label_available_at": "2026-01-20T11:00:00Z",
+      "label_end": "2026-01-20T10:00:00Z"
+    }
+  ],
+  "protocol_sha256": "b05ddb0e27ed22643300a46ede0df85e33a4d795d3eb9cf95730e8fa1b5f1b39",
+  "schema_version": "0.1"
+}

@@ -23,6 +23,7 @@ var (
 )
 
 type ReservationRequest struct {
+	ResearchJobID   string     `json:"research_job_id,omitempty"`
 	AccountID       string     `json:"account_id"`
 	OrderID         string     `json:"order_id"`
 	DecisionID      string     `json:"decision_id"`
@@ -37,33 +38,39 @@ type ReservationRequest struct {
 }
 
 type ResolutionRequest struct {
-	AccountID  string    `json:"account_id"`
-	OrderID    string    `json:"order_id"`
-	EventID    string    `json:"event_id"`
-	Outcome    string    `json:"outcome"`
-	GrossUSD   string    `json:"gross_usd,omitempty"`
-	FeeUSD     string    `json:"fee_usd,omitempty"`
-	ObservedAt time.Time `json:"observed_at,omitzero"`
+	AccountID   string    `json:"account_id"`
+	OrderID     string    `json:"order_id"`
+	EventID     string    `json:"event_id"`
+	Outcome     string    `json:"outcome"`
+	QuantityRaw string    `json:"quantity_raw,omitempty"`
+	GrossUSD    string    `json:"gross_usd,omitempty"`
+	FeeUSD      string    `json:"fee_usd,omitempty"`
+	ObservedAt  time.Time `json:"observed_at,omitzero"`
 }
 
 type Fill struct {
-	EventID    string    `json:"event_id"`
-	GrossUSD   string    `json:"gross_usd"`
-	FeeUSD     string    `json:"fee_usd"`
-	ObservedAt time.Time `json:"observed_at"`
+	EventID     string    `json:"event_id"`
+	QuantityRaw string    `json:"quantity_raw"`
+	GrossUSD    string    `json:"gross_usd"`
+	FeeUSD      string    `json:"fee_usd"`
+	ObservedAt  time.Time `json:"observed_at"`
 }
 
 type Order struct {
 	ReservationRequest
-	Status         string    `json:"status"`
-	AccountVersion int64     `json:"account_version"`
-	CreatedAt      time.Time `json:"created_at"`
-	Fill           *Fill     `json:"fill,omitempty"`
+	Status               string    `json:"status"`
+	AccountVersion       int64     `json:"account_version"`
+	CreatedAt            time.Time `json:"created_at"`
+	FilledQuantityRaw    string    `json:"filled_quantity_raw"`
+	RemainingQuantityRaw string    `json:"remaining_quantity_raw"`
+	Fill                 *Fill     `json:"fill,omitempty"`
+	Fills                []Fill    `json:"fills"`
 }
 
 func (r ReservationRequest) valid() bool {
 	return uuidPattern.MatchString(r.AccountID) && uuidPattern.MatchString(r.OrderID) && r.OrderID != r.AccountID &&
 		uuidPattern.MatchString(r.DecisionID) && uuidPattern.MatchString(r.QuoteID) && r.SnapshotVersion >= 1 &&
+		(r.ResearchJobID == "" || uuidPattern.MatchString(r.ResearchJobID)) &&
 		instrumentPart.MatchString(r.Instrument.ID) && instrumentPart.MatchString(r.Instrument.RegistryVersion) &&
 		r.Instrument.Decimals >= 0 && r.Instrument.Decimals <= 18 && (r.Side == "BUY" || r.Side == "SELL") &&
 		rawPattern.MatchString(r.QuantityRaw) && moneyPattern.MatchString(r.GrossUSD) && moneyPattern.MatchString(r.MaxFeeUSD) &&
@@ -71,18 +78,29 @@ func (r ReservationRequest) valid() bool {
 }
 
 func compareAmounts(left, right string) int {
-	a, _ := new(big.Rat).SetString(left)
-	b, _ := new(big.Rat).SetString(right)
-	return a.Cmp(b)
+	return amount(left).Cmp(amount(right))
+}
+
+func amount(value string) *big.Rat {
+	parsed, _ := new(big.Rat).SetString(value)
+	return parsed
+}
+
+func rawUnits(value string) *big.Int {
+	units, _ := new(big.Int).SetString(value, 10)
+	return units
 }
 
 const orderQuery = `SELECT o.request, o.request_hash, o.status, o.account_version, o.created_at,
-	CASE WHEN f.event_id IS NOT NULL THEN jsonb_build_object(
-		'event_id', f.event_id::text, 'gross_usd', trim_scale(f.gross_usd)::text,
+	COALESCE((SELECT jsonb_agg(jsonb_build_object(
+		'event_id', f.event_id::text, 'quantity_raw', f.quantity_raw::text,
+		'gross_usd', trim_scale(f.gross_usd)::text,
 		'fee_usd', trim_scale(f.fee_usd)::text, 'observed_at', f.observed_at
-	) END
+	) ORDER BY e.account_version)
+	FROM paper_fills f JOIN paper_events e USING (account_id, event_id)
+	WHERE (f.account_id, f.order_id)=(o.account_id, o.order_id)
+		AND ($3::bigint=0 OR e.account_version <= $3)), '[]'::jsonb)
 	FROM paper_orders o
-	LEFT JOIN paper_fills f USING (account_id, order_id)
 	WHERE o.account_id=$1 AND o.order_id=$2`
 
 func (s *Store) GetOrder(ctx context.Context, accountID, orderID string) (Order, error) {
@@ -94,9 +112,13 @@ func (s *Store) GetOrder(ctx context.Context, accountID, orderID string) (Order,
 }
 
 func readOrder(ctx context.Context, db rowQuerier, accountID, orderID string) (Order, []byte, error) {
+	return readOrderAt(ctx, db, accountID, orderID, 0, "")
+}
+
+func readOrderAt(ctx context.Context, db rowQuerier, accountID, orderID string, version int64, status string) (Order, []byte, error) {
 	var order Order
-	var request, hash, fill []byte
-	err := db.QueryRow(ctx, orderQuery, accountID, orderID).Scan(&request, &hash, &order.Status, &order.AccountVersion, &order.CreatedAt, &fill)
+	var request, hash, fills []byte
+	err := db.QueryRow(ctx, orderQuery, accountID, orderID, version).Scan(&request, &hash, &order.Status, &order.AccountVersion, &order.CreatedAt, &fills)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Order{}, nil, ErrNotFound
 	}
@@ -114,14 +136,40 @@ func readOrder(ctx context.Context, db rowQuerier, accountID, orderID string) (O
 	if order.AccountID != accountID || order.OrderID != orderID || !bytes.Equal(expected[:], hash) || !order.ReservationRequest.valid() {
 		return Order{}, nil, errors.New("stored paper order does not match its authorized request")
 	}
-	if len(fill) != 0 {
-		if err := json.Unmarshal(fill, &order.Fill); err != nil {
-			return Order{}, nil, fmt.Errorf("decode stored paper fill: %w", err)
-		}
-		order.Fill.ObservedAt = order.Fill.ObservedAt.UTC()
+	if err := json.Unmarshal(fills, &order.Fills); err != nil {
+		return Order{}, nil, fmt.Errorf("decode stored paper fills: %w", err)
 	}
 	order.CreatedAt = order.CreatedAt.UTC()
+	if version != 0 {
+		order.AccountVersion, order.Status = version, status
+	}
+	if err := order.summarizeFills(); err != nil {
+		return Order{}, nil, err
+	}
 	return order, hash, nil
+}
+
+func (o *Order) summarizeFills() error {
+	var total big.Int
+	for i := range o.Fills {
+		fill := &o.Fills[i]
+		if !rawPattern.MatchString(fill.QuantityRaw) || !moneyPattern.MatchString(fill.GrossUSD) ||
+			compareAmounts(fill.GrossUSD, "0") <= 0 || !moneyPattern.MatchString(fill.FeeUSD) || fill.ObservedAt.IsZero() {
+			return errors.New("invalid stored paper fill")
+		}
+		total.Add(&total, rawUnits(fill.QuantityRaw))
+		fill.ObservedAt = fill.ObservedAt.UTC()
+	}
+	remaining := new(big.Int).Sub(rawUnits(o.QuantityRaw), &total)
+	if remaining.Sign() < 0 || (o.Status == "filled") != (remaining.Sign() == 0) ||
+		(o.Status == "reserved" && total.Sign() != 0) || (o.Status == "partially_filled" && total.Sign() == 0) {
+		return errors.New("paper fill quantity does not match its order state")
+	}
+	o.FilledQuantityRaw, o.RemainingQuantityRaw = total.String(), remaining.String()
+	if len(o.Fills) > 0 {
+		o.Fill = &o.Fills[len(o.Fills)-1]
+	}
+	return nil
 }
 
 func lockAccount(ctx context.Context, tx pgx.Tx, accountID string) (int64, error) {
@@ -138,6 +186,20 @@ func lockAccount(ctx context.Context, tx pgx.Tx, accountID string) (int64, error
 
 // Reserve admits an order for virtual cash or already held instrument units.
 func (s *Store) Reserve(ctx context.Context, r ReservationRequest) (Order, bool, error) {
+	return s.reserve(ctx, r, nil)
+}
+
+// ReserveApplication fixes the exact automatic quote in the same transaction
+// that admits the order. An uncertain acknowledgement can be replayed from it.
+func (s *Store) ReserveApplication(ctx context.Context, r ReservationRequest, input ApplicationInput) (Order, bool, error) {
+	if !validApplication(input) || len(input.Quote) == 0 || input.ReserveBefore.IsZero() || r.AccountID != input.AccountID ||
+		r.ResearchJobID != input.JobID || r.SnapshotVersion != input.SnapshotVersion {
+		return Order{}, false, ErrInvalid
+	}
+	return s.reserve(ctx, r, &input)
+}
+
+func (s *Store) reserve(ctx context.Context, r ReservationRequest, application *ApplicationInput) (Order, bool, error) {
 	if !r.valid() {
 		return Order{}, false, ErrInvalid
 	}
@@ -157,10 +219,21 @@ func (s *Store) Reserve(ctx context.Context, r ReservationRequest) (Order, bool,
 		return Order{}, false, err
 	}
 	if previous, previousHash, err := readOrder(ctx, tx, r.AccountID, r.OrderID); !errors.Is(err, ErrNotFound) {
-		if err == nil && !bytes.Equal(previousHash, hash[:]) {
+		if err != nil {
+			return Order{}, false, err
+		}
+		if !bytes.Equal(previousHash, hash[:]) {
 			return Order{}, false, ErrConflict
 		}
-		return previous, false, err
+		if application != nil {
+			if _, err := bindApplication(ctx, tx, *application, r.OrderID, nil); err != nil {
+				return Order{}, false, err
+			}
+			if err := tx.Commit(ctx); err != nil {
+				return Order{}, false, fmt.Errorf("commit paper application binding: %w", err)
+			}
+		}
+		return previous, false, nil
 	}
 	if version != r.SnapshotVersion {
 		return Order{}, false, ErrStale
@@ -168,19 +241,24 @@ func (s *Store) Reserve(ctx context.Context, r ReservationRequest) (Order, bool,
 	if err := reserveFunds(ctx, tx, r); err != nil {
 		return Order{}, false, err
 	}
-	order := Order{ReservationRequest: r, Status: "reserved", AccountVersion: version + 1}
+	order := Order{ReservationRequest: r, Status: "reserved", AccountVersion: version + 1,
+		FilledQuantityRaw: "0", RemainingQuantityRaw: r.QuantityRaw, Fills: []Fill{}}
 	var orderInserted bool
+	deadline := r.ExpiresAt
+	if application != nil && application.ReserveBefore.Before(deadline) {
+		deadline = application.ReserveBefore.UTC()
+	}
 	// The deadline is checked when recording the order, after all waits for locks.
 	err = tx.QueryRow(ctx, `WITH measured AS MATERIALIZED (SELECT clock_timestamp() AS t),
 		stored AS (INSERT INTO paper_orders (account_id, order_id, decision_id, quote_id, request, request_hash, status, account_version, created_at)
 		SELECT $1,$2,$3,$4,$5::jsonb,$6,'reserved',$7,t FROM measured WHERE t < $8::timestamptz
 		ON CONFLICT DO NOTHING RETURNING created_at)
 		SELECT t, EXISTS (SELECT 1 FROM stored) FROM measured`, r.AccountID, r.OrderID, r.DecisionID, r.QuoteID,
-		payload, hash[:], order.AccountVersion, r.ExpiresAt).Scan(&order.CreatedAt, &orderInserted)
+		payload, hash[:], order.AccountVersion, deadline).Scan(&order.CreatedAt, &orderInserted)
 	if err != nil {
 		return Order{}, false, fmt.Errorf("record paper order: %w", err)
 	}
-	if !order.CreatedAt.Before(r.ExpiresAt) {
+	if !order.CreatedAt.Before(deadline) {
 		return Order{}, false, ErrExpired
 	}
 	if !orderInserted {
@@ -191,6 +269,11 @@ func (s *Store) Reserve(ctx context.Context, r ReservationRequest) (Order, bool,
 	}
 	if err := writeEvent(ctx, tx, r.AccountID, r.OrderID, order.AccountVersion, "paper_order.reserved", hash[:], payload); err != nil {
 		return Order{}, false, err
+	}
+	if application != nil {
+		if _, err := bindApplication(ctx, tx, *application, r.OrderID, nil); err != nil {
+			return Order{}, false, err
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return Order{}, false, fmt.Errorf("commit paper reservation: %w", err)

@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Paper position review projection 0.1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["paper_thesis_schema_version", "account_id", "account_version", "as_of", "research_job_id", "decision_id", "opening_order_id", "instrument", "symbol", "state", "opening_order_state", "horizon", "source_quantity_raw", "held_quantity_raw", "reserved_quantity_raw", "free_quantity_raw", "cash_usd", "reserved_cash_usd"],
+  "properties": {
+    "paper_thesis_schema_version": {"const": "0.1"},
+    "account_id": {"$ref": "paper-account.schema.json#/$defs/AccountID"},
+    "account_version": {"type": "integer", "minimum": 1},
+    "as_of": {"$ref": "#/$defs/Time"},
+    "research_job_id": {"$ref": "paper-account.schema.json#/$defs/AccountID"},
+    "decision_id": {"$ref": "paper-account.schema.json#/$defs/AccountID"},
+    "opening_order_id": {"$ref": "paper-account.schema.json#/$defs/AccountID"},
+    "instrument": {"$ref": "paper-account.schema.json#/$defs/Instrument"},
+    "symbol": {"type": "string", "pattern": "^[A-Z][A-Z0-9.\\-]{0,15}$"},
+    "state": {"enum": ["pending", "unopened", "open", "closed"]},
+    "opening_order_state": {"enum": ["reserved", "unknown", "partially_filled", "cancelled", "filled"]},
+    "first_fill_event_id": {"$ref": "paper-account.schema.json#/$defs/AccountID"},
+    "opened_at": {"$ref": "#/$defs/Time"},
+    "next_review_at": {"$ref": "#/$defs/Time"},
+    "thesis_expires_at": {"$ref": "#/$defs/Time"},
+    "horizon": {"$ref": "schema.json#/$defs/Horizon"},
+    "source_quantity_raw": {"$ref": "paper-account.schema.json#/$defs/RawQuantity"},
+    "held_quantity_raw": {"$ref": "paper-account.schema.json#/$defs/RawQuantity"},
+    "reserved_quantity_raw": {"$ref": "paper-account.schema.json#/$defs/RawQuantity"},
+    "free_quantity_raw": {"$ref": "paper-account.schema.json#/$defs/RawQuantity"},
+    "cash_usd": {"$ref": "paper-account.schema.json#/$defs/USD"},
+    "reserved_cash_usd": {"$ref": "paper-account.schema.json#/$defs/USD"},
+    "clock_review": {"$ref": "#/$defs/Trigger", "properties": {"reason": {"enum": ["cadence", "expiry"]}}},
+    "catalyst_review": {"$ref": "#/$defs/Trigger", "properties": {"reason": {"const": "catalyst"}}}
+  },
+  "$defs": {
+    "Time": {"type": "string", "format": "date-time"},
+    "Trigger": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["trigger_id", "kind", "reason", "at"],
+      "properties": {
+        "trigger_id": {"$ref": "paper-account.schema.json#/$defs/AccountID"},
+        "kind": {"enum": ["review", "report", "news", "price", "liquidity", "policy"]},
+        "reason": {"enum": ["cadence", "expiry", "catalyst"]},
+        "at": {"$ref": "#/$defs/Time"},
+        "event_provider": {"type": "string", "minLength": 1},
+        "event_record_id": {"type": "string", "minLength": 1},
+        "archive_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      },
+      "if": {"properties": {"reason": {"const": "catalyst"}}},
+      "then": {"required": ["event_provider", "event_record_id", "archive_sha256"]},
+      "else": {"properties": {"kind": {"const": "review"}}}
+    }
+  }
+}

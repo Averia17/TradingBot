@@ -19,11 +19,13 @@ from pydantic import (
 )
 
 from tradingbot.contracts import Contract, Symbol
+from tradingbot.paper_memory import PAPER_KIND, validate_record
 
 MAX_ARCHIVE_BYTES = 16 * 1024 * 1024
 Identifier = Annotated[str, Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")]
-RecordKind = Literal["bar", "news", "filing", "action", "macro"]
+RecordKind = Literal["bar", "news", "filing", "action", "macro", "paper_outcome"]
 SourceMode = Literal["synthetic_fixture", "local_archive"]
+Visibility = Literal["source_published", "locally_ingested"]
 _symbols = TypeAdapter(tuple[Symbol, ...])
 
 
@@ -77,6 +79,7 @@ class ArchiveRecord(Contract):
             raise ValueError("timestamps must satisfy event_time <= available_at <= ingested_at")
         if self.kind == "bar" and self.symbol is None:
             raise ValueError("bar records require a symbol")
+        validate_record(self)
         return self
 
     def key(self) -> tuple[str, str, str, str]:
@@ -88,14 +91,26 @@ class ArchiveRecord(Contract):
 
 
 class _Archive(Contract):
-    schema_version: Literal["0.1"]
+    schema_version: Literal["0.1", "0.2"]
     source_mode: SourceMode
     records: tuple[ArchiveRecord, ...]
 
     @model_validator(mode="after")
     def coherent_revisions(self) -> Self:
         previous: dict[tuple[str, str, str, str], ArchiveRecord] = {}
+        ledger_ids = set()
+        paper_account = None
         for item in sorted(self.records, key=lambda record: (record.key(), record.revision)):
+            if item.kind == PAPER_KIND:
+                if self.schema_version != "0.2":
+                    raise ValueError("paper outcomes require archive version 0.2")
+                account = item.payload["account_id"]
+                if paper_account is not None and paper_account != account:
+                    raise ValueError("archive contains multiple paper accounts")
+                paper_account = account
+                if item.record_id in ledger_ids:
+                    raise ValueError("duplicate paper outcome")
+                ledger_ids.add(item.record_id)
             key = item.key()
             older = previous.get(key)
             if older is not None:
@@ -131,23 +146,16 @@ def _reject_fraction(_: str) -> Never:
     raise ValueError("archive numbers with fractions must use exact decimal strings")
 
 
-def load_snapshot(
-    root: Path,
-    manifest: ArchiveReference | dict,
-    as_of: datetime,
-    *,
-    symbols: Iterable[str] | None = None,
-) -> PointInTimeSnapshot:
-    """Read verified local bytes and select the latest available revision of each fact.
+def decode_pinned_json(raw: bytes) -> JsonValue:
+    return json.loads(
+        raw.decode("utf-8-sig"),
+        object_pairs_hook=_unique_keys,
+        parse_float=_reject_fraction,
+        parse_constant=_reject_fraction,
+    )
 
-    An empty symbol filter retains only records explicitly marked as general.
-    Corporate-action announcements use event_time for announcement time and
-    carry any later effective timestamp inside payload. Source availability is
-    distinct from when these bytes entered the local archive.
-    """
-    cutoff = _utc(as_of)
-    reference = ArchiveReference.model_validate(manifest)
-    universe = None if symbols is None else tuple(sorted(set(_symbols.validate_python(symbols))))
+
+def read_pinned_json(root: Path, reference: ArchiveReference) -> JsonValue:
     root = root.resolve(strict=True)
     path = (root / reference.ref).resolve(strict=True)
     if not path.is_relative_to(root):
@@ -160,18 +168,35 @@ def load_snapshot(
         raise ValueError("archive exceeds the per-document byte limit")
     if hashlib.sha256(raw).hexdigest() != reference.sha256:
         raise ValueError("archive SHA-256 mismatch")
+    return decode_pinned_json(raw)
 
-    archive = _Archive.model_validate(
-        json.loads(
-            raw.decode("utf-8-sig"),
-            object_pairs_hook=_unique_keys,
-            parse_float=_reject_fraction,
-            parse_constant=_reject_fraction,
-        )
-    )
+
+def load_snapshot(
+    root: Path,
+    manifest: ArchiveReference | dict,
+    as_of: datetime,
+    *,
+    symbols: Iterable[str] | None = None,
+    visibility: Visibility = "source_published",
+) -> PointInTimeSnapshot:
+    """Read verified local bytes and select the latest available revision of each fact.
+
+    An empty symbol filter retains only records explicitly marked as general.
+    Corporate-action announcements use event_time for announcement time and
+    carry any later effective timestamp inside payload. Historical inspection
+    uses source publication; the worker also requires local receipt before cutoff.
+    """
+    cutoff = _utc(as_of)
+    if visibility not in ("source_published", "locally_ingested"):
+        raise ValueError("unknown archive visibility")
+    reference = ArchiveReference.model_validate(manifest)
+    universe = None if symbols is None else tuple(sorted(set(_symbols.validate_python(symbols))))
+    archive = _Archive.model_validate(read_pinned_json(root, reference))
     selected: dict[tuple[str, str, str, str], ArchiveRecord] = {}
     for item in archive.records:
-        if item.available_at <= cutoff and (
+        locally_known = visibility == "locally_ingested" or item.kind == PAPER_KIND
+        known_at = item.ingested_at if locally_known else item.available_at
+        if known_at <= cutoff and (
             universe is None or item.symbol is None or item.symbol in universe
         ):
             key = item.key()
@@ -193,6 +218,9 @@ def main() -> int:
     parser.add_argument("--ref", required=True, help="Relative file under the archive root")
     parser.add_argument("--sha256", required=True, help="Expected SHA-256 of exact file bytes")
     parser.add_argument("--as-of", type=_utc, required=True, help="ISO timestamp with timezone")
+    parser.add_argument(
+        "--visibility", choices=("source_published", "locally_ingested"), default="source_published"
+    )
     parser.add_argument("--symbol", action="append", help="Limit to a symbol; repeat as needed")
     args = parser.parse_args()
     try:
@@ -201,6 +229,7 @@ def main() -> int:
             {"ref": args.ref, "sha256": args.sha256},
             args.as_of,
             symbols=args.symbol,
+            visibility=args.visibility,
         )
     except ValidationError:
         parser.exit(2, "archive rejected: invalid archive or manifest schema\n")

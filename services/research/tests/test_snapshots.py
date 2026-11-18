@@ -66,6 +66,34 @@ def test_pit_selects_available_revision_by_source_and_symbol(tmp_path):
     assert at_ten.sha256 != at_release.sha256
 
 
+def test_local_receipt_excludes_uningested_revisions_and_first_seen_records(tmp_path):
+    manifest = write_archive(
+        tmp_path,
+        [
+            record("filing", "10q", revision=1, available=9),
+            record("filing", "10q", revision=2, available=13),
+            record("news", "late-ingest", available=13),
+        ],
+    )
+    at_release = load_snapshot(
+        tmp_path,
+        manifest,
+        datetime.fromisoformat(timestamp(13)),
+        visibility="locally_ingested",
+    )
+    assert [(item.record_id, item.revision) for item in at_release.records] == [("10q", 1)]
+    after_ingest = load_snapshot(
+        tmp_path,
+        manifest,
+        datetime.fromisoformat(timestamp(14)),
+        visibility="locally_ingested",
+    )
+    assert [(item.record_id, item.revision) for item in after_ingest.records] == [
+        ("10q", 2),
+        ("late-ingest", 1),
+    ]
+
+
 def test_snapshot_serialization_uses_normalized_cutoff_and_symbol_order(tmp_path):
     manifest = write_archive(tmp_path, [record("bar", "opening")])
     left = load_snapshot(

@@ -94,7 +94,7 @@ func (o *Outbox) Requeue(ctx context.Context, id int64) error {
 	if err != nil {
 		return err
 	}
-	if task.Queue != queueName {
+	if task.Queue != queueName && task.Queue != paperQueueName {
 		return pgqueue.ErrTaskNotFound
 	}
 	return o.queue.Enable(ctx, id)
@@ -107,11 +107,15 @@ func (o *Outbox) EnqueueTx(ctx context.Context, tx pgx.Tx, event fill_event.Even
 	if err := event.Validate(); err != nil {
 		return 0, fmt.Errorf("validate confirmed fill event: %w", err)
 	}
+	return enqueueExact(ctx, o.queue, tx, publishJob, event)
+}
+
+func enqueueExact[T any](ctx context.Context, queue *pgqueue.Queue, tx pgx.Tx, job pgqueue.JobSpec[T], event T) (int64, error) {
 	payload, err := json.Marshal(event)
 	if err != nil {
 		return 0, fmt.Errorf("encode confirmed fill event: %w", err)
 	}
-	id, err := pgqueue.EnqueueTx(ctx, o.queue, tx, publishJob, event, pgqueue.WithIgnoreDuplicates())
+	id, err := pgqueue.EnqueueTx(ctx, queue, tx, job, event, pgqueue.WithIgnoreDuplicates())
 	if err != nil {
 		return 0, fmt.Errorf("enqueue confirmed fill event: %w", err)
 	}

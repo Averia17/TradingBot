@@ -1,0 +1,35 @@
+{
+  "schema_version": "0.1",
+  "account_id": "11111111-1111-4111-8111-111111111111",
+  "start_day": "2026-10-02",
+  "end_day": "2026-10-03",
+  "mark_max_age_seconds": 3600,
+  "valuation_source": {
+    "kind": "synthetic_fixture",
+    "id": "closing-paper-marks-v1"
+  },
+  "marks": [
+    {
+      "mark_id": "fixture-oct-02-abc",
+      "instrument": {
+        "instrument_id": "stock:ABC",
+        "registry_version": "fixture-v1",
+        "decimals": 2
+      },
+      "price_usd": "32.00000008",
+      "observed_at": "2026-10-02T23:30:00Z",
+      "available_at": "2026-10-02T23:40:00Z"
+    },
+    {
+      "mark_id": "fixture-oct-03-abc",
+      "instrument": {
+        "instrument_id": "stock:ABC",
+        "registry_version": "fixture-v1",
+        "decimals": 2
+      },
+      "price_usd": "31.99",
+      "observed_at": "2026-10-03T23:30:00Z",
+      "available_at": "2026-10-03T23:41:00Z"
+    }
+  ]
+}

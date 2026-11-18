@@ -1,0 +1,3 @@
+pit-archive.json text eol=lf
+pit-import/*.json text eol=lf
+selection/*.json text eol=lf

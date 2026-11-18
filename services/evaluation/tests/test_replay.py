@@ -90,6 +90,13 @@ def test_expired_order_and_unfunded_orders_cannot_fill():
     assert result["intents"]["expired"] == "expired"
 
 
+def test_price_gap_cannot_report_filled_when_no_execution_was_booked():
+    result = run_replay(load_replay(replay_input(orders=[order("gap", "TSLA", "BUY", 9, 12, 20)])))
+    assert result["fills"] == []
+    assert result["ending_cash_usd"] == "1000.00"
+    assert result["intents"]["gap"] == "no_accounted_fill"
+
+
 def test_two_orders_share_one_displayed_unit_of_quote_liquidity():
     result = run_replay(
         load_replay(

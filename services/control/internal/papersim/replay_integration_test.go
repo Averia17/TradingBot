@@ -16,7 +16,43 @@ import (
 	"tradingbot/control/internal/ledger"
 )
 
-func isolatedLedger(t *testing.T) (context.Context, *ledger.Store) {
+func TestPartialQuoteLeavesExactRemainderForReconciliation(t *testing.T) {
+	ctx, store, now := isolatedLedger(t)
+	intent, quote := fixture(now)
+	quote.Version, quote.Execution, quote.ExecutedQuantityRaw = PartialVersion, "partial", "62500000"
+	raw := bindQuote(t, &intent, quote)
+	if _, _, err := store.CreateAccount(ctx, ledger.CreateAccount{ID: intent.AccountID, InitialCashUSD: "1000"}); err != nil {
+		t.Fatal(err)
+	}
+	first, err := Run(ctx, store, intent, raw, now)
+	if err != nil || first.Version != PartialVersion || !first.OutcomeRecorded || first.Order.Status != "partially_filled" ||
+		first.Order.RemainingQuantityRaw != "62500000" || first.Order.Fill == nil ||
+		first.Order.Fill.GrossUSD != "61.7283945" || first.Order.Fill.FeeUSD != "0.1025926" {
+		t.Fatalf("partial simulation: %+v, %v", first, err)
+	}
+	account, err := store.GetAccount(ctx, intent.AccountID)
+	if err != nil || account.CashUSD != "938.1690129" || account.ReservedCashUSD != "62.0974074" {
+		t.Fatalf("partial settlement: %+v, %v", account, err)
+	}
+	cancel := ledger.ResolutionRequest{
+		AccountID: intent.AccountID, OrderID: first.Order.OrderID, EventID: "33333333-3333-4333-8333-333333333333", Outcome: "cancelled",
+	}
+	if _, _, err := store.Resolve(ctx, cancel); err != nil {
+		t.Fatal(err)
+	}
+	replay, err := Run(ctx, store, intent, raw, now.Add(time.Hour))
+	if err != nil || replay.OutcomeRecorded || replay.ReservationRecorded || replay.Order.Status != "partially_filled" ||
+		replay.Order.Fill == nil || replay.Order.Fill.EventID != first.Order.Fill.EventID {
+		t.Fatalf("partial replay: %+v, %v", replay, err)
+	}
+	account, err = store.GetAccount(ctx, intent.AccountID)
+	if err != nil || account.CashUSD != "938.1690129" || account.ReservedCashUSD != "0" ||
+		len(account.Positions) != 1 || account.Positions[0].QuantityRaw != "62500000" {
+		t.Fatalf("partial reconciliation: %+v, %v", account, err)
+	}
+}
+
+func isolatedLedger(t *testing.T) (context.Context, *ledger.Store, time.Time) {
 	t.Helper()
 	dsn := os.Getenv("TRADINGBOT_TEST_DATABASE_URL")
 	if dsn == "" {
@@ -53,7 +89,11 @@ func isolatedLedger(t *testing.T) (context.Context, *ledger.Store) {
 		t.Fatal("cannot open paper ledger test schema")
 	}
 	t.Cleanup(store.Close)
-	return ctx, store
+	var now time.Time
+	if err := base.QueryRow(ctx, "SELECT clock_timestamp()").Scan(&now); err != nil {
+		t.Fatal("read test database clock failed")
+	}
+	return ctx, store, now.UTC()
 }
 
 type interruptedStore struct{ *ledger.Store }
@@ -65,8 +105,7 @@ func (interruptedStore) Resolve(context.Context, ledger.ResolutionRequest) (ledg
 }
 
 func TestRetryAfterReservationCommitsOnceInPostgres(t *testing.T) {
-	ctx, store := isolatedLedger(t)
-	now := time.Now().UTC()
+	ctx, store, now := isolatedLedger(t)
 	in, quote := fixture(now)
 	raw := bindQuote(t, &in, quote)
 	if _, _, err := store.CreateAccount(ctx, ledger.CreateAccount{ID: in.AccountID, InitialCashUSD: "1000"}); err != nil {
@@ -86,7 +125,7 @@ func TestRetryAfterReservationCommitsOnceInPostgres(t *testing.T) {
 	results := make(chan result, 2)
 	for range 2 {
 		calls.Go(func() {
-			value, err := Run(ctx, store, in, raw, time.Now().UTC())
+			value, err := Run(ctx, store, in, raw, now)
 			results <- result{value, err}
 		})
 	}
@@ -116,14 +155,13 @@ func TestRetryAfterReservationCommitsOnceInPostgres(t *testing.T) {
 	changed := in
 	changed.SnapshotVersion = account.Version
 	changed.MaxFeeUSD = "0.30"
-	if _, err := Run(ctx, store, changed, raw, time.Now().UTC()); !errors.Is(err, ledger.ErrConflict) {
+	if _, err := Run(ctx, store, changed, raw, now); !errors.Is(err, ledger.ErrConflict) {
 		t.Fatalf("different intent under same decision: %v", err)
 	}
 }
 
 func TestRejectionReleasesAndTimeoutKeepsFundsInPostgres(t *testing.T) {
-	ctx, store := isolatedLedger(t)
-	now := time.Now().UTC()
+	ctx, store, now := isolatedLedger(t)
 	in, quote := fixture(now)
 	if _, _, err := store.CreateAccount(ctx, ledger.CreateAccount{ID: in.AccountID, InitialCashUSD: "1000"}); err != nil {
 		t.Fatal(err)

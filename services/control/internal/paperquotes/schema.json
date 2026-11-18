@@ -1,0 +1,196 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Synthetic share-equivalent quote comparison 0.1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "source_mode", "as_of", "market", "registry", "reference", "quotes"],
+  "properties": {
+    "schema_version": {"const": "0.1"},
+    "source_mode": {"const": "synthetic_fixture"},
+    "as_of": {"$ref": "#/$defs/Time"},
+    "market": {"$ref": "#/$defs/Market"},
+    "registry": {"$ref": "#/$defs/Registry"},
+    "reference": {"$ref": "#/$defs/Reference"},
+    "quotes": {"type": "array", "minItems": 1, "maxItems": 128, "items": {"$ref": "#/$defs/Quote"}}
+  },
+  "$defs": {
+    "Time": {"type": "string", "format": "date-time"},
+    "ID": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$"},
+    "FixtureID": {"type": "string", "pattern": "^fixture:[A-Za-z0-9][A-Za-z0-9._-]{0,95}$"},
+    "Raw": {"type": "string", "pattern": "^[1-9][0-9]{0,37}$"},
+    "Decimal": {"type": "string", "pattern": "^(?:0|[1-9][0-9]{0,29})(?:\\.[0-9]{1,18})?$"},
+    "Side": {"enum": ["BUY", "SELL"]},
+    "Token": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["chain", "mint", "program", "decimals"],
+      "properties": {
+        "chain": {"$ref": "#/$defs/FixtureID"},
+        "mint": {"$ref": "#/$defs/FixtureID"},
+        "program": {"$ref": "#/$defs/FixtureID"},
+        "decimals": {"type": "integer", "minimum": 0, "maximum": 18}
+      }
+    },
+    "Holding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["token", "quantity_raw"],
+      "properties": {
+        "token": {"$ref": "#/$defs/Token"},
+        "quantity_raw": {"$ref": "#/$defs/Raw"}
+      }
+    },
+    "Market": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["underlying_id", "chain", "side", "target_shares", "max_age_seconds", "allowed_issuers"],
+      "properties": {
+        "underlying_id": {"$ref": "#/$defs/FixtureID"},
+        "chain": {"$ref": "#/$defs/FixtureID"},
+        "side": {"$ref": "#/$defs/Side"},
+        "target_shares": {"$ref": "#/$defs/Decimal"},
+        "max_age_seconds": {"type": "integer", "minimum": 1, "maximum": 3600},
+        "allowed_issuers": {"type": "array", "minItems": 1, "maxItems": 32, "uniqueItems": true, "items": {"$ref": "#/$defs/FixtureID"}},
+        "holding": {"$ref": "#/$defs/Holding"}
+      },
+      "if": {"properties": {"side": {"const": "SELL"}}},
+      "then": {"required": ["holding"]},
+      "else": {"not": {"required": ["holding"]}}
+    },
+    "ShareRatio": {
+      "description": "Exact underlying shares per whole wrapper token. Multiply the ratio by raw / 10^decimals.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["numerator", "denominator"],
+      "properties": {
+        "numerator": {"$ref": "#/$defs/Raw"},
+        "denominator": {"$ref": "#/$defs/Raw"}
+      }
+    },
+    "Revision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["token", "underlying_id", "issuer_id", "revision", "available_at", "effective_at", "shares_per_token"],
+      "properties": {
+        "token": {"$ref": "#/$defs/Token"},
+        "underlying_id": {"$ref": "#/$defs/FixtureID"},
+        "issuer_id": {"$ref": "#/$defs/FixtureID"},
+        "revision": {"$ref": "#/$defs/ID"},
+        "available_at": {"$ref": "#/$defs/Time"},
+        "effective_at": {"$ref": "#/$defs/Time"},
+        "shares_per_token": {"$ref": "#/$defs/ShareRatio"}
+      }
+    },
+    "Registry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["snapshot_version", "wrappers"],
+      "properties": {
+        "snapshot_version": {"$ref": "#/$defs/ID"},
+        "wrappers": {"type": "array", "minItems": 1, "maxItems": 256, "items": {"$ref": "#/$defs/Revision"}}
+      }
+    },
+    "SettlementFX": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["token", "usd_per_token"],
+      "properties": {
+        "token": {"$ref": "#/$defs/Token"},
+        "usd_per_token": {"$ref": "#/$defs/Decimal"}
+      }
+    },
+    "Reference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["observed_at", "expires_at", "usd_per_share", "settlements"],
+      "properties": {
+        "observed_at": {"$ref": "#/$defs/Time"},
+        "expires_at": {"$ref": "#/$defs/Time"},
+        "usd_per_share": {"$ref": "#/$defs/Decimal"},
+        "settlements": {"type": "array", "minItems": 1, "maxItems": 32, "items": {"$ref": "#/$defs/SettlementFX"}}
+      }
+    },
+    "Fee": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "treatment", "amount_usd"],
+      "properties": {
+        "id": {"$ref": "#/$defs/ID"},
+        "treatment": {"enum": ["embedded", "additional"]},
+        "amount_usd": {"$ref": "#/$defs/Decimal"}
+      }
+    },
+    "Quote": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "mode", "side", "wrapper", "registry_revision", "settlement", "input_raw", "expected_output_raw", "observed_at", "expires_at", "fees"],
+      "properties": {
+        "id": {"$ref": "#/$defs/ID"},
+        "mode": {"enum": ["synthetic_firm", "indicative"]},
+        "side": {"$ref": "#/$defs/Side"},
+        "wrapper": {"$ref": "#/$defs/Token"},
+        "registry_revision": {"$ref": "#/$defs/ID"},
+        "settlement": {"$ref": "#/$defs/Token"},
+        "input_raw": {"$ref": "#/$defs/Raw"},
+        "expected_output_raw": {"$ref": "#/$defs/Raw"},
+        "min_output_raw": {"$ref": "#/$defs/Raw"},
+        "observed_at": {"$ref": "#/$defs/Time"},
+        "expires_at": {"$ref": "#/$defs/Time"},
+        "fees": {"type": "array", "maxItems": 32, "items": {"$ref": "#/$defs/Fee"}}
+      },
+      "if": {"properties": {"mode": {"const": "synthetic_firm"}}},
+      "then": {"required": ["min_output_raw"]}
+    },
+    "ExactUSD": {"type": "string", "pattern": "^(?:0|[1-9][0-9]{0,70})(?:\\.[0-9]{1,36})?$"},
+    "Display": {"type": "string", "pattern": "^-?(?:0|[1-9][0-9]{0,111})\\.[0-9]{8}$"},
+    "ComparedQuote": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "wrapper", "settlement", "registry_revision", "input_raw", "expected_output_raw"],
+      "properties": {
+        "id": {"$ref": "#/$defs/ID"},
+        "wrapper": {"$ref": "#/$defs/Token"},
+        "settlement": {"$ref": "#/$defs/Token"},
+        "registry_revision": {"$ref": "#/$defs/ID"},
+        "input_raw": {"$ref": "#/$defs/Raw"},
+        "expected_output_raw": {"$ref": "#/$defs/Raw"},
+        "min_output_raw": {"$ref": "#/$defs/Raw"},
+        "excluded_reason": {"enum": ["indicative_quote", "quote_side_mismatch", "quote_stale", "ineligible_chain", "wrong_held_wrapper", "ineligible_settlement", "quote_output_below_minimum", "wrapper_unknown_at_observation", "registry_changed_after_quote", "registry_revision_mismatch", "wrapper_identity_mismatch", "ineligible_wrapper", "settlement_fx_missing", "insufficient_held_quantity", "share_quantity_mismatch", "duplicate_fee_id", "nonpositive_net_proceeds"]},
+        "rank": {"type": "integer", "minimum": 1, "maximum": 128},
+        "settlement_usd": {"$ref": "#/$defs/ExactUSD"},
+        "embedded_fees_usd": {"$ref": "#/$defs/ExactUSD"},
+        "additional_fees_usd": {"$ref": "#/$defs/ExactUSD"},
+        "effective_usd": {"$ref": "#/$defs/ExactUSD"},
+        "usd_per_share": {"$ref": "#/$defs/Display"},
+        "cost_vs_reference_bps": {"$ref": "#/$defs/Display"}
+      },
+      "if": {"required": ["rank"]},
+      "then": {
+        "required": ["min_output_raw", "settlement_usd", "embedded_fees_usd", "additional_fees_usd", "effective_usd", "usd_per_share", "cost_vs_reference_bps"],
+        "not": {"required": ["excluded_reason"]}
+      },
+      "else": {
+        "required": ["excluded_reason"],
+        "not": {"anyOf": [{"required": ["settlement_usd"]}, {"required": ["embedded_fees_usd"]}, {"required": ["additional_fees_usd"]}, {"required": ["effective_usd"]}, {"required": ["usd_per_share"]}, {"required": ["cost_vs_reference_bps"]}]}
+      }
+    },
+    "Result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "source_mode", "execution_enabled", "input_sha256", "registry_snapshot_version", "as_of", "side", "underlying_id", "target_shares", "reference_usd", "quotes"],
+      "properties": {
+        "schema_version": {"const": "0.1"},
+        "source_mode": {"const": "synthetic_fixture"},
+        "execution_enabled": {"const": false},
+        "input_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "registry_snapshot_version": {"$ref": "#/$defs/ID"},
+        "as_of": {"$ref": "#/$defs/Time"},
+        "side": {"$ref": "#/$defs/Side"},
+        "underlying_id": {"$ref": "#/$defs/FixtureID"},
+        "target_shares": {"$ref": "#/$defs/Decimal"},
+        "reference_usd": {"$ref": "#/$defs/ExactUSD"},
+        "quotes": {"type": "array", "minItems": 1, "maxItems": 128, "items": {"$ref": "#/$defs/ComparedQuote"}}
+      }
+    }
+  }
+}

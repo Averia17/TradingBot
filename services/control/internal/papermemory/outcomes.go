@@ -17,6 +17,8 @@ import (
 
 const pageSize = 100
 
+const sourceMode, accountingMethod = "paper_simulated_ledger", "fifo_recording_order_usd_scale8_v1"
+
 // ErrNoHistory indicates that no account creation was available at the cutoff.
 var ErrNoHistory = errors.New("no paper account history at the cutoff")
 
@@ -48,17 +50,18 @@ type Snapshot struct {
 // Outcome is identified by the account and Sell FillEventID. Timing and
 // matched buy sources come from the original executions and their receipts.
 type Outcome struct {
-	FillEventID  string            `json:"fill_event_id"`
-	DecisionID   string            `json:"decision_id"`
-	Instrument   ledger.Instrument `json:"instrument"`
-	QuantityRaw  string            `json:"quantity_raw"`
-	GrossUSD     string            `json:"gross_usd"`
-	FeeUSD       string            `json:"fee_usd"`
-	CostBasisUSD string            `json:"cost_basis_usd"`
-	NetPnLUSD    string            `json:"net_pnl_usd"`
-	ObservedAt   time.Time         `json:"observed_at"`
-	AvailableAt  time.Time         `json:"available_at"`
-	Lots         []LotAllocation   `json:"lots"`
+	FillEventID    string            `json:"fill_event_id"`
+	DecisionID     string            `json:"decision_id"`
+	Instrument     ledger.Instrument `json:"instrument"`
+	QuantityRaw    string            `json:"quantity_raw"`
+	GrossUSD       string            `json:"gross_usd"`
+	FeeUSD         string            `json:"fee_usd"`
+	CostBasisUSD   string            `json:"cost_basis_usd"`
+	NetPnLUSD      string            `json:"net_pnl_usd"`
+	ObservedAt     time.Time         `json:"observed_at"`
+	AvailableAt    time.Time         `json:"available_at"`
+	Lots           []LotAllocation   `json:"lots"`
+	accountVersion int64
 }
 
 type LotAllocation struct {
@@ -80,53 +83,96 @@ type OpenLot struct {
 // Partial FIFO basis rounds down cumulatively per lot. The unallocated
 // remainder stays with the open lot until it is fully disposed.
 func Load(ctx context.Context, source EventReader, accountID string, asOf time.Time) (Snapshot, error) {
-	if source == nil || accountID == "" || asOf.IsZero() {
-		return Snapshot{}, errors.New("paper outcome projection requires a ledger source, account and cutoff")
+	var view Snapshot
+	err := walkSnapshots(ctx, source, accountID, []time.Time{asOf}, nil, func(p *projection, cutoff time.Time) error {
+		view = p.result(cutoff)
+		return nil
+	})
+	return view, err
+}
+
+func walkSnapshots(ctx context.Context, source EventReader, accountID string, cutoffs []time.Time, applied func(ledger.Event) error, visit func(*projection, time.Time) error) error {
+	if source == nil || accountID == "" || len(cutoffs) == 0 {
+		return errors.New("paper projection requires a ledger source, account and cutoff")
+	}
+	for i, cutoff := range cutoffs {
+		if cutoff.IsZero() || (i > 0 && !cutoff.After(cutoffs[i-1])) {
+			return errors.New("paper projection cutoffs must be nonzero and increasing")
+		}
 	}
 	p := projection{
 		view: Snapshot{
-			AccountID: accountID, AsOf: asOf.UTC(), SourceMode: "paper_simulated_ledger", AccountingMethod: "fifo_recording_order_usd_scale8_v1",
+			AccountID: accountID, SourceMode: sourceMode, AccountingMethod: accountingMethod,
 			Realized: []Outcome{}, OpenLots: []OpenLot{},
 		},
-		orders: make(map[string]ledger.ReservationRequest),
+		orders: make(map[string]unsettledOrder),
 		lots:   make(map[ledger.Instrument][]*lot),
 	}
-	for {
-		if err := ctx.Err(); err != nil {
-			return Snapshot{}, err
-		}
-		events, err := source.Events(ctx, accountID, p.view.AccountVersion, pageSize)
-		if err != nil {
-			return Snapshot{}, fmt.Errorf("read paper ledger events: %w", err)
-		}
-		if len(events) == 0 {
-			return p.result()
-		}
-		for _, event := range events {
+	var pending []ledger.Event
+	exhausted := false
+	for _, cutoff := range cutoffs {
+		for !exhausted {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if len(pending) == 0 {
+				var err error
+				pending, err = source.Events(ctx, accountID, p.view.AccountVersion, pageSize)
+				if err != nil {
+					return fmt.Errorf("read paper ledger events: %w", err)
+				}
+				if len(pending) == 0 {
+					exhausted = true
+					break
+				}
+			}
+			event := pending[0]
 			if event.AccountVersion != p.view.AccountVersion+1 || event.RecordedAt.IsZero() || event.ID == "" {
-				return Snapshot{}, fmt.Errorf("inconsistent paper event at account version %d", event.AccountVersion)
+				return fmt.Errorf("inconsistent paper event at account version %d", event.AccountVersion)
 			}
 			// Never skip an unavailable version and apply its later dependants,
 			// even if a subsequent recorded timestamp is earlier after clock drift.
-			if event.RecordedAt.After(asOf) {
-				return p.result()
+			if event.RecordedAt.After(cutoff) {
+				break
 			}
 			if err := p.apply(event); err != nil {
-				return Snapshot{}, fmt.Errorf("project paper event at account version %d: %w", event.AccountVersion, err)
+				return fmt.Errorf("project paper event at account version %d: %w", event.AccountVersion, err)
+			}
+			if applied != nil {
+				if err := applied(event); err != nil {
+					return err
+				}
 			}
 			p.view.AccountVersion = event.AccountVersion
+			pending = pending[1:]
+		}
+		if p.view.AccountVersion == 0 {
+			return ErrNoHistory
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := visit(&p, cutoff.UTC()); err != nil {
+			return err
 		}
 	}
+	return nil
 }
 
 type projection struct {
 	view        Snapshot
+	funding     Funding
 	cash        big.Int
 	fees        big.Int
 	realized    big.Int
 	availableAt time.Time
-	orders      map[string]ledger.ReservationRequest
+	orders      map[string]unsettledOrder
 	lots        map[ledger.Instrument][]*lot
+}
+
+type unsettledOrder struct {
+	request   ledger.ReservationRequest
+	remaining *big.Int
 }
 
 type lot struct {
@@ -155,6 +201,7 @@ func (p *projection) apply(e ledger.Event) error {
 			return err
 		}
 		p.cash.Set(cash)
+		p.funding = Funding{CashUSD: formatUSD(cash), RecordedAt: e.RecordedAt.UTC()}
 	case "paper_order.reserved":
 		var request ledger.ReservationRequest
 		if json.Unmarshal(e.Payload, &request) != nil || request.AccountID != p.view.AccountID || request.OrderID != e.ID ||
@@ -166,8 +213,9 @@ func (p *projection) apply(e ledger.Event) error {
 		if _, exists := p.orders[request.OrderID]; exists {
 			return errors.New("duplicate paper order")
 		}
-		p.orders[request.OrderID] = request
-	case "paper_order.filled", "paper_order.unknown", "paper_order.cancelled":
+		quantity, _ := new(big.Int).SetString(request.QuantityRaw, 10)
+		p.orders[request.OrderID] = unsettledOrder{request: request, remaining: quantity}
+	case "paper_order.partially_filled", "paper_order.filled", "paper_order.unknown", "paper_order.cancelled":
 		var resolution ledger.ResolutionRequest
 		if json.Unmarshal(e.Payload, &resolution) != nil || resolution.AccountID != p.view.AccountID || resolution.EventID != e.ID || e.Kind != "paper_order."+resolution.Outcome {
 			return errors.New("invalid paper resolution")
@@ -176,14 +224,29 @@ func (p *projection) apply(e ledger.Event) error {
 		if !exists {
 			return errors.New("paper resolution lacks its reservation")
 		}
-		if resolution.Outcome != "unknown" {
+		if resolution.Outcome == "cancelled" || resolution.Outcome == "filled" {
 			delete(p.orders, resolution.OrderID)
 		}
-		if resolution.Outcome == "filled" {
+		if finished := resolution.Outcome == "filled"; finished || resolution.Outcome == "partially_filled" {
 			if resolution.ObservedAt.IsZero() || resolution.ObservedAt.After(e.RecordedAt) {
 				return errors.New("fill observation postdates its receipt")
 			}
-			return p.fill(order, resolution)
+			quantity := new(big.Int).Set(order.remaining)
+			if !finished || resolution.QuantityRaw != "" {
+				if !quantityPattern.MatchString(resolution.QuantityRaw) {
+					return errors.New("invalid fill quantity")
+				}
+				quantity.SetString(resolution.QuantityRaw, 10)
+			}
+			comparison := quantity.Cmp(order.remaining)
+			if finished && comparison != 0 || !finished && comparison >= 0 {
+				return errors.New("fill quantity conflicts with the unexecuted remainder")
+			}
+			order.remaining.Sub(order.remaining, quantity)
+			return p.fill(order.request, resolution, quantity)
+		}
+		if resolution.QuantityRaw != "" || resolution.GrossUSD != "" || resolution.FeeUSD != "" || !resolution.ObservedAt.IsZero() {
+			return errors.New("non-fill resolution contains execution amounts")
 		}
 	default:
 		return fmt.Errorf("unsupported paper event kind %q", e.Kind)
@@ -191,7 +254,7 @@ func (p *projection) apply(e ledger.Event) error {
 	return nil
 }
 
-func (p *projection) fill(order ledger.ReservationRequest, fill ledger.ResolutionRequest) error {
+func (p *projection) fill(order ledger.ReservationRequest, fill ledger.ResolutionRequest, quantity *big.Int) error {
 	gross, err := usdUnits(fill.GrossUSD)
 	if err != nil || gross.Sign() == 0 {
 		return errors.New("invalid fill gross amount")
@@ -200,7 +263,6 @@ func (p *projection) fill(order ledger.ReservationRequest, fill ledger.Resolutio
 	if err != nil {
 		return err
 	}
-	quantity, _ := new(big.Int).SetString(order.QuantityRaw, 10)
 	p.fees.Add(&p.fees, fee)
 	if order.Side == "BUY" {
 		basis := new(big.Int).Add(gross, fee)
@@ -259,14 +321,13 @@ func (p *projection) sell(order ledger.ReservationRequest, fill ledger.Resolutio
 		QuantityRaw: quantity.String(), GrossUSD: formatUSD(gross), FeeUSD: formatUSD(fee),
 		CostBasisUSD: formatUSD(&basis), NetPnLUSD: formatUSD(net),
 		ObservedAt: fill.ObservedAt.UTC(), AvailableAt: p.availableAt, Lots: matches,
+		accountVersion: p.view.AccountVersion + 1,
 	})
 	return nil
 }
 
-func (p *projection) result() (Snapshot, error) {
-	if p.view.AccountVersion == 0 {
-		return Snapshot{}, ErrNoHistory
-	}
+func (p *projection) result(cutoff time.Time) Snapshot {
+	p.view.AsOf = cutoff
 	p.view.CashUSD = formatUSD(&p.cash)
 	p.view.RecordedFeesUSD = formatUSD(&p.fees)
 	p.view.RealizedNetPnLUSD = formatUSD(&p.realized)
@@ -287,7 +348,7 @@ func (p *projection) result() (Snapshot, error) {
 		}
 		return strings.Compare(a.BuyFillEventID, b.BuyFillEventID)
 	})
-	return p.view, nil
+	return p.view
 }
 
 func usdUnits(value string) (*big.Int, error) {
