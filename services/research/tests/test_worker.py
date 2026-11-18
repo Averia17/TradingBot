@@ -7,6 +7,7 @@ import pytest
 
 from tradingbot import worker
 from tradingbot.adapters import offline
+from tradingbot.llm_usage import NO_USAGE, LLMCall
 
 JOB_ID = "00000000-0000-4000-8000-000000000001"
 TOKEN = "00000000-0000-4000-8000-000000000002"
@@ -38,7 +39,7 @@ def test_worker_requires_valid_replayed_permit_before_invoking_model(monkeypatch
     stop = Event()
     deadline = datetime.now(UTC) + timedelta(seconds=30)
     claim_id = None
-    permits, model_calls = [], []
+    permits, model_calls, recordings = [], [], []
     cancellation = None
 
     def post(self, endpoint, body, expected, timeout=None):
@@ -72,7 +73,20 @@ def test_worker_requires_valid_replayed_permit_before_invoking_model(monkeypatch
             if len(permits) == 1:
                 raise worker.ControlError(retryable=True)
             return receipt if len(permits) > 2 else receipt | {"attempt": 2}
+        if endpoint.endswith("/record-call"):
+            assert expected == (200, 201) and timeout > 0
+            assert model_calls == [CALL_ID]
+            recordings.append(body)
+            if len(recordings) == 1:
+                raise worker.ControlError(retryable=True)
+            return {
+                "job_id": JOB_ID,
+                "call_id": str(CALL_ID),
+                "attempt": 1,
+                "recorded_at": datetime.now(UTC).isoformat(),
+            }
         assert endpoint.endswith("/complete") and not denial
+        assert len(recordings) == 2
         stop.set()
         return {
             "job_id": JOB_ID,
@@ -82,25 +96,93 @@ def test_worker_requires_valid_replayed_permit_before_invoking_model(monkeypatch
             "result": RESULT,
         }
 
-    def analyze(request, attempt, deadline, cancelled, *, authorize_call=None):
+    def analyze(request, attempt, deadline, cancelled, *, authorize_call, record_call):
         nonlocal cancellation
         assert authorize_call is not None
         cancellation = cancelled
         authorize_call(CALL_ID)
         model_calls.append(CALL_ID)
+        record_call(
+            LLMCall(
+                run_id=CALL_ID,
+                provider="offline",
+                model=offline.MODEL_ID,
+                role="portfolio_allocator",
+                status="completed",
+                started_at=datetime.now(UTC),
+                **NO_USAGE.model_dump(),
+            )
+        )
         return RESULT
 
     monkeypatch.setattr(worker.ControlClient, "post", post)
+    monkeypatch.setattr(
+        worker.ControlClient,
+        "get",
+        lambda self, path: {"research_call_usage": True},
+        raising=False,
+    )
     monkeypatch.setattr(offline, "analyze_offline", analyze)
     worker.run_worker("http://127.0.0.1:8080", WORKER_ID, stop=stop, poll_interval=0.001)
     assert model_calls == ([] if denial else [CALL_ID])
     assert len(permits) == (1 if denial else 3)
     assert all(permit == permits[0] for permit in permits)
+    assert len(recordings) == (0 if denial else 2)
+    if recordings:
+        assert recordings[0] == recordings[1]
+        recorded = json.loads(recordings[0])
+        assert recorded["call_usage_schema_version"] == "0.1"
+        assert recorded["worker_id"] == WORKER_ID
+        assert recorded["lease_token"] == TOKEN
+        assert recorded["call"]["run_id"] == str(CALL_ID)
+        assert recorded["call"]["status"] == "completed"
+        assert recorded["call"]["input_tokens"] is None
     assert json.loads(permits[0]) == {
         "worker_id": WORKER_ID,
         "lease_token": TOKEN,
         "call_id": str(CALL_ID),
     }
+
+
+@pytest.mark.parametrize(
+    "capabilities", [{}, {"research_call_usage": False}, {"research_call_usage": "true"}]
+)
+def test_builtin_worker_rejects_incompatible_control_before_claim(monkeypatch, capabilities):
+    requests = []
+
+    def get(self, path):
+        requests.append(path)
+        return capabilities
+
+    def unexpected(*args):
+        pytest.fail("incompatible Control must not receive a claim")
+
+    monkeypatch.setattr(worker.ControlClient, "get", get, raising=False)
+    monkeypatch.setattr(worker.ControlClient, "post", unexpected)
+    with pytest.raises(RuntimeError, match="durable research call usage"):
+        worker.run_worker("http://127.0.0.1:8080", WORKER_ID)
+    assert requests == ["/v1/capabilities"]
+
+
+def test_builtin_worker_waits_for_capability_response_before_claim(monkeypatch):
+    stop = Event()
+    endpoints = []
+
+    def get(self, path):
+        endpoints.append(path)
+        if len(endpoints) == 1:
+            raise worker.ControlError(status=503, retryable=True)
+        return {"research_call_usage": True}
+
+    def post(self, endpoint, *args):
+        endpoints.append(endpoint)
+        stop.set()
+        return None
+
+    monkeypatch.setattr(worker.ControlClient, "get", get)
+    monkeypatch.setattr(worker.ControlClient, "post", post)
+    worker.run_worker("http://127.0.0.1:8080", WORKER_ID, stop=stop, poll_interval=0.001)
+    assert endpoints == ["/v1/capabilities", "/v1/capabilities", "claim"]
 
 
 def test_replays_identical_claim_and_completion_after_uncertain_responses(monkeypatch):

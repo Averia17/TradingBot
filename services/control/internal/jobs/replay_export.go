@@ -26,29 +26,9 @@ func ReadCompletedResearch(ctx context.Context, dsn string, ids []string) ([]Com
 	if len(ids) == 0 || len(ids) > MaxResearchReplayJobs {
 		return nil, errors.New("invalid research replay selection size")
 	}
-	if strings.TrimSpace(dsn) == "" {
-		return nil, errors.New("missing research PostgreSQL configuration")
-	}
-	config, err := pgx.ParseConfig(dsn)
-	if err != nil {
-		return nil, errors.New("invalid research PostgreSQL configuration")
-	}
-	if config.ConnectTimeout <= 0 || config.ConnectTimeout > 5*time.Second {
-		config.ConnectTimeout = 5 * time.Second
-	}
-	conn, err := pgx.ConnectConfig(ctx, config)
-	if err != nil {
-		return nil, errors.New("connect to research PostgreSQL for reporting failed")
-	}
-	defer func() {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-		_ = conn.Close(ctx)
-	}()
-
 	items := make([]CompletedResearch, 0, len(ids))
 	remaining := maxResearchReplayBytes
-	err = pgx.BeginTxFunc(ctx, conn, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly}, func(tx pgx.Tx) error {
+	err := withResearchReadSnapshot(ctx, dsn, func(tx pgx.Tx) error {
 		for _, id := range ids {
 			result, err := readResult(tx.QueryRow(ctx, selectResult, id))
 			if err != nil {
@@ -73,4 +53,28 @@ func ReadCompletedResearch(ctx context.Context, dsn string, ids []string) ([]Com
 		return nil, err
 	}
 	return items, nil
+}
+
+func withResearchReadSnapshot(ctx context.Context, dsn string, read func(pgx.Tx) error) error {
+	if strings.TrimSpace(dsn) == "" {
+		return errors.New("missing research PostgreSQL configuration")
+	}
+	config, err := pgx.ParseConfig(dsn)
+	if err != nil {
+		return errors.New("invalid research PostgreSQL configuration")
+	}
+	if config.ConnectTimeout <= 0 || config.ConnectTimeout > 5*time.Second {
+		config.ConnectTimeout = 5 * time.Second
+	}
+	conn, err := pgx.ConnectConfig(ctx, config)
+	if err != nil {
+		return errors.New("connect to research PostgreSQL for reporting failed")
+	}
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = conn.Close(ctx)
+	}()
+
+	return pgx.BeginTxFunc(ctx, conn, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly}, read)
 }

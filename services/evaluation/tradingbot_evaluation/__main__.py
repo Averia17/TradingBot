@@ -3,7 +3,7 @@
 import argparse
 import json
 import sys
-from datetime import datetime
+from datetime import date, datetime
 from hashlib import sha256
 from importlib.metadata import version
 from pathlib import Path
@@ -12,6 +12,7 @@ import msgspec
 
 from tradingbot_evaluation.ablation_evidence import derive_ablation_evidence
 from tradingbot_evaluation.benchmarks import run_benchmarks
+from tradingbot_evaluation.checkpoint_history import CheckpointReceipt
 from tradingbot_evaluation.forward_freeze import (
     forward_configuration_sha256,
     forward_freeze_sha256,
@@ -20,12 +21,14 @@ from tradingbot_evaluation.forward_freeze import (
     load_forward_plan,
     verify_forward,
 )
+from tradingbot_evaluation.forward_paper import PinnedArtifact, evaluate_forward_paper
 from tradingbot_evaluation.operating_costs import (
     OperatingCosts,
     load_operating_costs,
     operating_costs_sha256,
 )
 from tradingbot_evaluation.paper_evidence import build_paper_evidence
+from tradingbot_evaluation.power_review import review_forward_power
 from tradingbot_evaluation.replay import (
     MAX_INPUT_BYTES,
     REPLAY_VERSION,
@@ -35,6 +38,12 @@ from tradingbot_evaluation.replay import (
     synthetic_probe,
 )
 from tradingbot_evaluation.replay_evidence import derive_replay_evidence
+from tradingbot_evaluation.research_costs import (
+    ResearchPermitArchive,
+    ResearchRates,
+    synthetic_operating_costs,
+    value_research_costs,
+)
 from tradingbot_evaluation.statistics import (
     EvaluationEvidence,
     EvaluationProtocol,
@@ -131,10 +140,49 @@ def main(argv: list[str] | None = None) -> int:
     forward_verify.add_argument("protocol", type=Path)
     forward_verify.add_argument("--root", type=Path, required=True)
     forward_verify.add_argument("--freeze-sha256", required=True)
+    forward_paper = commands.add_parser(
+        "forward-paper-report", help="Evaluate a registered paper checkpoint from pinned exports"
+    )
+    forward_paper.add_argument("freeze", type=Path)
+    forward_paper.add_argument("protocol", type=Path)
+    forward_paper.add_argument("--root", type=Path, required=True)
+    forward_paper.add_argument("--freeze-sha256", required=True)
+    forward_paper.add_argument("--through", type=date.fromisoformat, required=True)
+    forward_paper.add_argument("--nav", type=Path, required=True)
+    forward_paper.add_argument("--nav-sha256", required=True)
+    forward_paper.add_argument("--benchmark", type=Path)
+    forward_paper.add_argument("--benchmark-sha256")
+    forward_paper.add_argument("--operating-costs", type=Path)
+    forward_paper.add_argument("--operating-costs-sha256")
+    forward_paper.add_argument("--previous-receipt", type=Path)
+    forward_paper.add_argument("--previous-receipt-sha256")
+    commands.add_parser(
+        "forward-checkpoint-schema", help="Write the forward checkpoint receipt schema"
+    )
+    forward_power = commands.add_parser(
+        "forward-paper-power", help="Review the forward paper statistical design without NAV"
+    )
+    forward_power.add_argument("protocol", type=Path)
     freeze_costs = commands.add_parser(
         "freeze-operating-costs", help="Print the digest of a local USD operating cost ledger"
     )
     freeze_costs.add_argument("ledger", type=Path)
+    commands.add_parser("research-rates-schema", help="Write the local model rate schedule schema")
+    commands.add_parser(
+        "research-permit-schema", help="Write the durable call permit archive schema"
+    )
+    research_costs = commands.add_parser(
+        "research-costs", help="Value archived research calls under a pinned rate schedule"
+    )
+    research_costs.add_argument("--rates", nargs=2, metavar=("FILE", "SHA256"), required=True)
+    research_costs.add_argument(
+        "--usage", nargs=2, metavar=("FILE", "SHA256"), action="append", default=[]
+    )
+    research_costs.add_argument(
+        "--permit-archive", nargs=2, metavar=("FILE", "SHA256"), action="append", default=[]
+    )
+    research_costs.add_argument("--synthetic-opex-template", nargs=2, metavar=("FILE", "SHA256"))
+    research_costs.add_argument("--series", help="NAV series charged the synthetic LLM estimates")
     statistics = commands.add_parser(
         "statistics", help="Audit and evaluate a frozen local NAV study"
     )
@@ -197,6 +245,27 @@ def main(argv: list[str] | None = None) -> int:
                     "forward_freeze_sha256": forward_freeze_sha256(verified),
                     "protocol_sha256": verified.protocol_sha256,
                 }
+        elif args.command == "forward-paper-report":
+            freeze = PinnedArtifact(args.freeze, args.freeze_sha256)
+            with args.protocol.open("rb") as source:
+                protocol = load_protocol(source.read(MAX_INPUT_BYTES + 1))
+            result = evaluate_forward_paper(
+                args.root,
+                load_forward_freeze(freeze.read("Forward freeze")),
+                protocol,
+                expected_freeze_sha256=freeze.sha256,
+                through=args.through,
+                nav=PinnedArtifact(args.nav, args.nav_sha256),
+                benchmark=_optional_pin(args.benchmark, args.benchmark_sha256, "Paper benchmark"),
+                expenses=_optional_pin(
+                    args.operating_costs, args.operating_costs_sha256, "Operating cost ledger"
+                ),
+                previous_receipt=_optional_pin(
+                    args.previous_receipt,
+                    args.previous_receipt_sha256,
+                    "Previous checkpoint receipt",
+                ),
+            )
         elif args.command == "research-replay":
             from tradingbot_evaluation.research_replay import (
                 MAX_RESEARCH_EXPORT_BYTES,
@@ -258,10 +327,21 @@ def main(argv: list[str] | None = None) -> int:
             result = {"$schema": "https://json-schema.org/draft/2020-12/schema"} | (
                 msgspec.json.schema(WalkForwardPlan)
             )
-        elif args.command in {"schema", "statistics-schema"}:
+        elif args.command in {
+            "schema",
+            "statistics-schema",
+            "research-rates-schema",
+            "research-permit-schema",
+            "forward-checkpoint-schema",
+        }:
             contract = (
-                Replay
-                if args.command == "schema"
+                {
+                    "schema": Replay,
+                    "research-rates-schema": ResearchRates,
+                    "research-permit-schema": ResearchPermitArchive,
+                    "forward-checkpoint-schema": CheckpointReceipt,
+                }[args.command]
+                if args.command != "statistics-schema"
                 else {
                     "protocol": EvaluationProtocol,
                     "evidence": EvaluationEvidence,
@@ -275,8 +355,30 @@ def main(argv: list[str] | None = None) -> int:
             with args.ledger.open("rb") as source:
                 costs = load_operating_costs(source.read(MAX_INPUT_BYTES + 1))
             result = {"operating_costs_sha256": operating_costs_sha256(costs)}
+        elif args.command == "research-costs":
+            rate_path, rate_digest = args.rates
+            result = value_research_costs(
+                PinnedArtifact(Path(rate_path), rate_digest),
+                tuple(PinnedArtifact(Path(path), digest) for path, digest in args.usage),
+                permit_archives=tuple(
+                    PinnedArtifact(Path(path), digest) for path, digest in args.permit_archive
+                ),
+            )
+            if (args.synthetic_opex_template is None) != (args.series is None):
+                raise ValueError(
+                    "A synthetic cost template and its NAV series are required together"
+                )
+            if args.synthetic_opex_template is not None:
+                path, digest = args.synthetic_opex_template
+                ledger = synthetic_operating_costs(
+                    PinnedArtifact(Path(path), digest), args.series, result
+                )
+                result["synthetic_operating_costs"] = json.loads(msgspec.json.encode(ledger))
+                result["synthetic_opex_template_sha256"] = digest
+                result["synthetic_expense_rounding"] = "ceil_to_usd_8_decimals_per_utc_day"
         elif args.command in {
             "freeze-statistics",
+            "forward-paper-power",
             "statistics",
             "replay-evidence",
             "paper-evidence",
@@ -285,6 +387,11 @@ def main(argv: list[str] | None = None) -> int:
                 protocol = load_protocol(source.read(MAX_INPUT_BYTES + 1))
             if args.command == "freeze-statistics":
                 result = {"protocol_sha256": protocol_sha256(protocol)}
+            elif args.command == "forward-paper-power":
+                power = review_forward_power(protocol)
+                if power is None:
+                    raise ValueError("Forward paper power review is not registered in the protocol")
+                result = {"protocol_sha256": protocol_sha256(protocol), "power_review": power}
             elif args.command in {"replay-evidence", "paper-evidence"}:
                 with args.input.open("rb") as source:
                     raw = source.read(MAX_INPUT_BYTES + 1)
@@ -354,6 +461,14 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0
+
+
+def _optional_pin(path: Path | None, digest: str | None, description: str) -> PinnedArtifact | None:
+    if path is None and digest is None:
+        return None
+    if path is None or digest is None:
+        raise ValueError(f"{description} file and SHA-256 must be supplied together")
+    return PinnedArtifact(path, digest)
 
 
 if __name__ == "__main__":

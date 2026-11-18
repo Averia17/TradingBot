@@ -1,0 +1,79 @@
+{
+  "schema_version": "0.1",
+  "source_mode": "synthetic_fixture",
+  "study_id": "fixture-two-days",
+  "min_priced_samples": 2,
+  "min_priced_trading_days": 2,
+  "request_window_ms": 1000,
+  "max_age_seconds": 30,
+  "cells": [
+    {
+      "cell_id": "main-session",
+      "route_id": "fixture:venue-a",
+      "underlying_id": "fixture:TSLA",
+      "issuer_id": "fixture:issuer-a",
+      "side": "BUY",
+      "session": "regular",
+      "reference_usd": "100",
+      "wrapper": {
+        "chain": "fixture:chain-a",
+        "mint": "fixture:TSLAx",
+        "program": "fixture:token-program-a",
+        "decimals": 6
+      },
+      "settlement": {
+        "chain": "fixture:chain-a",
+        "mint": "fixture:USDC",
+        "program": "fixture:token-program-a",
+        "decimals": 6
+      }
+    },
+    {
+      "cell_id": "extended-session",
+      "route_id": "fixture:venue-a",
+      "underlying_id": "fixture:TSLA",
+      "issuer_id": "fixture:issuer-a",
+      "side": "BUY",
+      "session": "extended",
+      "reference_usd": "100",
+      "wrapper": {
+        "chain": "fixture:chain-a",
+        "mint": "fixture:TSLAx",
+        "program": "fixture:token-program-a",
+        "decimals": 6
+      },
+      "settlement": {
+        "chain": "fixture:chain-a",
+        "mint": "fixture:USDC",
+        "program": "fixture:token-program-a",
+        "decimals": 6
+      }
+    }
+  ],
+  "slots": [
+    {
+      "slot_id": "sample-1",
+      "cell_id": "main-session",
+      "trading_day": "2026-10-02",
+      "scheduled_at": "2026-10-02T13:30:00Z"
+    },
+    {
+      "slot_id": "sample-2",
+      "cell_id": "main-session",
+      "trading_day": "2026-10-05",
+      "scheduled_at": "2026-10-05T13:30:00Z"
+    },
+    {
+      "slot_id": "sample-3",
+      "cell_id": "main-session",
+      "trading_day": "2026-10-05",
+      "scheduled_at": "2026-10-05T14:00:00Z"
+    },
+    {
+      "slot_id": "sample-4",
+      "cell_id": "extended-session",
+      "trading_day": "2026-10-05",
+      "scheduled_at": "2026-10-05T21:30:00Z"
+    }
+  ]
+}

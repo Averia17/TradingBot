@@ -1,0 +1,127 @@
+{
+  "$defs": {
+    "ResearchPermit": {
+      "additionalProperties": false,
+      "properties": {
+        "attempt": {
+          "maximum": 2147483647,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "call_id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "callback_payload": {
+          "anyOf": [
+            {
+              "contentEncoding": "base64",
+              "maxLength": 5464,
+              "minLength": 4,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "callback_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "granted_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "recorded_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "call_id",
+        "attempt",
+        "granted_at",
+        "callback_payload",
+        "callback_sha256",
+        "recorded_at"
+      ],
+      "title": "ResearchPermit",
+      "type": "object"
+    },
+    "ResearchPermitArchive": {
+      "additionalProperties": false,
+      "properties": {
+        "attempts": {
+          "maximum": 2147483647,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "job_id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "job_status": {
+          "enum": [
+            "completed",
+            "expired",
+            "failed",
+            "leased",
+            "queued"
+          ]
+        },
+        "legacy_budget_unknown": {
+          "type": "boolean"
+        },
+        "permit_history_known": {
+          "type": "boolean"
+        },
+        "permits": {
+          "items": {
+            "$ref": "#/$defs/ResearchPermit"
+          },
+          "maxItems": 64,
+          "type": "array"
+        },
+        "schema_version": {
+          "enum": [
+            "0.1"
+          ]
+        },
+        "source_mode": {
+          "enum": [
+            "synthetic_fixture"
+          ]
+        }
+      },
+      "required": [
+        "schema_version",
+        "source_mode",
+        "job_id",
+        "job_status",
+        "attempts",
+        "legacy_budget_unknown",
+        "permit_history_known",
+        "permits"
+      ],
+      "title": "ResearchPermitArchive",
+      "type": "object"
+    }
+  },
+  "$ref": "#/$defs/ResearchPermitArchive",
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
+}

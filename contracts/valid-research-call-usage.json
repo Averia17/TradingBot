@@ -1,0 +1,19 @@
+{
+  "call_usage_schema_version": "0.1",
+  "worker_id": "research-worker",
+  "lease_token": "cadc0a32-6c82-4dec-b742-13d47c05b34a",
+  "call": {
+    "run_id": "00000000-0000-4000-8000-abcdef000013",
+    "provider": "offline",
+    "model": "scripted-offline-v1",
+    "role": "research",
+    "status": "failed",
+    "started_at": "2026-10-04T12:01:05Z",
+    "input_tokens": 800,
+    "output_tokens": 200,
+    "cache_read_tokens": 300,
+    "cache_write_tokens": 200,
+    "reasoning_tokens": 30,
+    "usage_source": "langchain_usage_metadata"
+  }
+}

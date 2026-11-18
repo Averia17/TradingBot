@@ -24,6 +24,23 @@ var (
 	quantityPattern = regexp.MustCompile(`^(?:0|[1-9][0-9]{0,37})$`)
 )
 
+type limitError struct {
+	reason ledger.RiskRefusalReason
+	label  string
+}
+
+func (e limitError) Error() string { return fmt.Sprintf("%s: %s", ErrLimit, e.label) }
+func (e limitError) Unwrap() error { return ErrLimit }
+
+// RefusalReason returns the stable code for an evaluated risk limit violation.
+func RefusalReason(err error) (ledger.RiskRefusalReason, bool) {
+	var limit limitError
+	if !errors.As(err, &limit) {
+		return "", false
+	}
+	return limit.reason, true
+}
+
 type Policy struct {
 	Version               string           `json:"policy_version"`
 	MaxOrderUSD           string           `json:"max_order_usd"`
@@ -36,6 +53,7 @@ type Policy struct {
 	Instruments           []InstrumentRule `json:"instruments"`
 	MaxDailyTurnoverUSD   string           `json:"max_daily_turnover_usd,omitempty"`
 	BlockNewBuysOnUnknown bool             `json:"block_new_buys_on_unknown,omitempty"`
+	MaxExecutionCostBPS   *int             `json:"max_execution_cost_bps,omitempty"`
 }
 
 type InstrumentRule struct {
@@ -54,7 +72,8 @@ type Mark struct {
 func (p Policy) rules() (map[ledger.Instrument]string, error) {
 	if !idPattern.MatchString(p.Version) || amount(p.MaxOrderUSD) == nil || amount(p.MaxOrderUSD).Sign() <= 0 ||
 		amount(p.MinFreeCashUSD) == nil || !validLimit(p.MaxPositionBPS) || !validLimit(p.MaxGroupBPS) ||
-		!validLimit(p.MaxGrossBPS) || p.MaxFeeBPS < 0 || p.MaxFeeBPS > 10000 ||
+		!validLimit(p.MaxGrossBPS) || !validCostBPS(p.MaxFeeBPS) ||
+		(p.MaxExecutionCostBPS != nil && !validCostBPS(*p.MaxExecutionCostBPS)) ||
 		p.MaxMarkAgeSeconds < 1 || p.MaxMarkAgeSeconds > 3600 || len(p.Instruments) == 0 || len(p.Instruments) > 100 ||
 		(p.MaxDailyTurnoverUSD != "" && amount(p.MaxDailyTurnoverUSD) == nil) {
 		return nil, ErrPolicy
@@ -84,7 +103,8 @@ func (p Policy) Validate() error {
 	return err
 }
 
-func validLimit(bps int) bool { return bps > 0 && bps <= 10000 }
+func validLimit(bps int) bool   { return bps > 0 && bps <= 10000 }
+func validCostBPS(bps int) bool { return bps >= 0 && bps <= 10000 }
 
 // ActivityReader supplies the current ledger activity required by an opted-in policy.
 type ActivityReader interface {
@@ -106,6 +126,11 @@ func Check(account ledger.Account, intent papersim.Intent, policy Policy, marks 
 // and reservations. An unclassified cash reserve counts toward every affected
 // BUY cap so missing pending-order details cannot amplify exposure.
 func CheckWithActivity(account ledger.Account, intent papersim.Intent, policy Policy, marks []Mark, now time.Time, activity *ledger.RiskActivity) error {
+	return CheckOrder(account, intent, policy, marks, now, activity, nil)
+}
+
+// CheckOrder also checks the deterministic fill preview at its actual size.
+func CheckOrder(account ledger.Account, intent papersim.Intent, policy Policy, marks []Mark, now time.Time, activity *ledger.RiskActivity, fill *papersim.FixtureFill) error {
 	groups, err := policy.rules()
 	if err != nil {
 		return err
@@ -117,7 +142,7 @@ func CheckWithActivity(account ledger.Account, intent papersim.Intent, policy Po
 	}
 	group, enabled := groups[intent.Instrument]
 	if !enabled {
-		return fmt.Errorf("%w: instrument is outside the policy", ErrLimit)
+		return limitError{ledger.RiskInstrumentNotAllowed, "instrument is outside the policy"}
 	}
 	prices, err := validatedMarks(marks, groups, now, time.Duration(policy.MaxMarkAgeSeconds)*time.Second)
 	if err != nil {
@@ -134,10 +159,15 @@ func CheckWithActivity(account ledger.Account, intent papersim.Intent, policy Po
 	notional := markedValue(units, price, intent.Instrument.Decimals)
 	maxNotional := maxAmount(notional, grossLimit)
 	if maxNotional.Cmp(amount(policy.MaxOrderUSD)) > 0 {
-		return fmt.Errorf("%w: order notional", ErrLimit)
+		return limitError{ledger.RiskOrderNotional, "order notional"}
 	}
 	if exceeds(fee, minAmount(notional, grossLimit), policy.MaxFeeBPS) {
-		return fmt.Errorf("%w: maximum fee", ErrLimit)
+		return limitError{ledger.RiskMaximumFee, "maximum fee"}
+	}
+	if policy.MaxExecutionCostBPS != nil {
+		if err := checkExecutionCost(intent, *policy.MaxExecutionCostBPS, units, price, notional, grossLimit, fee, fill); err != nil {
+			return err
+		}
 	}
 	book, err := valueBook(account.Positions, groups, prices, intent.Instrument, group)
 	if err != nil {
@@ -145,7 +175,7 @@ func CheckWithActivity(account ledger.Account, intent papersim.Intent, policy Po
 	}
 	if intent.Side == "SELL" {
 		if units.Cmp(book.freeTarget) > 0 {
-			return fmt.Errorf("%w: available held quantity", ErrLimit)
+			return limitError{ledger.RiskHeldQuantity, "available held quantity"}
 		}
 		return nil
 	}
@@ -157,7 +187,7 @@ func CheckWithActivity(account ledger.Account, intent papersim.Intent, policy Po
 	freeAfterBuy := new(big.Rat).Sub(cash, reserved)
 	freeAfterBuy.Sub(freeAfterBuy, grossLimit).Sub(freeAfterBuy, fee)
 	if freeAfterBuy.Cmp(amount(policy.MinFreeCashUSD)) < 0 {
-		return fmt.Errorf("%w: minimum free cash", ErrLimit)
+		return limitError{ledger.RiskMinimumFreeCash, "minimum free cash"}
 	}
 	nav := new(big.Rat).Add(cash, book.gross)
 	nav.Sub(nav, fee)
@@ -165,17 +195,53 @@ func CheckWithActivity(account ledger.Account, intent papersim.Intent, policy Po
 	for _, limit := range []struct {
 		exposure *big.Rat
 		bps      int
+		reason   ledger.RiskRefusalReason
 		label    string
 	}{
-		{book.target, policy.MaxPositionBPS, "instrument concentration"},
-		{book.group, policy.MaxGroupBPS, "correlated group concentration"},
-		{book.gross, policy.MaxGrossBPS, "portfolio gross exposure"},
+		{book.target, policy.MaxPositionBPS, ledger.RiskInstrumentConcentration, "instrument concentration"},
+		{book.group, policy.MaxGroupBPS, ledger.RiskGroupConcentration, "correlated group concentration"},
+		{book.gross, policy.MaxGrossBPS, ledger.RiskGrossExposure, "portfolio gross exposure"},
 	} {
 		if nav.Sign() <= 0 || exceeds(new(big.Rat).Add(limit.exposure, additional), nav, limit.bps) {
-			return fmt.Errorf("%w: %s", ErrLimit, limit.label)
+			return limitError{limit.reason, limit.label}
 		}
 	}
 	return nil
+}
+
+func checkExecutionCost(intent papersim.Intent, bps int, units *big.Int, price, notional, grossLimit, fee *big.Rat, fill *papersim.FixtureFill) error {
+	// The reservation's directional limit and fee cap bound the total cost
+	// authorized at the requested quantity, including later reconciliation.
+	refused := limitError{ledger.RiskMaximumExecutionCost, "maximum execution cost"}
+	if exceeds(AdverseExecutionCost(intent.Side, grossLimit, notional, fee), notional, bps) {
+		return refused
+	}
+	if fill == nil {
+		return nil
+	}
+	executed := rawUnits(fill.QuantityRaw)
+	gross, actualFee := amount(fill.GrossUSD), amount(fill.FeeUSD)
+	if executed == nil || executed.Sign() <= 0 || executed.Cmp(units) > 0 || gross == nil || gross.Sign() <= 0 || actualFee == nil {
+		return ErrSnapshot
+	}
+	reference := markedValue(executed, price, intent.Instrument.Decimals)
+	if exceeds(AdverseExecutionCost(intent.Side, gross, reference, actualFee), reference, bps) {
+		return refused
+	}
+	return nil
+}
+
+// AdverseExecutionCost counts adverse movement from a prevalidated mark plus
+// explicit fees. An improved execution price does not offset the fees.
+func AdverseExecutionCost(side string, gross, reference, fee *big.Rat) *big.Rat {
+	adverse := new(big.Rat).Sub(gross, reference)
+	if side == "SELL" {
+		adverse.Neg(adverse)
+	}
+	if adverse.Sign() > 0 {
+		return adverse.Add(adverse, fee)
+	}
+	return fee
 }
 
 func checkActivity(account ledger.Account, policy Policy, prices map[ledger.Instrument]*big.Rat, now time.Time, candidate *big.Rat, activity *ledger.RiskActivity) error {
@@ -184,7 +250,7 @@ func checkActivity(account ledger.Account, policy Policy, prices map[ledger.Inst
 		return ErrSnapshot
 	}
 	if policy.BlockNewBuysOnUnknown && activity.HasUnknown {
-		return fmt.Errorf("%w: unresolved paper order", ErrLimit)
+		return limitError{ledger.RiskUnresolvedOrder, "unresolved paper order"}
 	}
 	if policy.MaxDailyTurnoverUSD == "" {
 		return nil
@@ -205,7 +271,7 @@ func checkActivity(account ledger.Account, policy Policy, prices map[ledger.Inst
 		turnover.Add(turnover, maxAmount(limit, marked))
 	}
 	if turnover.Cmp(amount(policy.MaxDailyTurnoverUSD)) > 0 {
-		return fmt.Errorf("%w: daily gross turnover", ErrLimit)
+		return limitError{ledger.RiskDailyTurnover, "daily gross turnover"}
 	}
 	return nil
 }

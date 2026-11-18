@@ -31,7 +31,7 @@ func TestCompletionMigratesExistingLeaseAndSurvivesReopenAfterExpiry(t *testing.
 		INSERT INTO research_schema_migrations (version) VALUES (1),(2)`); err != nil {
 		t.Fatal(err)
 	}
-	input := queueInput(t, 1, time.Now())
+	input := queueInput(t, 1, databaseNow(t, ctx, db))
 	claimID, token := testIdentity(600), testIdentity(601)
 	if _, err := db.Exec(ctx, `INSERT INTO research_snapshots (id, payload, payload_sha256) VALUES ($1, $2, sha256($2));
 		INSERT INTO research_jobs (id, snapshot_id, request, request_sha256, status, attempt_count)
@@ -93,7 +93,7 @@ func TestCompletionMigratesExistingLeaseAndSurvivesReopenAfterExpiry(t *testing.
 func TestCompletionRejectsAuthorityAndRechecksDatabaseExpiry(t *testing.T) {
 	ctx, dsn, db := testDatabase(t)
 	store := openTestStore(t, ctx, dsn)
-	input := queueJob(t, ctx, store, 1, time.Now())
+	input := queueJob(t, ctx, store, 1, 0)
 	first, err := store.Claim(ctx, "worker", testIdentity(610), testSnapshotWindow)
 	if err != nil {
 		t.Fatal(err)
@@ -140,7 +140,7 @@ func TestCompletionRejectsAuthorityAndRechecksDatabaseExpiry(t *testing.T) {
 func TestCompletionRechecksBatchExpiryAfterVerification(t *testing.T) {
 	ctx, dsn, db := testDatabase(t)
 	store := openTestStore(t, ctx, dsn)
-	input := queueJob(t, ctx, store, 1, time.Now())
+	input := queueJob(t, ctx, store, 1, 0)
 	lease, err := store.Claim(ctx, "worker", testIdentity(615), testSnapshotWindow)
 	if err != nil {
 		t.Fatal(err)
@@ -167,7 +167,7 @@ func TestCompletionRechecksBatchExpiryAfterVerification(t *testing.T) {
 func TestCompletionBindsExpectedAttemptAcrossReplay(t *testing.T) {
 	ctx, dsn, db := testDatabase(t)
 	store := openTestStore(t, ctx, dsn)
-	input := queueJob(t, ctx, store, 1, time.Now())
+	input := queueJob(t, ctx, store, 1, 0)
 	lease, err := store.Claim(ctx, "worker", testIdentity(616), testSnapshotWindow)
 	if err != nil {
 		t.Fatal(err)
@@ -200,7 +200,7 @@ func TestCompletionBindsExpectedAttemptAcrossReplay(t *testing.T) {
 func TestConcurrentCompletionsCommitOneReceiptAndPreserveAuthority(t *testing.T) {
 	ctx, dsn, db := testDatabase(t)
 	store := openTestStore(t, ctx, dsn)
-	input := queueJob(t, ctx, store, 1, time.Now())
+	input := queueJob(t, ctx, store, 1, 0)
 	lease, err := store.Claim(ctx, "worker", testIdentity(620), testSnapshotWindow)
 	if err != nil {
 		t.Fatal(err)
@@ -253,7 +253,7 @@ func TestConcurrentCompletionsCommitOneReceiptAndPreserveAuthority(t *testing.T)
 func TestCompletionVerificationAndOutboxRollbackAndCorruptReads(t *testing.T) {
 	ctx, dsn, db := testDatabase(t)
 	store := openTestStore(t, ctx, dsn)
-	input := queueJob(t, ctx, store, 1, time.Now())
+	input := queueJob(t, ctx, store, 1, 0)
 	lease, err := store.Claim(ctx, "worker", testIdentity(630), testSnapshotWindow)
 	if err != nil {
 		t.Fatal(err)

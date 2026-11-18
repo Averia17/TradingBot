@@ -28,17 +28,20 @@ import (
 
 func TestFollowPinsQuoteAndRecoversCommittedReservationFromPostgres(t *testing.T) {
 	t.Run("fill", func(t *testing.T) {
-		testFollowRecovery(t, "fill", "filled")
+		testFollowRecovery(t, "fill", "filled", ledger.RiskMaximumFee)
+	})
+	t.Run("execution-cost", func(t *testing.T) {
+		testFollowRecovery(t, "fill", "filled", ledger.RiskMaximumExecutionCost)
 	})
 	t.Run("timeout", func(t *testing.T) {
-		testFollowRecovery(t, "timeout", "unknown")
+		testFollowRecovery(t, "timeout", "unknown", "")
 	})
 	t.Run("reject", func(t *testing.T) {
-		testFollowRecovery(t, "reject", "cancelled")
+		testFollowRecovery(t, "reject", "cancelled", "")
 	})
 }
 
-func testFollowRecovery(t *testing.T, quoteOutcome, orderStatus string) {
+func testFollowRecovery(t *testing.T, quoteOutcome, orderStatus string, refusal ledger.RiskRefusalReason) {
 	t.Helper()
 	const (
 		accountID  = "11111111-1111-4111-8111-111111111111"
@@ -67,8 +70,11 @@ func testFollowRecovery(t *testing.T, quoteOutcome, orderStatus string) {
 	instrument := ledger.Instrument{ID: "fixture:TSLA", RegistryVersion: "fixture-v1", Decimals: 2}
 	policy := paperrisk.Policy{
 		Version: "follow-fixture", MaxOrderUSD: "120", MinFreeCashUSD: "100", MaxPositionBPS: 2500, MaxGroupBPS: 5000,
-		MaxGrossBPS: 9000, MaxFeeBPS: 30, MaxMarkAgeSeconds: 60, MaxDailyTurnoverUSD: "200", BlockNewBuysOnUnknown: true,
+		MaxGrossBPS: 9000, MaxFeeBPS: 25, MaxMarkAgeSeconds: 60, MaxDailyTurnoverUSD: "200", BlockNewBuysOnUnknown: true,
 		Instruments: []paperrisk.InstrumentRule{{Instrument: instrument, Symbol: "TSLA", Group: "tech"}},
+	}
+	if refusal == ledger.RiskMaximumExecutionCost {
+		policy.MaxExecutionCostBPS = new(20)
 	}
 	at := clock()
 	snapshot := paperapply.SnapshotContext{AccountID: accountID, SnapshotVersion: account.Version, Policy: policy,
@@ -155,6 +161,17 @@ func testFollowRecovery(t *testing.T, quoteOutcome, orderStatus string) {
 	if _, err := paper.GetApplication(ctx, jobID); !errors.Is(err, ledger.ErrNotFound) {
 		t.Fatalf("untrusted quote was persisted: %v", err)
 	}
+	if refusal != "" {
+		tooExpensive := quote
+		if refusal == ledger.RiskMaximumFee {
+			tooExpensive.FeeBPS = new(28)
+		} else {
+			// The mark is $99.80 for 4.99 shares. The offer adverse movement
+			// and $0.03 fee pass the model's 30 bps cap and fail the owner's 20.
+			tooExpensive.QuantityRaw, tooExpensive.FeeBPS = "499", new(3)
+		}
+		verifyPreReservationRefusal(t, ctx, dsn, clock, paper, account, input, args, publish(tooExpensive), encode(t, tooExpensive), refusal)
+	}
 	publish(quote)
 	disrupted := errors.New("simulated interruption after reservation")
 	_, err = paperapply.Follow(ctx, research, interruptedFollowStore{Store: paper, err: disrupted}, input, localQuoteSource(dir), clock())
@@ -190,6 +207,13 @@ func testFollowRecovery(t *testing.T, quoteOutcome, orderStatus string) {
 	if replayed := pass("applied"); !bytes.Equal(encode(t, recovered), encode(t, replayed)) {
 		t.Fatal("recorded application did not replay exactly")
 	}
+	if refusal != "" {
+		var report bytes.Buffer
+		if err := run(ctx, dsn, []string{"refusals", "--account", accountID, "--job", jobID}, &report, clock); err != nil ||
+			!bytes.Contains(report.Bytes(), fmt.Appendf(nil, `"reason":%q`, refusal)) {
+			t.Fatalf("corrected fill hid the earlier refusal: %s, %v", report.Bytes(), err)
+		}
+	}
 	settled, err := paper.GetAccount(ctx, accountID)
 	if err != nil || settled.Version != 3 {
 		t.Fatalf("recovered ledger: %+v, %v", settled, err)
@@ -218,6 +242,72 @@ func testFollowRecovery(t *testing.T, quoteOutcome, orderStatus string) {
 	saveDocument(t, dir, "request", encode(t, input))
 	if err := run(ctx, dsn, args, &bytes.Buffer{}, clock); !errors.Is(err, ledger.ErrConflict) {
 		t.Fatalf("changed application request: %v", err)
+	}
+}
+
+func verifyPreReservationRefusal(t *testing.T, ctx context.Context, dsn string, clock func() time.Time, paper *ledger.Store,
+	account ledger.Account, input paperapply.Request, followArgs []string, quotePath string, quote []byte, refusal ledger.RiskRefusalReason,
+) {
+	t.Helper()
+	before := clock()
+	manualArgs := []string{"apply", "--policy", followArgs[2], "--request", followArgs[4], "--quote", quotePath}
+	for _, args := range [][]string{followArgs, manualArgs, followArgs} {
+		if err := run(ctx, dsn, args, &bytes.Buffer{}, clock); !errors.Is(err, paperrisk.ErrLimit) {
+			t.Fatalf("expected the risk limit error after the refusal was recorded: %v", err)
+		}
+	}
+	if record, err := paper.GetApplication(ctx, input.JobID); !errors.Is(err, ledger.ErrNotFound) {
+		t.Fatalf("refusal bound the executable application: %+v %v", record, err)
+	}
+	after, err := paper.GetAccount(ctx, account.ID)
+	if err != nil || !bytes.Equal(encode(t, account), encode(t, after)) {
+		t.Fatalf("refusal changed the account: %+v %v", after, err)
+	}
+	events, err := paper.Events(ctx, account.ID, 0, 10)
+	if err != nil || len(events) != 1 {
+		t.Fatalf("refusal changed economic events: %+v %v", events, err)
+	}
+
+	readOnly, err := url.Parse(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	params := readOnly.Query()
+	params.Set("default_transaction_read_only", "on")
+	readOnly.RawQuery = params.Encode()
+	report := func(cutoff time.Time) []byte {
+		t.Helper()
+		var out bytes.Buffer
+		args := []string{"refusals", "--account", account.ID, "--job", input.JobID, "--as-of", cutoff.Format(time.RFC3339Nano)}
+		if err := run(ctx, readOnly.String(), args, &out, clock); err != nil {
+			t.Fatal(err)
+		}
+		return out.Bytes()
+	}
+	cutoff := clock()
+	raw := report(cutoff)
+	validateRiskRefusalReport(t, raw)
+	var decoded struct {
+		Refusals []struct {
+			DecisionID    string    `json:"decision_id"`
+			RequestSHA256 string    `json:"request_sha256"`
+			QuoteSHA256   string    `json:"quote_sha256"`
+			ObservedAt    time.Time `json:"first_observed_at"`
+			Reason        string    `json:"reason"`
+		} `json:"refusals"`
+	}
+	if err := json.Unmarshal(raw, &decoded); err != nil || len(decoded.Refusals) != 1 {
+		t.Fatalf("duplicate attempts did not preserve one observation: %s %v", raw, err)
+	}
+	got := decoded.Refusals[0]
+	if got.DecisionID != "33333333-3333-4333-8333-333333333333" ||
+		got.QuoteSHA256 != fmt.Sprintf("%x", sha256.Sum256(quote)) ||
+		got.RequestSHA256 != fmt.Sprintf("%x", sha256.Sum256(encode(t, input))) ||
+		got.Reason != string(refusal) || !got.ObservedAt.After(before) || got.ObservedAt.After(cutoff) {
+		t.Fatalf("unbound risk observation: %s", raw)
+	}
+	if !bytes.Equal(raw, report(cutoff)) || !bytes.Contains(report(before), []byte(`"refusals":[]`)) {
+		t.Fatal("read-only report changed on retry or exposed a future refusal")
 	}
 }
 

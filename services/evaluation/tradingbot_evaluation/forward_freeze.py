@@ -194,6 +194,8 @@ def forward_freeze_sha256(frozen: ForwardFreeze) -> str:
 
 
 def freeze_forward(root: Path, plan: ForwardPlan, protocol: EvaluationProtocol) -> ForwardFreeze:
+    if protocol.paper_forward_source is not msgspec.UNSET and plan.mode != "paper":
+        raise ValueError("Forward paper registration requires a paper plan")
     configuration = _capture_configuration(root, plan)
     configuration_sha256 = _digest(configuration)
     if protocol.configuration_sha256 != configuration_sha256:

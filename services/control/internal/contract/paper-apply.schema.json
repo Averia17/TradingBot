@@ -17,6 +17,7 @@
         "max_group_bps": {"$ref": "#/$defs/CapBPS"},
         "max_gross_bps": {"$ref": "#/$defs/CapBPS"},
         "max_fee_bps": {"type": "integer", "minimum": 0, "maximum": 10000},
+        "max_execution_cost_bps": {"type": "integer", "minimum": 0, "maximum": 10000},
         "max_mark_age_seconds": {"type": "integer", "minimum": 1, "maximum": 3600},
         "max_daily_turnover_usd": {"$ref": "paper-account.schema.json#/$defs/USD"},
         "block_new_buys_on_unknown": {"type": "boolean"},

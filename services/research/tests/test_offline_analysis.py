@@ -74,7 +74,10 @@ def test_offline_graph_produces_bound_portfolio_result_with_observed_usage(upstr
         return original_call(self, messages, stop=stop, run_manager=run_manager, **kwargs)
 
     monkeypatch.setattr(ScriptedModel, "_call", before_model)
-    result = analyze_offline(request, 2, deadline, Event(), authorize_call=authorized.add)
+    records = []
+    result = analyze_offline(
+        request, 2, deadline, Event(), authorize_call=authorized.add, record_call=records.append
+    )
 
     assert result["result_schema_version"] == "0.2"
     batch = DecisionBatch.model_validate(result["batch"])
@@ -92,6 +95,9 @@ def test_offline_graph_produces_bound_portfolio_result_with_observed_usage(upstr
     assert not metadata["alpha_measured"] and not metadata["intraday_pit_verified"]
     assert 2 < metadata["llm_calls"] <= request["max_llm_calls"]
     assert authorized == invoked and len(authorized) == metadata["llm_calls"]
+    assert len(records) == len(authorized) and {entry.run_id for entry in records} == authorized
+    assert all(entry.status == "completed" and entry.input_tokens is None for entry in records)
+    assert {entry.role for entry in records} == {"research", "portfolio_allocator"}
     assert metadata["missing_usage_calls"] == metadata["llm_calls"]
     assert metadata["input_tokens"] == metadata["output_tokens"] == 0
     assert metadata["usd_cost"] is None
@@ -113,6 +119,35 @@ def test_offline_model_cannot_reuse_a_permit_for_same_run_id():
     budget.on_chat_model_start({}, [], run_id=run_id)
     with pytest.raises(RuntimeError, match="model run ID already authorized"):
         budget.on_chat_model_start({}, [], run_id=run_id)
+    with pytest.raises(OfflineAnalysisCancelled):
+        budget.on_chat_model_start({}, [], run_id=uuid4())
+    assert authorized == [run_id]
+
+
+def test_failed_callback_record_is_terminal_and_cannot_be_replaced_by_completion():
+    run_id = uuid4()
+    recorded = []
+    budget = offline.OfflineBudget(1, lambda: None, lambda _: None, record_call=recorded.append)
+    budget.on_chat_model_start({}, [], run_id=run_id)
+    budget.on_llm_error(RuntimeError("scripted failure"), run_id=run_id)
+    budget.on_llm_end(None, run_id=run_id)
+    (call,) = recorded
+    assert call.run_id == run_id
+    assert call.status == "failed"
+    assert call.usage_source == "unavailable"
+
+
+def test_offline_model_rejects_further_calls_after_unknown_terminal_receipt():
+    run_id = uuid4()
+    authorized = []
+
+    def lost_receipt(_):
+        raise RuntimeError("recording receipt unavailable")
+
+    budget = offline.OfflineBudget(2, lambda: None, authorized.append, record_call=lost_receipt)
+    budget.on_chat_model_start({}, [], run_id=run_id)
+    with pytest.raises(RuntimeError, match="recording receipt unavailable"):
+        budget.on_llm_end(None, run_id=run_id)
     with pytest.raises(OfflineAnalysisCancelled):
         budget.on_chat_model_start({}, [], run_id=uuid4())
     assert authorized == [run_id]

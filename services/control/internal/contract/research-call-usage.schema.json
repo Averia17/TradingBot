@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$ref": "#/$defs/Request",
+  "$defs": {
+    "UUID": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$"
+    },
+    "Request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["call_usage_schema_version", "worker_id", "lease_token", "call"],
+      "properties": {
+        "call_usage_schema_version": {"const": "0.1"},
+        "worker_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"},
+        "lease_token": {"$ref": "#/$defs/UUID"},
+        "call": {
+          "allOf": [
+            {"$ref": "research-llm-usage.schema.json#/$defs/LLMCall"},
+            {
+              "properties": {
+                "run_id": {"$ref": "#/$defs/UUID"},
+                "status": {"enum": ["completed", "failed"]},
+                "provider": {"enum": [null, "offline"]},
+                "model": {"enum": [null, "scripted-offline-v1"]},
+                "started_at": {"pattern": "Z$"}
+              }
+            }
+          ]
+        }
+      }
+    },
+    "Receipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["job_id", "call_id", "attempt", "recorded_at"],
+      "properties": {
+        "job_id": {"$ref": "#/$defs/UUID"},
+        "call_id": {"$ref": "#/$defs/UUID"},
+        "attempt": {"type": "integer", "minimum": 1, "maximum": 3},
+        "recorded_at": {"type": "string", "format": "date-time", "pattern": "Z$"}
+      }
+    }
+  }
+}

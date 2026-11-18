@@ -12,6 +12,8 @@ from tradingbot_evaluation.replay import (
     MAX_PREFIX_SYMBOLS,
     Replay,
     _nanoseconds,
+    executable_quotes,
+    replay_event_count,
     replay_prefix,
     replay_sha256,
     run_replay,
@@ -82,11 +84,7 @@ def native_daily_nav(
     if (
         len(days) > MAX_MARK_DAYS
         or len({quote.symbol for quote in replay.quotes}) > MAX_PREFIX_SYMBOLS
-        or len(replay.quotes)
-        + len(replay.orders)
-        + len(replay.cash_dividends)
-        + len(replay.stock_splits)
-        > MAX_PREFIX_EVENTS
+        or replay_event_count(replay) > MAX_PREFIX_EVENTS
     ):
         raise ValueError(
             f"Replay evidence is bounded to {MAX_MARK_DAYS} marks, "
@@ -120,7 +118,9 @@ def native_daily_nav(
         if not any(quote.symbol == trend.symbol for quote in replay.quotes):
             raise ValueError("Trend replay benchmark symbol must appear in the frozen quotes")
     needs_formation = buy_and_hold is not None or equal_weight
-    if needs_formation and all(quote.available_at > start_at for quote in replay.quotes):
+    if needs_formation and all(
+        quote.available_at > start_at for quote in executable_quotes(replay)
+    ):
         raise ValueError("Replay benchmark requires quotes known at the initial NAV anchor")
 
     # The anchor is initial funding. Orders and benchmark purchases can first

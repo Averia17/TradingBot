@@ -1,15 +1,16 @@
 """Chronological synthetic quote replay through Nautilus' native market simulator."""
 
 import json
+import re
 from bisect import bisect_right
 from collections import defaultdict, deque
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
 from enum import IntEnum
 from fractions import Fraction
 from hashlib import sha256
-from operator import itemgetter
+from operator import attrgetter, itemgetter
 from typing import Annotated, Literal
 
 import msgspec
@@ -35,6 +36,7 @@ Ticker = Annotated[str, msgspec.Meta(pattern=r"^[A-Z][A-Z0-9.]{0,11}$")]
 IntentID = Annotated[str, msgspec.Meta(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")]
 Timestamp = Annotated[datetime, msgspec.Meta(tz=True)]
 Shares = Annotated[int, msgspec.Meta(ge=1, le=1_000_000)]
+_FRACTIONAL_SECONDS = re.compile(r"\.([0-9]+)")
 
 
 class Quote(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
@@ -74,6 +76,20 @@ class StockSplit(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
     old_shares: Shares
 
 
+class ExecutionWindow(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
+    record_id: IntentID
+    symbol: Ticker
+    starts_at: Timestamp
+    ends_before: Timestamp
+    available_at: Timestamp
+    status: Literal["open", "closed", "halted"]
+
+
+class ExecutionCalendar(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
+    calendar_id: IntentID
+    windows: Annotated[tuple[ExecutionWindow, ...], msgspec.Meta(max_length=MAX_PREFIX_EVENTS)]
+
+
 class Replay(msgspec.Struct, frozen=True, forbid_unknown_fields=True, omit_defaults=True):
     schema_version: Literal["0.1"]
     source_mode: Literal["synthetic_fixture"]
@@ -83,11 +99,33 @@ class Replay(msgspec.Struct, frozen=True, forbid_unknown_fields=True, omit_defau
     orders: tuple[Order, ...]
     cash_dividends: tuple[CashDividend, ...] = ()
     stock_splits: tuple[StockSplit, ...] = ()
+    execution_calendar: ExecutionCalendar | msgspec.UnsetType = msgspec.UNSET
+
+
+def replay_event_count(replay: Replay) -> int:
+    calendar = replay.execution_calendar
+    return (
+        len(replay.quotes)
+        + len(replay.orders)
+        + len(replay.cash_dividends)
+        + len(replay.stock_splits)
+        + (len(calendar.windows) if calendar is not msgspec.UNSET else 0)
+    )
 
 
 def replay_prefix(replay: Replay, through: datetime) -> Replay:
     quotes = tuple(quote for quote in replay.quotes if quote.available_at <= through)
     symbols = {quote.symbol for quote in quotes}
+    calendar = replay.execution_calendar
+    if calendar is not msgspec.UNSET:
+        calendar = msgspec.structs.replace(
+            calendar,
+            windows=tuple(
+                row
+                for row in calendar.windows
+                if row.symbol in symbols and row.available_at <= through
+            ),
+        )
     return msgspec.structs.replace(
         replay,
         quotes=quotes,
@@ -102,6 +140,7 @@ def replay_prefix(replay: Replay, through: datetime) -> Replay:
             for action in replay.stock_splits
             if action.symbol in symbols and action.available_at <= through
         ),
+        execution_calendar=calendar,
     )
 
 
@@ -131,7 +170,8 @@ def replay_sha256(replay: Replay) -> str:
 def load_replay(data: bytes) -> Replay:
     if len(data) > MAX_INPUT_BYTES:
         raise ValueError("Replay fixture exceeds the input limit")
-    replay = msgspec.convert(json.loads(data, object_pairs_hook=_unique_fields), type=Replay)
+    document = json.loads(data, object_pairs_hook=_unique_fields)
+    replay = msgspec.convert(document, type=Replay)
     if Decimal(replay.starting_cash_usd) <= 0:
         raise ValueError("Starting cash must be positive")
     seen_quotes = set()
@@ -159,7 +199,81 @@ def load_replay(data: bytes) -> Replay:
     symbols = {symbol for symbol, _ in seen_quotes}
     _validate_dividends(replay.cash_dividends, symbols)
     _validate_splits(replay, symbols)
+    if replay.execution_calendar is not msgspec.UNSET:
+        _validate_calendar_precision(document)
+        _index_calendar(replay.execution_calendar, symbols)
     return replay
+
+
+def _validate_calendar_precision(document: dict) -> None:
+    fields_by_row = (
+        (document["execution_calendar"]["windows"], ("starts_at", "ends_before", "available_at")),
+        (document["quotes"], ("observed_at", "available_at")),
+        (document["orders"], ("ready_at", "expires_at")),
+        (document.get("stock_splits", ()), ("available_at", "effective_at")),
+        (document.get("cash_dividends", ()), ("available_at", "entitlement_at", "paid_at")),
+    )
+    for rows, fields in fields_by_row:
+        for row in rows:
+            for field in fields:
+                fraction = _FRACTIONAL_SECONDS.search(row[field])
+                if fraction and fraction[1][6:].strip("0"):
+                    raise ValueError("Execution calendar replay requires microsecond precision")
+
+
+def _index_calendar(
+    calendar: ExecutionCalendar, symbols: set[str] | None = None
+) -> dict[str, list[ExecutionWindow]]:
+    seen = set()
+    by_symbol = defaultdict(list)
+    for window in sorted(calendar.windows, key=attrgetter("starts_at")):
+        _nanoseconds(window.available_at)
+        _nanoseconds(window.starts_at)
+        _nanoseconds(window.ends_before)
+        if window.record_id in seen:
+            raise ValueError("Execution calendar contains a duplicate record ID")
+        if symbols is not None and window.symbol not in symbols:
+            raise ValueError("Execution window needs a quoted symbol")
+        if window.starts_at >= window.ends_before:
+            raise ValueError("Execution window must start before it ends")
+        previous = by_symbol[window.symbol]
+        if previous and window.starts_at < previous[-1].ends_before:
+            raise ValueError("Execution windows for one symbol cannot overlap")
+        seen.add(window.record_id)
+        previous.append(window)
+    return by_symbol
+
+
+def _calendar_quotes(
+    quotes: Sequence[Quote], calendar: ExecutionCalendar | msgspec.UnsetType
+) -> tuple[Sequence[Quote], dict[tuple[str, int], str], dict[str, int]]:
+    if calendar is msgspec.UNSET:
+        return quotes, {}, {}
+    windows = _index_calendar(calendar)
+    eligible = []
+    known_open = {}
+    blocked = defaultdict(int)
+    for quote in quotes:
+        by_symbol = windows.get(quote.symbol, ())
+        at = quote.available_at
+        index = bisect_right(by_symbol, at, key=attrgetter("starts_at")) - 1
+        window = by_symbol[index] if index >= 0 else None
+        if window is None or at >= window.ends_before or at < window.available_at:
+            blocked["unknown"] += 1
+        elif window.status != "open":
+            blocked[window.status] += 1
+        elif not window.starts_at <= quote.observed_at <= at:
+            blocked["outside_observation_window"] += 1
+        else:
+            eligible.append(quote)
+            known_open[quote.symbol, _nanoseconds(at)] = window.record_id
+    return eligible, known_open, dict(blocked)
+
+
+def executable_quotes(replay: Replay) -> tuple[Quote, ...]:
+    """Read only quotes tied to a known execution window when a calendar is pinned."""
+    eligible, _, _ = _calendar_quotes(replay.quotes, replay.execution_calendar)
+    return tuple(eligible)
 
 
 def _validate_dividends(dividends: tuple[CashDividend, ...], symbols: set[str]) -> None:
@@ -467,8 +581,10 @@ def _run_replay(
     strategy = strategy_factory(instruments, replay.orders, units)
     actions = _CorporateActions(replay, horizon_ns, strategy)
     boundaries = actions.boundaries()
+    calendar = replay.execution_calendar
+    session_quotes, window_ids, blocked_quotes = _calendar_quotes(quotes, calendar)
     eligible_quotes = [
-        quote for quote in quotes if units.quote_is_current(quote, quote.available_at)
+        quote for quote in session_quotes if units.quote_is_current(quote, quote.available_at)
     ]
     ticks = []
     for quote in eligible_quotes:
@@ -504,7 +620,8 @@ def _run_replay(
         if ticks:
             engine.add_data(ticks)
         engine.add_strategy(strategy)
-        engine.run()
+        if ticks or boundaries:
+            engine.run()
         if actions.timeline:
             raise RuntimeError("Nautilus did not settle all corporate action boundaries")
         booked_units = defaultdict(int)
@@ -522,7 +639,11 @@ def _run_replay(
                     status = "partially_filled" if booked else "no_accounted_fill"
             strategy.statuses[intent_id] = status
 
-        cash = engine.portfolio.account(venue).balance_total(USD).as_decimal()
+        cash = (
+            engine.portfolio.account(venue).balance_total(USD).as_decimal()
+            if ticks or boundaries
+            else starting_cash
+        )
         positions = {
             position.instrument_id.symbol.value: position.quantity.as_decimal()
             for position in engine.cache.positions_open()
@@ -569,6 +690,33 @@ def _run_replay(
             result["split_marks_in_prior_units"] = sorted(
                 symbol for symbol in positions if not units.quote_is_current(marks[symbol], horizon)
             )
+        if calendar is not msgspec.UNSET:
+            for order in replay.orders:
+                if (
+                    order.expires_at <= horizon
+                    and strategy.statuses[order.intent_id] == "no_executable_quote"
+                ):
+                    strategy.statuses[order.intent_id] = "expired"
+            for fill in strategy.fills:
+                fill["execution_window_id"] = window_ids[
+                    fill["symbol"], int(fill["quote_available_at_ns"])
+                ]
+            result["execution_calendar"] = {
+                "calendar_id": calendar.calendar_id,
+                "policy": "observation_and_arrival_in_same_window_known_at_arrival",
+                "eligible_quotes": len(session_quotes),
+                "blocked_quotes": blocked_quotes,
+                "held_bid_marks": {
+                    symbol: {
+                        "quote_observed_at_ns": str(_nanoseconds(marks[symbol].observed_at)),
+                        "quote_available_at_ns": str(_nanoseconds(marks[symbol].available_at)),
+                        "execution_window_id": window_ids[
+                            symbol, _nanoseconds(marks[symbol].available_at)
+                        ],
+                    }
+                    for symbol in sorted(positions)
+                },
+            }
         return result
     finally:
         engine.dispose()

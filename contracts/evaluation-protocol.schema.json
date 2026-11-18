@@ -190,6 +190,9 @@
           "pattern": "^[a-f0-9]{64}$",
           "type": "string"
         },
+        "paper_forward_source": {
+          "$ref": "#/$defs/ForwardPaperSource"
+        },
         "paper_nav_sha256": {
           "pattern": "^[a-f0-9]{64}$",
           "type": "string"
@@ -234,6 +237,207 @@
         "bootstrap"
       ],
       "title": "EvaluationProtocol",
+      "type": "object"
+    },
+    "ForwardPaperBenchmark": {
+      "additionalProperties": false,
+      "properties": {
+        "archive_source_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+          "type": "string"
+        },
+        "max_age_seconds": {
+          "maximum": 604800,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "modeled_entry_cost_bps": {
+          "maximum": 9999,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "series_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "series_id",
+        "modeled_entry_cost_bps",
+        "max_age_seconds"
+      ],
+      "title": "ForwardPaperBenchmark",
+      "type": "object"
+    },
+    "ForwardPaperPowerReview": {
+      "additionalProperties": false,
+      "properties": {
+        "alternative_increment_bps": {
+          "maximum": 10000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "daily_excess_sd_bps": {
+          "maximum": 10000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "lag_one_correlation_bps": {
+          "maximum": 9999,
+          "minimum": -9999,
+          "type": "integer"
+        },
+        "method": {
+          "enum": [
+            "gaussian_ar1_paired_mean_v1",
+            "gaussian_ar1_paired_moving_block_percentile_v1"
+          ]
+        },
+        "seed": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "target_detection_bps": {
+          "maximum": 9999,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "trials": {
+          "maximum": 2000,
+          "minimum": 100,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "method",
+        "alternative_increment_bps",
+        "daily_excess_sd_bps",
+        "lag_one_correlation_bps",
+        "target_detection_bps",
+        "trials",
+        "seed"
+      ],
+      "title": "ForwardPaperPowerReview",
+      "type": "object"
+    },
+    "ForwardPaperSource": {
+      "additionalProperties": false,
+      "properties": {
+        "account_id": {
+          "pattern": "^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$",
+          "type": "string"
+        },
+        "benchmark": {
+          "$ref": "#/$defs/ForwardPaperBenchmark"
+        },
+        "checkpoint_history": {
+          "enum": [
+            "require_prior_receipt"
+          ]
+        },
+        "checkpoints_utc": {
+          "items": {
+            "format": "date",
+            "type": "string"
+          },
+          "maxItems": 366,
+          "minItems": 1,
+          "type": "array"
+        },
+        "initial_cash_usd": {
+          "pattern": "^(0|[1-9][0-9]{0,11})(\\.[0-9]{1,8})?$",
+          "type": "string"
+        },
+        "mark_max_age_seconds": {
+          "maximum": 604800,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "maximum_drawdown_bps": {
+          "maximum": 10000,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "power_review": {
+          "$ref": "#/$defs/ForwardPaperPowerReview"
+        },
+        "regime_review": {
+          "$ref": "#/$defs/ForwardRegimeReview"
+        },
+        "valuation_source": {
+          "$ref": "#/$defs/PaperMarkSource"
+        }
+      },
+      "required": [
+        "account_id",
+        "initial_cash_usd",
+        "valuation_source",
+        "mark_max_age_seconds",
+        "checkpoints_utc",
+        "maximum_drawdown_bps"
+      ],
+      "title": "ForwardPaperSource",
+      "type": "object"
+    },
+    "ForwardRegimeReview": {
+      "additionalProperties": false,
+      "properties": {
+        "declining_threshold_bps": {
+          "maximum": 9999,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "lookback_utc_days": {
+          "maximum": 365,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "minimum_distinct_observations": {
+          "maximum": 366,
+          "minimum": 2,
+          "type": "integer"
+        },
+        "minimum_pairs_per_regime": {
+          "maximum": 365,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "rising_threshold_bps": {
+          "maximum": 10000,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "lookback_utc_days",
+        "minimum_distinct_observations",
+        "rising_threshold_bps",
+        "declining_threshold_bps",
+        "minimum_pairs_per_regime"
+      ],
+      "title": "ForwardRegimeReview",
+      "type": "object"
+    },
+    "PaperMarkSource": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "local_archive",
+            "synthetic_fixture"
+          ]
+        }
+      },
+      "required": [
+        "kind",
+        "id"
+      ],
+      "title": "PaperMarkSource",
       "type": "object"
     },
     "ReplayBenchmark": {

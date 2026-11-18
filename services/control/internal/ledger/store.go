@@ -33,6 +33,12 @@ var fillOutboxMigration string
 //go:embed 005_applications.sql
 var applicationsMigration string
 
+//go:embed 006_risk_refusals.sql
+var riskRefusalsMigration string
+
+//go:embed 007_risk_execution_cost.sql
+var riskExecutionCostMigration string
+
 type Store struct {
 	pool *pgxpool.Pool
 }
@@ -109,7 +115,7 @@ func (s *Store) migrate(ctx context.Context) error {
 	if err := tx.QueryRow(ctx, `SELECT coalesce(max(version), 0) FROM paper_schema_migrations`).Scan(&version); err != nil {
 		return fmt.Errorf("read paper schema version: %w", err)
 	}
-	migrations := []string{accountsMigration, ordersMigration, partialFillsMigration, fillOutboxMigration, applicationsMigration}
+	migrations := []string{accountsMigration, ordersMigration, partialFillsMigration, fillOutboxMigration, applicationsMigration, riskRefusalsMigration, riskExecutionCostMigration}
 	if version < 0 || version > len(migrations) {
 		return fmt.Errorf("unsupported paper schema version %d", version)
 	}

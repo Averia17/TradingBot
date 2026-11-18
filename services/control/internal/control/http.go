@@ -26,6 +26,8 @@ func NewHandler(maxResearchAge time.Duration, now func() time.Time, store jobSto
 func NewHandlerWithPaper(maxResearchAge time.Duration, now func() time.Time, store jobStore, paper paperAccountStore) http.Handler {
 	mux := http.NewServeMux()
 	paperOrders, hasPaperOrders := paper.(paperOrderStore)
+	calendar, hasCalendar := store.(researchCalendarStore)
+	usage, hasCallUsage := store.(researchCallUsageStore)
 	slots := make(chan struct{}, concurrentWrites)
 	bounded := func(busyCode string, handle http.HandlerFunc) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
@@ -76,6 +78,12 @@ func NewHandlerWithPaper(maxResearchAge time.Duration, now func() time.Time, sto
 			response["research_result_schema_versions"] = []string{syntheticResultVersion, offlineResultVersion}
 			response["research_result_source_modes"] = []string{syntheticSourceMode, offlineSourceMode}
 		}
+		if hasCalendar {
+			response["research_calendar_observations"] = true
+		}
+		if hasCallUsage {
+			response["research_call_usage"] = true
+		}
 		if paper != nil {
 			response["paper_accounts"] = true
 		}
@@ -106,6 +114,15 @@ func NewHandlerWithPaper(maxResearchAge time.Duration, now func() time.Time, sto
 		mux.HandleFunc("POST /v1/research/jobs/{id}/authorize-call", bounded("job_api_busy", h.authorizeCall))
 		mux.HandleFunc("POST /v1/research/jobs/{id}/complete", bounded("job_api_busy", h.complete))
 		mux.HandleFunc("GET /v1/research/jobs/{id}/result", h.getResult)
+	}
+	if hasCalendar {
+		h := researchCalendarHTTP{store: calendar}
+		mux.HandleFunc("POST /v1/research/schedule-occurrences/{id}", bounded("job_api_busy", h.record))
+		mux.HandleFunc("GET /v1/research/schedule-occurrences/{id}", bounded("job_api_busy", h.get))
+	}
+	if hasCallUsage {
+		h := callUsageHTTP{store: usage}
+		mux.HandleFunc("POST /v1/research/jobs/{id}/record-call", bounded("job_api_busy", h.record))
 	}
 	mux.HandleFunc("POST /v1/research/validate", bounded("validator_busy", func(w http.ResponseWriter, r *http.Request) {
 		validateResearch(w, r, now, maxResearchAge)

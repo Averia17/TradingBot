@@ -39,28 +39,35 @@ func run(ctx context.Context, dsn string, args []string, output io.Writer) error
 	flags := flag.NewFlagSet("paper-nav", flag.ContinueOnError)
 	path := flags.String("input", "", "paper NAV input file")
 	digest := flags.String("sha256", "", "SHA-256 of the exact input bytes")
+	verifyPath := flags.String("verify-report", "", "saved paper NAV report to verify by replaying the ledger")
+	reportDigest := flags.String("report-sha256", "", "SHA-256 of the exact saved report bytes")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
 	if flags.NArg() != 0 || *path == "" || *digest == "" || dsn == "" {
 		return errors.New("provide --input, --sha256 and TRADINGBOT_DATABASE_URL")
 	}
-	info, err := os.Stat(*path)
-	if err != nil || !info.Mode().IsRegular() || info.Size() > papernav.MaxInputBytes {
-		return errors.New("paper NAV input must be a bounded regular file")
+	if (*verifyPath == "") != (*reportDigest == "") {
+		return errors.New("provide --verify-report and --report-sha256 together")
 	}
-	inputFile, err := os.Open(*path)
+	raw, err := readBounded(*path, "input", papernav.MaxInputBytes)
 	if err != nil {
-		return errors.New("open paper NAV input failed")
-	}
-	defer inputFile.Close()
-	raw, err := io.ReadAll(io.LimitReader(inputFile, papernav.MaxInputBytes+1))
-	if err != nil {
-		return errors.New("read paper NAV input failed")
+		return err
 	}
 	input, err := papernav.Parse(raw, *digest)
 	if err != nil {
 		return err
+	}
+	var archived []byte
+	if *verifyPath != "" {
+		raw, err := readBounded(*verifyPath, "report", papernav.MaxReportBytes)
+		if err != nil {
+			return err
+		}
+		archived, err = papernav.CanonicalReport(raw, *reportDigest)
+		if err != nil {
+			return err
+		}
 	}
 	var report papernav.Report
 	err = ledger.WithReadSnapshot(ctx, dsn, func(snapshot ledger.ReadSnapshot) error {
@@ -71,6 +78,11 @@ func run(ctx context.Context, dsn string, args []string, output io.Writer) error
 	if err != nil {
 		return err
 	}
+	if archived != nil {
+		if err := papernav.CompareReport(archived, report); err != nil {
+			return err
+		}
+	}
 	if err := json.NewEncoder(output).Encode(report); err != nil {
 		return err
 	}
@@ -78,4 +90,21 @@ func run(ctx context.Context, dsn string, args []string, output io.Writer) error
 		return errIncomplete
 	}
 	return nil
+}
+
+func readBounded(path, kind string, maxSize int64) ([]byte, error) {
+	info, err := os.Stat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Size() > maxSize {
+		return nil, errors.New("paper NAV " + kind + " must be a bounded regular file")
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, errors.New("open paper NAV " + kind + " failed")
+	}
+	defer file.Close()
+	raw, err := io.ReadAll(io.LimitReader(file, maxSize+1))
+	if err != nil {
+		return nil, errors.New("read paper NAV " + kind + " failed")
+	}
+	return raw, nil
 }

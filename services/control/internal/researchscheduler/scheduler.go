@@ -78,6 +78,7 @@ type occurrence struct {
 }
 
 type Schedule struct {
+	id     string
 	window time.Duration
 	jobs   []occurrence
 }
@@ -109,7 +110,7 @@ func Load(reader io.Reader) (Schedule, error) {
 		input.Lateness < 1 || input.Lateness > 3600 || len(input.Occurrence) < 1 || len(input.Occurrence) > maxOccurrences {
 		return Schedule{}, errors.New("invalid schedule settings")
 	}
-	schedule := Schedule{window: time.Duration(input.Lateness) * time.Second}
+	schedule := Schedule{id: input.ID, window: time.Duration(input.Lateness) * time.Second}
 	seen := make(map[string]bool, len(input.Occurrence))
 	for index, item := range input.Occurrence {
 		job, err := prepare(input, item)
@@ -137,14 +138,14 @@ func prepare(input definition, item trigger) (occurrence, error) {
 	portfolio.ID = strings.ToLower(portfolio.ID)
 	portfolio.AsOf = portfolio.AsOf.UTC()
 	at := item.At.UTC()
-	jobID := occurrenceID(input.ID, at)
+	jobID := contract.ResearchCalendarJobID(input.ID, at)
 	var event *eventAnchor
 	if len(item.Event) != 0 {
 		var reference EventReference
 		if input.Version != "0.2" || contract.Decode(item.Event, nil, &reference) != nil || !reference.valid() {
 			return occurrence{}, errors.New("invalid event reference for schedule version")
 		}
-		jobID = derivedJobID("tradingbot/research-event-v1\n" + input.ID + "\n" + reference.Provider + "\n" + reference.RecordID)
+		jobID = contract.DerivedResearchJobID("tradingbot/research-event-v1\n" + input.ID + "\n" + reference.Provider + "\n" + reference.RecordID)
 		event = &eventAnchor{reference: reference, cutoff: portfolio.AsOf, symbols: item.Symbols}
 	}
 	body, err := json.Marshal(jobSubmission{"0.1", jobID, portfolio, item.Symbols, item.Manifest, input.Policy, item.Budget})
@@ -178,21 +179,9 @@ func VerifyArchive(archiveRoot string, reference ArchiveReference, cutoff time.T
 	return verifyArchive(root, job)
 }
 
-func occurrenceID(id string, at time.Time) string {
-	// Input changes keep the same ID and must conflict with an accepted job.
-	return derivedJobID("tradingbot/research-calendar-v1\n" + id + "\n" + at.Format(time.RFC3339Nano))
-}
-
 // PaperEntryOccurrenceID binds a calendar trigger to its owner account.
 func PaperEntryOccurrenceID(accountID, scheduleID string, at time.Time) string {
-	return derivedJobID("tradingbot/paper-entry-calendar-v1\n" + accountID + "\n" + scheduleID + "\n" + at.UTC().Format(time.RFC3339Nano))
-}
-
-func derivedJobID(key string) string {
-	hash := sha256.Sum256([]byte(key))
-	hash[6] = hash[6]&0x0f | 0x80 // UUID version 8
-	hash[8] = hash[8]&0x3f | 0x80
-	return fmt.Sprintf("%x-%x-%x-%x-%x", hash[:4], hash[4:6], hash[6:8], hash[8:10], hash[10:16])
+	return contract.DerivedResearchJobID("tradingbot/paper-entry-calendar-v1\n" + accountID + "\n" + scheduleID + "\n" + at.UTC().Format(time.RFC3339Nano))
 }
 
 // VerifyEvent validates and resolves one event already defined in the schedule.
@@ -242,6 +231,7 @@ func Run(ctx context.Context, schedule Schedule, config Config) error {
 		if config.Once && job.At.After(startedAt) {
 			return nil
 		}
+		deadline := job.At.Add(schedule.window)
 		for ctx.Err() == nil {
 			now := time.Now()
 			if now.Before(job.At) {
@@ -250,17 +240,23 @@ func Run(ctx context.Context, schedule Schedule, config Config) error {
 				}
 				continue
 			}
-			if now.Sub(job.At) > schedule.window {
-				slog.Info("research occurrence outside scheduling window", "job_id", job.ID, "scheduled_at", job.At)
+			if !now.Before(deadline) {
+				err := schedule.observeClosedWindow(ctx, client, endpoint, job, now.Sub(deadline))
+				if ctx.Err() != nil {
+					return nil
+				}
+				if err != nil {
+					return fmt.Errorf("observe closed window for job %s: %w", job.ID, err)
+				}
 				break
 			}
 			if _, err := verifyArchive(archive, job); err != nil {
 				return fmt.Errorf("job %s: %w", job.ID, err)
 			}
-			if time.Since(job.At) > schedule.window {
-				break
+			if !time.Now().Before(deadline) {
+				continue
 			}
-			submitCtx, cancel := context.WithDeadline(ctx, job.At.Add(schedule.window))
+			submitCtx, cancel := context.WithDeadline(ctx, deadline)
 			retry, err := submit(submitCtx, client, endpoint, job)
 			cancel()
 			if ctx.Err() != nil {
@@ -268,6 +264,9 @@ func Run(ctx context.Context, schedule Schedule, config Config) error {
 			}
 			if err == nil {
 				break
+			}
+			if retry && !time.Now().Before(deadline) {
+				continue
 			}
 			if !retry || config.Once {
 				return fmt.Errorf("job %s: %w", job.ID, err)

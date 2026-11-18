@@ -25,6 +25,8 @@ from tradingbot_evaluation.trend import TrendLookbackQuotes, TrendMaxGapSeconds
 SHA256 = Annotated[str, msgspec.Meta(pattern=r"^[a-f0-9]{64}$")]
 SplitName = Literal["train", "validation", "test"]
 MAX_BOOTSTRAP_DRAWS = 10_000_000
+GAUSSIAN_PAIRED_MEAN = "gaussian_ar1_paired_mean_v1"
+CASH_SERIES = "uninvested-cash"
 
 
 class SplitWindows(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
@@ -83,6 +85,54 @@ class AblationSource(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
     variants: Annotated[dict[IntentID, ResearchVariant], msgspec.Meta(min_length=2, max_length=4)]
 
 
+PaperAccount = Annotated[
+    str, msgspec.Meta(pattern=r"^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$")
+]
+
+
+class PaperMarkSource(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
+    kind: Literal["synthetic_fixture", "local_archive"]
+    id: IntentID
+
+
+class ForwardPaperBenchmark(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
+    series_id: IntentID
+    modeled_entry_cost_bps: Annotated[int, msgspec.Meta(ge=0, le=9999)]
+    max_age_seconds: Annotated[int, msgspec.Meta(ge=1, le=604800)]
+    archive_source_id: IntentID | msgspec.UnsetType = msgspec.UNSET
+
+
+class ForwardPaperPowerReview(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
+    method: Literal["gaussian_ar1_paired_moving_block_percentile_v1", "gaussian_ar1_paired_mean_v1"]
+    alternative_increment_bps: Annotated[int, msgspec.Meta(ge=1, le=10_000)]
+    daily_excess_sd_bps: Annotated[int, msgspec.Meta(ge=1, le=10_000)]
+    lag_one_correlation_bps: Annotated[int, msgspec.Meta(ge=-9999, le=9999)]
+    target_detection_bps: Annotated[int, msgspec.Meta(ge=1, le=9999)]
+    trials: Annotated[int, msgspec.Meta(ge=100, le=2000)]
+    seed: Annotated[int, msgspec.Meta(ge=0, le=2**53 - 1)]
+
+
+class ForwardRegimeReview(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
+    lookback_utc_days: Annotated[int, msgspec.Meta(ge=1, le=365)]
+    minimum_distinct_observations: Annotated[int, msgspec.Meta(ge=2, le=366)]
+    rising_threshold_bps: Annotated[int, msgspec.Meta(ge=1, le=10_000)]
+    declining_threshold_bps: Annotated[int, msgspec.Meta(ge=1, le=9999)]
+    minimum_pairs_per_regime: Annotated[int, msgspec.Meta(ge=1, le=365)]
+
+
+class ForwardPaperSource(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
+    account_id: PaperAccount
+    initial_cash_usd: USD
+    valuation_source: PaperMarkSource
+    mark_max_age_seconds: Annotated[int, msgspec.Meta(ge=1, le=604800)]
+    checkpoints_utc: Annotated[tuple[date, ...], msgspec.Meta(min_length=1, max_length=366)]
+    maximum_drawdown_bps: Annotated[int, msgspec.Meta(ge=0, le=10_000)]
+    benchmark: ForwardPaperBenchmark | msgspec.UnsetType = msgspec.UNSET
+    power_review: ForwardPaperPowerReview | msgspec.UnsetType = msgspec.UNSET
+    checkpoint_history: Literal["require_prior_receipt"] | msgspec.UnsetType = msgspec.UNSET
+    regime_review: ForwardRegimeReview | msgspec.UnsetType = msgspec.UNSET
+
+
 class EvaluationProtocol(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
     schema_version: Literal["0.1", "0.2"]
     experiment_id: IntentID
@@ -101,6 +151,7 @@ class EvaluationProtocol(msgspec.Struct, frozen=True, forbid_unknown_fields=True
     walk_forward_source: WalkForwardSource | msgspec.UnsetType = msgspec.UNSET
     paper_benchmark_sha256: SHA256 | msgspec.UnsetType = msgspec.UNSET
     ablation_source: AblationSource | msgspec.UnsetType = msgspec.UNSET
+    paper_forward_source: ForwardPaperSource | msgspec.UnsetType = msgspec.UNSET
 
 
 class DailyNav(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
@@ -137,6 +188,7 @@ class PaperNavProvenance(msgspec.Struct, frozen=True, forbid_unknown_fields=True
     paper_nav_sha256: SHA256
     account_id: IntentID
     paper_benchmark_sha256: SHA256 | msgspec.UnsetType = msgspec.UNSET
+    paper_benchmark_archive_source_id: IntentID | msgspec.UnsetType = msgspec.UNSET
 
 
 class WalkForwardProvenance(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
@@ -214,14 +266,17 @@ def _validate_protocol(protocol: EvaluationProtocol) -> None:
     has_paper_benchmark = protocol.paper_benchmark_sha256 is not msgspec.UNSET
     has_walk = protocol.walk_forward_source is not msgspec.UNSET
     has_ablation = protocol.ablation_source is not msgspec.UNSET
+    forward = protocol.paper_forward_source
+    has_forward = forward is not msgspec.UNSET
     if protocol.schema_version == "0.2" and (
-        protocol.nav_basis == "gross" or has_costs != (protocol.nav_basis == "operating_net")
+        protocol.nav_basis == "gross"
+        or has_costs != (protocol.nav_basis == "operating_net" and not has_forward)
     ):
         raise ValueError(
             "Protocol 0.2 requires a frozen cost ledger SHA-256 only for operating_net"
         )
     if protocol.schema_version == "0.1" and (
-        has_costs or has_paper_nav or has_walk or has_paper_benchmark or has_ablation
+        has_costs or has_paper_nav or has_walk or has_paper_benchmark or has_ablation or has_forward
     ):
         raise ValueError(
             "Operating cost ledger, paper NAV and study source pins require protocol 0.2"
@@ -234,6 +289,10 @@ def _validate_protocol(protocol: EvaluationProtocol) -> None:
         raise ValueError("Paired ablation requires its own frozen source")
     if has_paper_benchmark and not has_paper_nav:
         raise ValueError("Paper benchmark requires a frozen paper NAV export")
+    if has_forward and (
+        has_paper_nav or has_walk or has_ablation or protocol.replay_source is not msgspec.UNSET
+    ):
+        raise ValueError("Forward paper registration cannot pin another source or finished results")
     windows = protocol.splits
     if (
         not windows.train_start
@@ -292,14 +351,77 @@ def _validate_protocol(protocol: EvaluationProtocol) -> None:
                 "Paired ablation must compare every distinct variant with its baseline"
             )
     if has_paper_benchmark and (
-        protocol.source_mode != "synthetic_fixture"
-        or any(row.benchmark_access != "synthetic_fixture" for row in protocol.comparisons)
+        not paper_benchmark_access_matches(protocol)
         or len({row.strategy for row in protocol.comparisons}) != 1
-        or len({row.benchmark for row in protocol.comparisons} - {"uninvested-cash"}) != 1
+        or len({row.benchmark for row in protocol.comparisons} - {CASH_SERIES}) != 1
     ):
-        raise ValueError(
-            "Paper benchmark requires one noncash synthetic reference and one strategy"
+        raise ValueError("Paper benchmark requires one eligible noncash reference and one strategy")
+    if has_forward:
+        _validate_forward_paper(protocol, forward, windows.test_start + embargo)
+
+
+def paper_benchmark_access_matches(protocol: EvaluationProtocol) -> bool:
+    if protocol.source_mode == "synthetic_fixture":
+        return all(row.benchmark_access == "synthetic_fixture" for row in protocol.comparisons)
+    return all(
+        row.benchmark == CASH_SERIES or row.benchmark_access in {"theoretical_reference", "unknown"}
+        for row in protocol.comparisons
+    )
+
+
+def _validate_forward_paper(
+    protocol: EvaluationProtocol, source: ForwardPaperSource, test_start: date
+) -> None:
+    days = protocol.expected_nav_dates
+    checkpoints = source.checkpoints_utc
+    if (
+        len(days) > 366
+        or days[-1] != protocol.splits.end_exclusive - timedelta(days=1)
+        or any(right - left != timedelta(days=1) for left, right in pairwise(days))
+        or checkpoints != tuple(sorted(set(checkpoints)))
+        or checkpoints[0] <= test_start
+        or checkpoints[-1] != days[-1]
+    ):
+        raise ValueError("Forward paper requires a complete UTC calendar and ordered checkpoints")
+    synthetic = protocol.source_mode == "synthetic_fixture"
+    if Decimal(source.initial_cash_usd) <= 0 or synthetic != (
+        source.valuation_source.kind == "synthetic_fixture"
+    ):
+        raise ValueError("Forward paper funding and valuation source must match the registration")
+    comparisons = protocol.comparisons
+    benchmarks = {row.benchmark for row in comparisons}
+    configured = source.benchmark
+    expected_noncash = set() if configured is msgspec.UNSET else {configured.series_id}
+    if (
+        len({row.strategy for row in comparisons}) != 1
+        or len(comparisons) != len(benchmarks)
+        or not paper_benchmark_access_matches(protocol)
+        or benchmarks - {CASH_SERIES} != expected_noncash
+        or (
+            configured is not msgspec.UNSET
+            and (configured.archive_source_id is msgspec.UNSET) != synthetic
         )
+    ):
+        raise ValueError("Forward paper requires one strategy and registered benchmark settings")
+    regime = source.regime_review
+    if regime is not msgspec.UNSET:
+        primary = next(
+            row for row in comparisons if row.comparison_id == protocol.primary_comparison_id
+        )
+        if primary.benchmark not in expected_noncash:
+            raise ValueError(
+                "Forward regime review requires a registered primary total-return index"
+            )
+        if regime.minimum_distinct_observations > regime.lookback_utc_days + 1:
+            raise ValueError("Forward regime review requires a feasible observation minimum")
+    design = source.power_review
+    if design is not msgspec.UNSET and design.method != GAUSSIAN_PAIRED_MEAN:
+        n = (days[-1] - test_start).days
+        config = protocol.bootstrap
+        if design.trials * config.replications * ceil(Fraction(n, config.block_marks)) > (
+            MAX_BOOTSTRAP_DRAWS
+        ):
+            raise ValueError("Power review exceeds the local work limit")
 
 
 def _validate_replay_source(
@@ -469,6 +591,24 @@ def _moving_block_interval(
     )
 
 
+def _bootstrap_insufficiency(n: int, config: BlockBootstrap, tail: Fraction) -> str | None:
+    if n // config.block_marks < config.minimum_blocks:
+        return "too_few_complete_blocks"
+    if floor(config.replications * tail) == 0:
+        return "too_few_corrected_tail_draws"
+    return None
+
+
+def _outward_excess_bounds(low: float, high: float) -> tuple[Decimal, Decimal]:
+    with localcontext() as context:
+        context.prec = 50
+        resolution = Decimal("0.000001")
+        return (
+            Decimal.from_float(low).quantize(resolution, rounding=ROUND_FLOOR),
+            Decimal.from_float(high).quantize(resolution, rounding=ROUND_CEILING),
+        )
+
+
 def _risk_method(dates: tuple[date, ...]) -> dict:
     spacing = [(end - start).days for start, end in pairwise(dates)]
     return {
@@ -520,6 +660,15 @@ def _return_risk(returns: tuple[Decimal, ...]) -> dict[str, str | None]:
     }
 
 
+def _paired_excess_bps(
+    strategy_growth: tuple[Decimal, ...], benchmark_growth: tuple[Decimal, ...]
+) -> tuple[Decimal, ...]:
+    return tuple(
+        (strategy - benchmark) * 10_000
+        for strategy, benchmark in zip(strategy_growth, benchmark_growth, strict=True)
+    )
+
+
 def _comparison_report(
     row: Comparison,
     navs: dict[str, list[Decimal]],
@@ -533,9 +682,7 @@ def _comparison_report(
         context.prec = 50
         strategy_growth = tuple(end / begin for begin, end in pairwise(strategy))
         benchmark_growth = tuple(end / begin for begin, end in pairwise(benchmark))
-        excess = tuple(
-            (s - b) * 10_000 for s, b in zip(strategy_growth, benchmark_growth, strict=True)
-        )
+        excess = _paired_excess_bps(strategy_growth, benchmark_growth)
         differences = tuple(map(float, excess))
         strategy_total = (strategy[-1] / strategy[0] - 1) * 10_000
         benchmark_total = (benchmark[-1] / benchmark[0] - 1) * 10_000
@@ -559,11 +706,7 @@ def _comparison_report(
             if low == high:
                 reason = "degenerate_bootstrap_interval"
             else:
-                with localcontext() as context:
-                    context.prec = 50
-                    resolution = Decimal("0.000001")
-                    lower = Decimal.from_float(low).quantize(resolution, rounding=ROUND_FLOOR)
-                    upper = Decimal.from_float(high).quantize(resolution, rounding=ROUND_CEILING)
+                lower, upper = _outward_excess_bounds(low, high)
                 interval = {"lower": format(lower, "f"), "upper": format(upper, "f")}
                 if lower > row.minimum_daily_excess_bps:
                     status = "above_registered_threshold"
@@ -600,6 +743,8 @@ def evaluate_statistics(
     if expected_protocol_sha256 != frozen or evidence.protocol_sha256 != frozen:
         raise ValueError("Frozen protocol SHA-256 differs from the expected digest or evidence")
     _validate_protocol(protocol)
+    if protocol.paper_forward_source is not msgspec.UNSET:
+        raise ValueError("Forward paper registration requires forward-paper-report")
     _validate_evidence_basis(evidence)
     if protocol.schema_version != evidence.schema_version:
         raise ValueError("Evidence and protocol versions must match")
@@ -622,6 +767,11 @@ def evaluate_statistics(
         raise ValueError(
             "Evidence paper benchmark provenance must match the frozen benchmark SHA-256"
         )
+    elif (paper.paper_benchmark_archive_source_id is not msgspec.UNSET) != (
+        protocol.paper_benchmark_sha256 is not msgspec.UNSET
+        and protocol.source_mode == "retrospective"
+    ):
+        raise ValueError("Evidence paper benchmark requires its archived source identity")
     walk = evidence.walk_forward_provenance
     walk_source = protocol.walk_forward_source
     if walk_source is msgspec.UNSET:
@@ -653,12 +803,8 @@ def evaluate_statistics(
     tail = alpha / (2 * family_size)
     complete_blocks = n // config.block_marks
     tail_draws = floor(config.replications * tail)
-    insufficiency = None
-    if complete_blocks < config.minimum_blocks:
-        insufficiency = "too_few_complete_blocks"
-    elif tail_draws == 0:
-        insufficiency = "too_few_corrected_tail_draws"
-    elif (
+    insufficiency = _bootstrap_insufficiency(n, config, tail)
+    if insufficiency is None and (
         config.replications
         * ceil(Fraction(n, config.block_marks))
         * family_size

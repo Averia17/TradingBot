@@ -1,0 +1,36 @@
+{
+  "schema_version": "0.1",
+  "source_mode": "synthetic_fixture",
+  "llm_calls": 2,
+  "capture_status": "complete",
+  "calls": [
+    {
+      "run_id": "11111111-1111-4111-8111-111111111111",
+      "provider": "offline",
+      "model": "scripted-offline-v1",
+      "role": "research",
+      "status": "completed",
+      "started_at": "2026-10-02T16:00:01Z",
+      "input_tokens": 800,
+      "output_tokens": 200,
+      "cache_read_tokens": 100,
+      "cache_write_tokens": 50,
+      "reasoning_tokens": 40,
+      "usage_source": "langchain_usage_metadata"
+    },
+    {
+      "run_id": "22222222-2222-4222-8222-222222222222",
+      "provider": "offline",
+      "model": "scripted-offline-v1",
+      "role": "portfolio_allocator",
+      "status": "failed",
+      "started_at": "2026-10-02T16:00:02Z",
+      "input_tokens": 100,
+      "output_tokens": 30,
+      "cache_read_tokens": 0,
+      "cache_write_tokens": 0,
+      "reasoning_tokens": 0,
+      "usage_source": "langchain_usage_metadata"
+    }
+  ]
+}

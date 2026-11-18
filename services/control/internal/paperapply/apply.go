@@ -33,6 +33,7 @@ type PaperStore interface {
 	papersim.Store
 	GetAccount(context.Context, string) (ledger.Account, error)
 	GetOrder(context.Context, string, string) (ledger.Order, error)
+	RecordRiskRefusal(context.Context, ledger.RiskRefusalInput) error
 }
 
 type Request struct {
@@ -129,6 +130,11 @@ func applyCompleted(ctx context.Context, paper PaperStore, req Request, rawQuote
 		return Result{}, err
 	}
 	if err := checkNewOrder(ctx, paper, req.SnapshotContext, portfolio, in, preview, now); err != nil {
+		if reason, ok := paperrisk.RefusalReason(err); ok {
+			if recordErr := recordRiskRefusal(ctx, paper, req, in, preview, reason, now); recordErr != nil {
+				return Result{}, errors.Join(err, fmt.Errorf("persist paper risk refusal: %w", recordErr))
+			}
+		}
 		return Result{}, err
 	}
 	execution, err := papersim.Run(ctx, researchOrderStore{Store: paper, jobID: req.JobID}, in, rawQuote, now)
@@ -137,6 +143,30 @@ func applyCompleted(ctx context.Context, paper PaperStore, req Request, rawQuote
 	}
 	result.Status, result.Execution = "applied", &execution
 	return result, nil
+}
+
+func recordRiskRefusal(ctx context.Context, paper PaperStore, req Request, in papersim.Intent, preview papersim.FixturePreview, reason ledger.RiskRefusalReason, now time.Time) error {
+	deadline := applicationDeadline(req.SnapshotContext, preview.ExpiresAt)
+	if !deadline.After(now) {
+		return nil
+	}
+	raw, err := json.Marshal(req)
+	if err != nil {
+		return fmt.Errorf("encode paper application request: %w", err)
+	}
+	err = paper.RecordRiskRefusal(ctx, ledger.RiskRefusalInput{
+		AccountID: in.AccountID, JobID: req.JobID, EvaluatedAt: now, ReserveBefore: deadline,
+		RiskRefusal: ledger.RiskRefusal{
+			DecisionID: in.DecisionID, CandidateOrderID: preview.OrderID, SnapshotVersion: in.SnapshotVersion,
+			RequestSHA256: fmt.Sprintf("%x", sha256.Sum256(raw)), QuoteSHA256: in.QuoteSHA256, Reason: reason,
+		},
+	})
+	if errors.Is(err, ledger.ErrStale) || errors.Is(err, ledger.ErrExpired) {
+		// A racing mutation or expiry invalidates the observation, not the
+		// caller's original refusal. Leave the existing retry policy intact.
+		return nil
+	}
+	return err
 }
 
 // Only the validated research application path attaches job provenance to the
@@ -315,7 +345,7 @@ func checkNewOrder(ctx context.Context, paper PaperStore, config SnapshotContext
 	if err != nil {
 		return err
 	}
-	return paperrisk.CheckWithActivity(account, in, config.Policy, config.Marks, now, activity)
+	return paperrisk.CheckOrder(account, in, config.Policy, config.Marks, now, activity, preview.Fill)
 }
 
 func authorize(in papersim.Intent, preview papersim.FixturePreview, config SnapshotContext, portfolio contract.Portfolio, batch contract.Batch) error {
@@ -386,7 +416,7 @@ func authorize(in papersim.Intent, preview papersim.FixturePreview, config Snaps
 		return fmt.Errorf("%w: intent size differs from decision", ErrInvalid)
 	}
 	maxCost := new(big.Rat).Mul(marked, big.NewRat(int64(proposal.CostBPS), 10000))
-	if feeCap.Cmp(maxCost) > 0 || executionCost(in.Side, quoted, marked, fee).Cmp(maxCost) > 0 {
+	if feeCap.Cmp(maxCost) > 0 || paperrisk.AdverseExecutionCost(in.Side, quoted, marked, fee).Cmp(maxCost) > 0 {
 		return fmt.Errorf("%w: paper quote exceeds decision execution cost", ErrInvalid)
 	}
 	if fill := preview.Fill; fill != nil && fill.QuantityRaw != in.QuantityRaw {
@@ -403,20 +433,9 @@ func authorize(in papersim.Intent, preview papersim.FixturePreview, config Snaps
 			feeBasis = gross
 		}
 		allowedFee := new(big.Rat).Mul(feeBasis, big.NewRat(int64(config.Policy.MaxFeeBPS), 10000))
-		if executionCost(in.Side, gross, reference, cost).Cmp(allowedCost) > 0 || cost.Cmp(allowedFee) > 0 {
+		if paperrisk.AdverseExecutionCost(in.Side, gross, reference, cost).Cmp(allowedCost) > 0 || cost.Cmp(allowedFee) > 0 {
 			return fmt.Errorf("%w: partial execution exceeds its cost or fee cap", ErrInvalid)
 		}
 	}
 	return nil
-}
-
-func executionCost(side string, gross, reference, fee *big.Rat) *big.Rat {
-	adverse := new(big.Rat).Sub(gross, reference)
-	if side == "SELL" {
-		adverse.Neg(adverse)
-	}
-	if adverse.Sign() > 0 {
-		return adverse.Add(adverse, fee)
-	}
-	return fee
 }

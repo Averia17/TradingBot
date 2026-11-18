@@ -28,6 +28,55 @@ checkout служит исходным reference, а runtime устанавли�
 wheel с точной версией. Обновление reference без соответствующего runtime не
 считается проверенной миграцией.
 
+## Пины и лицензии
+
+Сверка 18.11.2026. Даты в таблице — `published_at` релиза GitHub в UTC. Теги
+проверены через точные `refs/tags/...`, а файлы LICENSE прочитаны из Git-объектов
+закреплённых коммитов. Локальные HEAD и Git blob LICENSE совпали с upstream.
+
+| Компонент | Релиз и commit | Лицензия и evidence |
+|---|---|---|
+| TradingAgents, runtime research | [v0.7.1](https://github.com/TauricResearch/TradingAgents/releases/tag/v0.7.1), 27.10.2026 08:43:04 UTC, `c4544913a14ed3df5f1ed7b9e8483270ce20682a` | Apache-2.0, [LICENSE](https://github.com/TauricResearch/TradingAgents/blob/c4544913a14ed3df5f1ed7b9e8483270ce20682a/LICENSE), blob `261eeb9e9f8b2b4b0d119366dda99c6fd7d35c64` |
+| NautilusTrader, source reference и wheel BacktestEngine | [v1.231.0](https://github.com/nautechsystems/nautilus_trader/releases/tag/v1.231.0), 02.08.2026 18:53:49 UTC, `27a8e54e7ac3c57d6cbf8891f0283dfbaee97317` | LGPL-3.0-or-later в `pyproject.toml` и metadata wheel, [LICENSE](https://github.com/nautechsystems/nautilus_trader/blob/27a8e54e7ac3c57d6cbf8891f0283dfbaee97317/LICENSE), blob `5550e2db15f239ea8d3cf54bfa3b035eab8d3174` |
+
+[Upstream lock](../services/research/upstream.lock.json) хранит оба commit,
+лицензии и пустые списки `patches`. Исторический тестовый патч v0.6.0 хранится
+отдельно и исключён из bootstrap. В Dockerfile research копируются наш пакет
+и manifests, а TradingAgents получается из закреплённого checkout. Dockerfile
+evaluation копирует наш evaluator и устанавливает закреплённый wheel
+NautilusTrader. В списках зависимостей, в поставляемом коде и в путях сборки
+ссылок на ATLAS или его закрытые промпты не найдено.
+
+[Research lock](../services/research/uv.lock) фиксирует версии, даты загрузки
+и SHA-256 wheel/sdist для LangChain, LangGraph и SDK провайдеров. По `LICENSE`
+установленных пакетов сверены `langchain-core 1.6.6`, `langgraph 1.2.12`,
+`langgraph-sdk 0.4.5`, `langchain-openai 1.6.7`, `langchain-anthropic 1.7.5`,
+`langchain-google-genai 4.4.0` и `anthropic 1.11.0` (MIT),
+`openai 3.24.0` и `google-genai 2.28.0` (Apache-2.0 на сам пакет).
+[Evaluation lock](../services/evaluation/uv.lock) отдельно фиксирует wheel
+NautilusTrader по платформам и `msgspec 0.22.0` (BSD-3-Clause). Go-зависимости
+закреплены в `go.mod` и `go.sum` каждого сервиса. В модуле
+`pgkit/v2` на `d8cfea48af9d2031f602d7c09ecc255c4542d439` условия Apache 2.0
+заявлены в [README исходника](https://github.com/goware/pgkit/blob/d8cfea48af9d2031f602d7c09ecc255c4542d439/README.md#license).
+Отдельный текст LICENSE в этом коммите и модуле отсутствует.
+
+При передаче сборок третьим лицам Apache-2.0 §4 предусматривает сохранение
+лицензии и применимых уведомлений об авторстве, включая upstream NOTICE при
+его наличии, а MIT и BSD требуют сохранять соответствующие тексты и уведомления.
+Для Nautilus LGPLv3 §4 описывает уведомления, тексты GPL/LGPL и возможность
+использовать изменённую совместимую библиотеку или выполнить требования по
+передаче соответствующих исходников. Публичный комплект таких материалов для
+контейнеров и полный перечень их транзитивных лицензий пока не проверены.
+Совместимость подтверждена для закреплённых версий. Доступ к платным моделям
+и миграция Nautilus на v2 остаются открытыми.
+
+Из корня проекта локальные пины проверяются командами
+`uv --directory services/research run --offline --no-project --python 3.12 python scripts/upstream.py verify`,
+`uv --directory services/research lock --offline --check` и
+`uv --directory services/evaluation lock --offline --check`.
+Go-модули проверяются `go mod verify` в каталогах
+`services/control`, `services/trade-events` и `services/notifications`.
+
 ## Обновление
 
 В PowerShell перейдите в `services/research` из корня проекта.

@@ -1,0 +1,88 @@
+{
+  "$defs": {
+    "CheckpointReceipt": {
+      "additionalProperties": false,
+      "properties": {
+        "benchmark": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PrefixCommitment"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "checkpoint_utc": {
+          "format": "date",
+          "type": "string"
+        },
+        "freeze_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "type": "string"
+        },
+        "nav": {
+          "$ref": "#/$defs/PrefixCommitment"
+        },
+        "operating_costs": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PrefixCommitment"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "previous_receipt_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[a-f0-9]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "schema_version": {
+          "enum": [
+            "0.1"
+          ]
+        }
+      },
+      "required": [
+        "schema_version",
+        "freeze_sha256",
+        "checkpoint_utc",
+        "previous_receipt_sha256",
+        "nav",
+        "benchmark",
+        "operating_costs"
+      ],
+      "title": "CheckpointReceipt",
+      "type": "object"
+    },
+    "PrefixCommitment": {
+      "additionalProperties": false,
+      "properties": {
+        "artifact_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "type": "string"
+        },
+        "prefix_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "artifact_sha256",
+        "prefix_sha256"
+      ],
+      "title": "PrefixCommitment",
+      "type": "object"
+    }
+  },
+  "$ref": "#/$defs/CheckpointReceipt",
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
+}

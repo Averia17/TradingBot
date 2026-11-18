@@ -1,0 +1,165 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Offline quote study 0.1",
+  "oneOf": [{"$ref": "#/$defs/Plan"}, {"$ref": "#/$defs/Archive"}, {"$ref": "#/$defs/Report"}],
+  "$defs": {
+    "ID": {"$ref": "paper-quote-comparison.schema.json#/$defs/ID"},
+    "FixtureID": {"$ref": "paper-quote-comparison.schema.json#/$defs/FixtureID"},
+    "Token": {"$ref": "paper-quote-comparison.schema.json#/$defs/Token"},
+    "Hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "UTC": {"type": "string", "format": "date-time", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$"},
+    "Day": {"type": "string", "format": "date"},
+    "Count": {"type": "integer", "minimum": 0, "maximum": 8192},
+    "Display": {"type": "string", "pattern": "^-?(?:0|[1-9][0-9]*)(?:\\.[0-9]{1,8})?$"},
+    "NullableDisplay": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/Display"}]},
+    "Failure": {"enum": ["no_quote", "expired", "below_minimum", "not_permitted", "unknown_cost", "outage"]},
+    "Cell": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cell_id", "route_id", "underlying_id", "issuer_id", "side", "session", "reference_usd", "wrapper", "settlement"],
+      "properties": {
+        "cell_id": {"$ref": "#/$defs/ID"},
+        "route_id": {"$ref": "#/$defs/FixtureID"},
+        "underlying_id": {"$ref": "#/$defs/FixtureID"},
+        "issuer_id": {"$ref": "#/$defs/FixtureID"},
+        "side": {"enum": ["BUY", "SELL"]},
+        "session": {"enum": ["regular", "extended", "off_hours"]},
+        "reference_usd": {"$ref": "paper-quote-comparison.schema.json#/$defs/Decimal"},
+        "wrapper": {"$ref": "#/$defs/Token"},
+        "settlement": {"$ref": "#/$defs/Token"}
+      }
+    },
+    "Slot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["slot_id", "cell_id", "trading_day", "scheduled_at"],
+      "properties": {
+        "slot_id": {"$ref": "#/$defs/ID"},
+        "cell_id": {"$ref": "#/$defs/ID"},
+        "trading_day": {"$ref": "#/$defs/Day"},
+        "scheduled_at": {"$ref": "#/$defs/UTC"}
+      }
+    },
+    "Plan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "source_mode", "study_id", "min_priced_samples", "min_priced_trading_days", "request_window_ms", "max_age_seconds", "cells", "slots"],
+      "properties": {
+        "schema_version": {"const": "0.1"},
+        "source_mode": {"const": "synthetic_fixture"},
+        "study_id": {"$ref": "#/$defs/ID"},
+        "min_priced_samples": {"type": "integer", "minimum": 1, "maximum": 8192},
+        "min_priced_trading_days": {"type": "integer", "minimum": 1, "maximum": 366},
+        "request_window_ms": {"type": "integer", "minimum": 1, "maximum": 3600000},
+        "max_age_seconds": {"type": "integer", "minimum": 1, "maximum": 3600},
+        "cells": {"type": "array", "minItems": 1, "maxItems": 512, "items": {"$ref": "#/$defs/Cell"}},
+        "slots": {"type": "array", "minItems": 1, "maxItems": 8192, "items": {"$ref": "#/$defs/Slot"}}
+      }
+    },
+    "Observation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["slot_id", "requested_at", "received_at", "status"],
+      "properties": {
+        "slot_id": {"$ref": "#/$defs/ID"},
+        "requested_at": {"$ref": "#/$defs/UTC"},
+        "received_at": {"$ref": "#/$defs/UTC"},
+        "status": {"oneOf": [{"const": "comparison"}, {"$ref": "#/$defs/Failure"}]},
+        "comparison": {
+          "$ref": "paper-quote-comparison.schema.json",
+          "properties": {
+            "as_of": {"$ref": "#/$defs/UTC"},
+            "reference": {"properties": {"observed_at": {"$ref": "#/$defs/UTC"}, "expires_at": {"$ref": "#/$defs/UTC"}}},
+            "quotes": {"maxItems": 1, "items": {"properties": {"observed_at": {"$ref": "#/$defs/UTC"}, "expires_at": {"$ref": "#/$defs/UTC"}}}},
+            "registry": {"properties": {"wrappers": {"items": {"properties": {"available_at": {"$ref": "#/$defs/UTC"}, "effective_at": {"$ref": "#/$defs/UTC"}}}}}}
+          }
+        }
+      },
+      "if": {"properties": {"status": {"const": "comparison"}}},
+      "then": {"required": ["comparison"]},
+      "else": {"not": {"required": ["comparison"]}}
+    },
+    "Archive": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "source_mode", "study_id", "plan_sha256", "observations"],
+      "properties": {
+        "schema_version": {"const": "0.1"},
+        "source_mode": {"const": "synthetic_fixture"},
+        "study_id": {"$ref": "#/$defs/ID"},
+        "plan_sha256": {"$ref": "#/$defs/Hash"},
+        "observations": {"type": "array", "maxItems": 8192, "items": {"$ref": "#/$defs/Observation"}}
+      }
+    },
+    "Percentiles": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["n", "p50", "p95", "p99", "basis"],
+      "properties": {
+        "n": {"$ref": "#/$defs/Count"},
+        "p50": {"$ref": "#/$defs/NullableDisplay"},
+        "p95": {"$ref": "#/$defs/NullableDisplay"},
+        "p99": {"$ref": "#/$defs/NullableDisplay"},
+        "basis": {"enum": ["nearest_rank", "insufficient_samples", "insufficient_trading_days"]}
+      }
+    },
+    "ResultSlot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["slot", "outcome"],
+      "properties": {
+        "slot": {"$ref": "#/$defs/Slot"},
+        "outcome": {"oneOf": [{"enum": ["missing", "priced", "comparison_excluded"]}, {"$ref": "#/$defs/Failure"}]},
+        "requested_at": {"$ref": "#/$defs/UTC"},
+        "received_at": {"$ref": "#/$defs/UTC"},
+        "latency_ms": {"$ref": "#/$defs/Display"},
+        "quote_id": {"$ref": "#/$defs/ID"},
+        "quote_mode": {"enum": ["synthetic_firm", "indicative"]},
+        "quote_observed_at": {"$ref": "#/$defs/UTC"},
+        "quote_expires_at": {"$ref": "#/$defs/UTC"},
+        "quote": {"$ref": "paper-quote-comparison.schema.json#/$defs/ComparedQuote"},
+        "comparison_exclusion": {"$ref": "#/$defs/ID"}
+      }
+    },
+    "CellReport": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cell", "expected", "observed", "priced", "missing", "declared_trading_days", "observed_trading_days", "priced_trading_days", "unsuccessful_observed", "unsuccessful_observed_rate_bps", "outcomes", "comparison_exclusions", "one_way_quote_cost_bps", "latency_ms", "slots"],
+      "properties": {
+        "cell": {"$ref": "#/$defs/Cell"},
+        "expected": {"$ref": "#/$defs/Count"},
+        "observed": {"$ref": "#/$defs/Count"},
+        "priced": {"$ref": "#/$defs/Count"},
+        "missing": {"$ref": "#/$defs/Count"},
+        "declared_trading_days": {"$ref": "#/$defs/Count"},
+        "observed_trading_days": {"$ref": "#/$defs/Count"},
+        "priced_trading_days": {"$ref": "#/$defs/Count"},
+        "unsuccessful_observed": {"$ref": "#/$defs/Count"},
+        "unsuccessful_observed_rate_bps": {"$ref": "#/$defs/NullableDisplay"},
+        "outcomes": {"type": "object", "additionalProperties": {"$ref": "#/$defs/Count"}},
+        "comparison_exclusions": {"type": "object", "additionalProperties": {"$ref": "#/$defs/Count"}},
+        "one_way_quote_cost_bps": {"$ref": "#/$defs/Percentiles"},
+        "latency_ms": {"$ref": "#/$defs/Percentiles"},
+        "slots": {"type": "array", "minItems": 1, "maxItems": 8192, "items": {"$ref": "#/$defs/ResultSlot"}}
+      }
+    },
+    "Report": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "source_mode", "study_id", "scope", "execution_enabled", "market_evidence", "plan_sha256", "observations_sha256", "declared_coverage_complete", "declared_trading_days", "cells"],
+      "properties": {
+        "schema_version": {"const": "0.1"},
+        "source_mode": {"const": "synthetic_fixture"},
+        "study_id": {"$ref": "#/$defs/ID"},
+        "scope": {"const": "simulated_one_way_quote_cost"},
+        "execution_enabled": {"const": false},
+        "market_evidence": {"const": false},
+        "plan_sha256": {"$ref": "#/$defs/Hash"},
+        "observations_sha256": {"$ref": "#/$defs/Hash"},
+        "declared_coverage_complete": {"type": "boolean"},
+        "declared_trading_days": {"$ref": "#/$defs/Count"},
+        "cells": {"type": "array", "minItems": 1, "maxItems": 512, "items": {"$ref": "#/$defs/CellReport"}}
+      }
+    }
+  }
+}

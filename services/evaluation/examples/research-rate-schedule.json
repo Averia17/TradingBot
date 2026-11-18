@@ -1,0 +1,20 @@
+{
+  "schema_version": "0.1",
+  "source_mode": "synthetic_fixture",
+  "currency": "USD",
+  "rates": [
+    {
+      "rate_id": "offline-fixture-usd-2026",
+      "provider": "offline",
+      "model": "scripted-offline-v1",
+      "valid_from": "2026-01-01",
+      "end_exclusive": "2027-01-01",
+      "uncached_input_usd_per_million": "2",
+      "cache_read_usd_per_million": "0.5",
+      "cache_write_usd_per_million": "4",
+      "output_usd_per_million": "10",
+      "reasoning_usd_per_million": "12",
+      "fixed_provider_fee_usd": "0.0001"
+    }
+  ]
+}

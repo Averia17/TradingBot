@@ -16,6 +16,7 @@ from tradingbot_evaluation.replay import (
     MAX_PREFIX_EVENTS,
     MAX_PREFIX_SYMBOLS,
     Ticker,
+    replay_event_count,
 )
 from tradingbot_evaluation.research_replay import (
     _AMOUNT,
@@ -157,13 +158,11 @@ def run_walk_forward(
     tape_hash = _pinned(tape_raw, expected_tape_sha256, "tape")
     tape = _load_tape(tape_raw)
     timeline, splits = _tape_timeline(tape)
-    event_bound = (
-        len(tape.quotes)
-        + len(tape.cash_dividends)
-        + len(tape.stock_splits)
-        + sum(len(step.requested_symbols) for step in plan.steps)
-    )
-    if event_bound > MAX_PREFIX_EVENTS or len(timeline) > MAX_PREFIX_SYMBOLS:
+    event_bound = replay_event_count(tape) + sum(len(step.requested_symbols) for step in plan.steps)
+    if (
+        event_bound > MAX_PREFIX_EVENTS
+        or len({quote.symbol for quote in tape.quotes}) > MAX_PREFIX_SYMBOLS
+    ):
         raise ValueError("Walk-forward tape and planned orders exceed the replay bounds")
 
     records: list[_Record] = []

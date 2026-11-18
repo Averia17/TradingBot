@@ -10,6 +10,7 @@ from tradingbot.adapters import offline
 from tradingbot.budget import CallBudgetExceeded
 from tradingbot.cli import main
 from tradingbot.historical_step import MAX_STEP_BYTES, run_historical_step
+from tradingbot.llm_usage import LLMUsageReport
 
 ROOT = Path(__file__).resolve().parents[3]
 
@@ -78,6 +79,47 @@ def test_budget_is_enforced_by_the_graph(step, tmp_path):
     document["job"]["max_llm_calls"] = 1
     with pytest.raises(CallBudgetExceeded):
         run_historical_step(json.dumps(document).encode(), tmp_path)
+
+
+def test_historical_capture_preserves_graph_result_and_attributes_actual_callbacks(
+    step, tmp_path, monkeypatch, capsys
+):
+    document, _ = step
+    encoded = json.dumps(document).encode()
+    destination = tmp_path / "usage.json"
+    monkeypatch.setattr("tradingbot.cli.sys.stdin", io.TextIOWrapper(io.BytesIO(encoded)))
+    assert (
+        main(
+            ["historical-step", "--archive-root", str(tmp_path), "--usage-output", str(destination)]
+        )
+        == 0
+    )
+    result = json.loads(capsys.readouterr().out)
+    assert result == run_historical_step(encoded, tmp_path)
+    report = LLMUsageReport.model_validate_json(destination.read_bytes())
+    assert report.llm_calls == result["metadata"]["llm_calls"]
+    assert report.capture_status == "complete"
+    assert report.source_mode == "synthetic_fixture"
+    assert [call.role for call in report.calls].count("portfolio_allocator") == 1
+    assert {call.role for call in report.calls} == {"research", "portfolio_allocator"}
+    assert {(call.provider, call.model) for call in report.calls} == {
+        ("offline", "scripted-offline-v1")
+    }
+    assert all(call.usage_source == "unavailable" for call in report.calls)
+    assert all(
+        call.started_at >= datetime.fromisoformat(document["completed_at"]) for call in report.calls
+    )
+
+
+def test_historical_budget_failure_keeps_partial_call_sidecar(step, tmp_path):
+    document, _ = step
+    document["job"]["max_llm_calls"] = 1
+    destination = tmp_path / "partial.json"
+    with pytest.raises(CallBudgetExceeded):
+        run_historical_step(json.dumps(document).encode(), tmp_path, usage_output=destination)
+    report = LLMUsageReport.model_validate_json(destination.read_bytes())
+    assert report.capture_status == "partial"
+    assert report.llm_calls == 1
 
 
 def test_ablation_keeps_the_archive_and_changes_only_selected_graph_inputs(

@@ -1,0 +1,114 @@
+{
+  "$defs": {
+    "ModelRate": {
+      "additionalProperties": false,
+      "properties": {
+        "cache_read_usd_per_million": {
+          "pattern": "^(0|[1-9][0-9]{0,11})(\\.[0-9]{1,8})?$",
+          "type": "string"
+        },
+        "cache_write_usd_per_million": {
+          "pattern": "^(0|[1-9][0-9]{0,11})(\\.[0-9]{1,8})?$",
+          "type": "string"
+        },
+        "end_exclusive": {
+          "format": "date",
+          "type": "string"
+        },
+        "fixed_provider_fee_usd": {
+          "anyOf": [
+            {
+              "pattern": "^(0|[1-9][0-9]{0,11})(\\.[0-9]{1,8})?$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "model": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:/@-]{0,191}$",
+          "type": "string"
+        },
+        "output_usd_per_million": {
+          "pattern": "^(0|[1-9][0-9]{0,11})(\\.[0-9]{1,8})?$",
+          "type": "string"
+        },
+        "provider": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:/@-]{0,191}$",
+          "type": "string"
+        },
+        "rate_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+          "type": "string"
+        },
+        "reasoning_usd_per_million": {
+          "pattern": "^(0|[1-9][0-9]{0,11})(\\.[0-9]{1,8})?$",
+          "type": "string"
+        },
+        "uncached_input_usd_per_million": {
+          "pattern": "^(0|[1-9][0-9]{0,11})(\\.[0-9]{1,8})?$",
+          "type": "string"
+        },
+        "valid_from": {
+          "format": "date",
+          "type": "string"
+        }
+      },
+      "required": [
+        "rate_id",
+        "provider",
+        "model",
+        "valid_from",
+        "end_exclusive",
+        "uncached_input_usd_per_million",
+        "cache_read_usd_per_million",
+        "cache_write_usd_per_million",
+        "output_usd_per_million",
+        "reasoning_usd_per_million",
+        "fixed_provider_fee_usd"
+      ],
+      "title": "ModelRate",
+      "type": "object"
+    },
+    "ResearchRates": {
+      "additionalProperties": false,
+      "properties": {
+        "currency": {
+          "enum": [
+            "USD"
+          ]
+        },
+        "rates": {
+          "items": {
+            "$ref": "#/$defs/ModelRate"
+          },
+          "maxItems": 256,
+          "minItems": 1,
+          "type": "array"
+        },
+        "schema_version": {
+          "enum": [
+            "0.1"
+          ]
+        },
+        "source_mode": {
+          "enum": [
+            "archived_schedule",
+            "synthetic_fixture"
+          ]
+        }
+      },
+      "required": [
+        "schema_version",
+        "source_mode",
+        "currency",
+        "rates"
+      ],
+      "title": "ResearchRates",
+      "type": "object"
+    }
+  },
+  "$ref": "#/$defs/ResearchRates",
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
+}

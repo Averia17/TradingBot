@@ -176,6 +176,50 @@ def check_research_replay(compose, root, job, receipt):
     )
 
 
+def check_research_call_usage(compose, root, job, receipt):
+    exported = compose(
+        "exec", "-T", "control", "research-usage-export", "--job", job["job_id"], capture=True
+    ).encode("utf-8")
+    permits = json.loads(exported)
+    expected = receipt["result"]["metadata"]["llm_calls"]
+    checked(
+        permits["job_id"] == job["job_id"]
+        and permits["job_status"] == "completed"
+        and permits["permit_history_known"]
+        and not permits["legacy_budget_unknown"]
+        and len(permits["permits"]) == expected
+        and all(
+            row["callback_payload"] and row["attempt"] == receipt["attempt"]
+            for row in permits["permits"]
+        ),
+        "packaged worker did not preserve all admitted call observations",
+    )
+    rates = (ROOT / "services/evaluation/examples/research-rate-schedule.json").read_bytes()
+    for name, raw in (("permits.json", exported), ("rates.json", rates)):
+        path = root / name
+        path.write_bytes(raw)
+        path.chmod(0o644)
+    valuation = json.loads(
+        compose(
+            "--profile", "evaluation", "run", "--rm", "--pull", "never",
+            "--volume", f"{root}:/study:ro", "evaluation", "research-costs",
+            "--rates", "/study/rates.json", hashlib.sha256(rates).hexdigest(),
+            "--permit-archive", "/study/permits.json", hashlib.sha256(exported).hexdigest(),
+            capture=True,
+        )
+    )
+    observed = valuation["archives"][0]
+    checked(
+        observed["capture_status"] == "complete"
+        and observed["permit_provenance"]["permits_without_callback"] == 0
+        and observed["permit_provenance"]["permit_count"] == expected
+        and valuation["estimated_cost_usd"] is None
+        and valuation["actual_billed_cost_usd"] is None,
+        "evaluation inferred a cost or lost metered calls",
+    )
+    return expected
+
+
 def reject_incompatible_result(origin):
     job = enqueue(origin, "incompatible")
     lease = request(
@@ -300,9 +344,12 @@ def main():
             ("paper-check", ("--help",)),
             ("paper-nav", ("--help",)),
             ("paper-quote-pin", ("--help",)),
+            ("paper-quote-study", ("--help",)),
             ("paper-thesis-outcome", ("--help",)),
             ("paper-shadow-outcome", ("--help",)),
             ("research-replay-export", ("--help",)),
+            ("research-schedule-coverage", ("--help",)),
+            ("research-usage-export", ("--help",)),
             ("research-budget", ("--help",)),
         ):
             docker(
@@ -318,6 +365,7 @@ def main():
         compose("up", "-d", "--wait", "--wait-timeout", "60", "--no-build", "postgres", "control")
         capabilities = request(origin, "/v1/capabilities", 200)
         checked(capabilities["research_job_call_budget"], "missing durable budget capability")
+        checked(capabilities["research_call_usage"], "missing durable model usage capability")
         checked(
             capabilities["paper_orders"] and not capabilities["execution"],
             "unexpected execution capabilities",
@@ -409,6 +457,9 @@ def main():
                     "paper archive input did not reach the isolated worker",
                 )
                 check_research_replay(compose, archive_root, archive_job, archive_receipt)
+                recorded_calls = check_research_call_usage(
+                    compose, archive_root, archive_job, archive_receipt
+                )
             finally:
                 compose("--profile", "paper", "stop", "paper-research")
         compose("--profile", "evaluation", "run", "--rm", "--pull", "never", "evaluation")
@@ -458,6 +509,7 @@ def main():
                     "evaluation": evaluation,
                     "control_capabilities": capabilities,
                     "paper_profile_archive_job_completed": archive_job["job_id"],
+                    "paper_profile_call_observations": recorded_calls,
                 },
                 indent=2,
             )

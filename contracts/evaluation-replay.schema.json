@@ -39,6 +39,70 @@
       "title": "CashDividend",
       "type": "object"
     },
+    "ExecutionCalendar": {
+      "additionalProperties": false,
+      "properties": {
+        "calendar_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+          "type": "string"
+        },
+        "windows": {
+          "items": {
+            "$ref": "#/$defs/ExecutionWindow"
+          },
+          "maxItems": 2048,
+          "type": "array"
+        }
+      },
+      "required": [
+        "calendar_id",
+        "windows"
+      ],
+      "title": "ExecutionCalendar",
+      "type": "object"
+    },
+    "ExecutionWindow": {
+      "additionalProperties": false,
+      "properties": {
+        "available_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "ends_before": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "record_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+          "type": "string"
+        },
+        "starts_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "closed",
+            "halted",
+            "open"
+          ]
+        },
+        "symbol": {
+          "pattern": "^[A-Z][A-Z0-9.]{0,11}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "record_id",
+        "symbol",
+        "starts_at",
+        "ends_before",
+        "available_at",
+        "status"
+      ],
+      "title": "ExecutionWindow",
+      "type": "object"
+    },
     "Order": {
       "additionalProperties": false,
       "properties": {
@@ -141,6 +205,9 @@
           "maximum": 1000,
           "minimum": 0,
           "type": "integer"
+        },
+        "execution_calendar": {
+          "$ref": "#/$defs/ExecutionCalendar"
         },
         "orders": {
           "items": {

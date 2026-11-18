@@ -133,6 +133,7 @@ func (s *Store) migrate(ctx context.Context) error {
 	migrations := []string{
 		researchJobsMigration, researchLeasesMigration, researchResultsMigration,
 		researchCallBudgetMigration, researchPaperDispatchMigration, researchDailyCallBudgetMigration,
+		researchCalendarMigration, researchCallUsageMigration,
 	}
 	if version < 0 || version > len(migrations) {
 		return fmt.Errorf("unsupported research database schema version %d", version)

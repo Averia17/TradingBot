@@ -32,6 +32,10 @@
     "PaperBenchmark": {
       "additionalProperties": false,
       "properties": {
+        "archive_source_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+          "type": "string"
+        },
         "basis": {
           "enum": [
             "usd_total_return_index"
@@ -66,6 +70,7 @@
         },
         "source_mode": {
           "enum": [
+            "local_archive",
             "synthetic_fixture"
           ]
         }

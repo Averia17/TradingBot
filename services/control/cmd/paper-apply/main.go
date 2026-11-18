@@ -41,7 +41,7 @@ func main() {
 
 func run(ctx context.Context, dsn string, args []string, output io.Writer, clock func() time.Time) error {
 	if len(args) == 0 {
-		return errors.New("use paper-apply snapshot, apply, follow, dispatch, reconcile, review, schedule-entry or schedule-review")
+		return errors.New("use paper-apply snapshot, apply, follow, dispatch, reconcile, refusals, review, schedule-entry or schedule-review")
 	}
 	if args[0] == "schedule-entry" {
 		return scheduleEntry(ctx, dsn, args[1:], output)
@@ -64,6 +64,8 @@ func run(ctx context.Context, dsn string, args []string, output io.Writer, clock
 		return apply(ctx, dsn, args[1:], output, clock)
 	case "reconcile":
 		return reconcile(ctx, dsn, args[1:], output)
+	case "refusals":
+		return refusals(ctx, dsn, args[1:], output)
 	case "review":
 		return review(ctx, dsn, args[1:], output, clock().UTC())
 	default:

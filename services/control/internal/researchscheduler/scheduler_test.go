@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/santhosh-tekuri/jsonschema/v6"
+	"tradingbot/control/internal/contract"
 )
 
 func testSchedule(t *testing.T, at, snapshot time.Time, archive []byte) string {
@@ -193,7 +194,7 @@ func TestScheduleRepeatUsesSameJobAndSkipsOutsideWindow(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]string{"job_id": body.ID})
 	}))
 	defer server.Close()
-	for _, delta := range []time.Duration{-2 * time.Second, -2 * time.Second, 20 * time.Second, -90 * time.Second} {
+	for _, delta := range []time.Duration{-2 * time.Second, -2 * time.Second, 20 * time.Second, -48 * time.Hour} {
 		schedule, err := Load(strings.NewReader(testSchedule(t, now.Add(delta), now.Add(delta-time.Second), archive)))
 		if err != nil {
 			t.Fatal(err)
@@ -206,6 +207,33 @@ func TestScheduleRepeatUsesSameJobAndSkipsOutsideWindow(t *testing.T) {
 	defer mu.Unlock()
 	if len(jobIDs) != 2 || jobIDs[0] == "" || jobIDs[0] != jobIDs[1] {
 		t.Fatalf("want two durable submissions with the same ID, got %v", jobIDs)
+	}
+}
+
+func TestCalendarOccurrenceFixtureMatchesPublishedSchedule(t *testing.T) {
+	const root = "../../../../contracts/"
+	scheduleFile, err := os.Open(root + "valid-research-schedule.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer scheduleFile.Close()
+	schedule, err := Load(scheduleFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(root + "valid-research-calendar-occurrence.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var receipt contract.ResearchCalendarReceipt
+	if err := contract.Decode(raw, contract.ResearchCalendarOccurrenceReceipt, &receipt); err != nil {
+		t.Fatal(err)
+	}
+	if got := schedule.jobs[0]; receipt.JobID != got.ID || receipt.ScheduleID != schedule.id ||
+		!receipt.ScheduledAt.Equal(got.At) || receipt.MaxLatenessSeconds != int(schedule.window/time.Second) ||
+		receipt.RequestSHA256 != fmt.Sprintf("%x", sha256.Sum256(got.Body)) ||
+		receipt.RecordedAt.Before(receipt.Deadline()) {
+		t.Fatalf("calendar occurrence fixture does not match the scheduled request: %+v", receipt)
 	}
 }
 

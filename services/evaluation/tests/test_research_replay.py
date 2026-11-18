@@ -209,6 +209,44 @@ def test_uses_one_native_account_with_strictly_post_completion_quote_and_exact_c
     assert report["research_jobs"][0]["result_sha256"] == enter["result_sha256"]
 
 
+def test_strict_research_replay_sizes_only_from_the_first_reopened_quote():
+    replay_tape = tape(
+        [
+            quote(10, "100.00", "100.00"),
+            quote(13, "25.00", "26.00"),
+            quote(11, "10.00", "11.00", available=16),
+            quote(17, "100.00", "100.00"),
+        ],
+        execution_calendar={
+            "calendar_id": "fixture-research",
+            "windows": [
+                dict(
+                    record_id=record_id,
+                    symbol="TSLA",
+                    starts_at=at(start),
+                    ends_before=at(end),
+                    available_at=at(start),
+                    status=status,
+                )
+                for record_id, start, end, status in (
+                    ("open", 9, 12, "open"),
+                    ("halt", 12, 16, "halted"),
+                    ("reopen", 16, 20, "open"),
+                )
+            ],
+        },
+    )
+    report = run([entry(1, "BUY")], replay_tape, require_snapshot_continuity=True)
+    assert report["snapshot_continuity_verified"] is True
+    assert report["decisions"][0]["execution_quote_available_at"] == at(17)
+    fill = report["fills"][0]
+    assert (fill["price_usd"], fill["quantity"], fill["execution_window_id"]) == (
+        "100.00",
+        "2",
+        "reopen",
+    )
+
+
 def continuous_inputs():
     quotes = tape()["quotes"]
     quotes[-1]["ask_usd"] = "105.00"

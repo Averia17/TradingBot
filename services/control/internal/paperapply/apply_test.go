@@ -48,6 +48,7 @@ func (s *ledgerStub) GetOrder(_ context.Context, _, id string) (ledger.Order, er
 	}
 	return s.order, nil
 }
+func (s *ledgerStub) RecordRiskRefusal(context.Context, ledger.RiskRefusalInput) error { return nil }
 func (s *ledgerStub) Reserve(_ context.Context, req ledger.ReservationRequest) (ledger.Order, bool, error) {
 	s.reserves++
 	if s.order.OrderID == req.OrderID {

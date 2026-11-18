@@ -11,16 +11,18 @@ import msgspec
 
 from tradingbot_evaluation.replay import MAX_INPUT_BYTES, IntentID, _unique_fields
 from tradingbot_evaluation.statistics import (
+    CASH_SERIES,
     SHA256,
     DailyNav,
     EvaluationEvidence,
     EvaluationProtocol,
+    ForwardPaperSource,
     PaperNavProvenance,
     load_evidence,
+    paper_benchmark_access_matches,
     protocol_sha256,
 )
 
-CASH_SERIES = "uninvested-cash"
 ACCOUNT = Annotated[str, msgspec.Meta(pattern=r"^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$")]
 LEDGER_USD = Annotated[str, msgspec.Meta(pattern=r"^(0|[1-9][0-9]{0,29})(\.[0-9]{1,8})?$")]
 NAV_USD = Annotated[str, msgspec.Meta(pattern=r"^(0|[1-9][0-9]*)\.[0-9]{8}$")]
@@ -102,12 +104,22 @@ class BenchmarkLevel(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
 
 class PaperBenchmark(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
     schema_version: Literal["0.1"]
-    source_mode: Literal["synthetic_fixture"]
+    source_mode: Literal["synthetic_fixture", "local_archive"]
     series_id: IntentID
     basis: Literal["usd_total_return_index"]
     modeled_entry_cost_bps: Annotated[int, msgspec.Meta(ge=0, le=9999)]
     max_age_seconds: Annotated[int, msgspec.Meta(ge=1, le=604800)]
     levels: Annotated[tuple[BenchmarkLevel, ...], msgspec.Meta(min_length=2, max_length=366)]
+    archive_source_id: IntentID | msgspec.UnsetType = msgspec.UNSET
+
+
+def load_paper_benchmark(raw: bytes) -> PaperBenchmark:
+    if len(raw) > MAX_INPUT_BYTES:
+        raise ValueError("Paper benchmark source size exceeds the limit")
+    source = msgspec.convert(json.loads(raw, object_pairs_hook=_unique_fields), type=PaperBenchmark)
+    if (source.source_mode == "local_archive") != (source.archive_source_id is not msgspec.UNSET):
+        raise ValueError("Paper benchmark archive identity must match its source mode")
+    return source
 
 
 def _source_snapshot(day: LedgerDay) -> tuple:
@@ -219,7 +231,54 @@ def build_paper_evidence(
     *,
     expected_protocol_sha256: str,
     benchmark_raw: bytes | None = None,
+    forward_source: ForwardPaperSource | None = None,
 ) -> EvaluationEvidence:
+    evidence, _ = _build_paper_evidence(
+        protocol, raw, expected_protocol_sha256, benchmark_raw, forward_source
+    )
+    return evidence
+
+
+def build_paper_evidence_with_cost_diagnostics(
+    protocol: EvaluationProtocol,
+    raw: bytes,
+    *,
+    expected_protocol_sha256: str,
+    benchmark_raw: bytes | None = None,
+    forward_source: ForwardPaperSource | None = None,
+) -> tuple[EvaluationEvidence, dict]:
+    evidence, report = _build_paper_evidence(
+        protocol, raw, expected_protocol_sha256, benchmark_raw, forward_source
+    )
+    daily_nav = []
+    with localcontext() as exact:
+        exact.prec = 100
+        for mark, day in zip(evidence.daily_nav, report.daily_nav, strict=True):
+            net = mark.nav_usd[protocol.comparisons[0].strategy]
+            before_fees = Decimal(net) + Decimal(day.recorded_fees_usd)
+            daily_nav.append(
+                {
+                    "day": mark.day.isoformat(),
+                    "execution_net_nav_usd": net,
+                    "cumulative_recorded_fill_fees_usd": day.recorded_fees_usd,
+                    "nav_before_recorded_execution_fees_usd": format(before_fees, ".8f"),
+                }
+            )
+    return evidence, {
+        "basis": "execution_net_plus_recorded_fill_fees",
+        "assumption": "fixed_recorded_fills_and_end_of_day_marks",
+        "gross_nav": {"status": "unavailable", "reason": "independent_execution_reference_missing"},
+        "daily_nav": daily_nav,
+    }
+
+
+def _build_paper_evidence(
+    protocol: EvaluationProtocol,
+    raw: bytes,
+    expected_protocol_sha256: str,
+    benchmark_raw: bytes | None,
+    forward_source: ForwardPaperSource | None,
+) -> tuple[EvaluationEvidence, PaperNAV]:
     frozen = protocol_sha256(protocol)
     if protocol.schema_version != "0.2" or frozen != expected_protocol_sha256:
         raise ValueError("Paper ledger evidence requires the exact frozen protocol 0.2")
@@ -227,6 +286,8 @@ def build_paper_evidence(
     if protocol.paper_nav_sha256 != digest or len(raw) > MAX_INPUT_BYTES:
         raise ValueError("Frozen paper NAV SHA-256 or report size does not match")
     report = msgspec.convert(json.loads(raw, object_pairs_hook=_unique_fields), type=PaperNAV)
+    if forward_source is not None:
+        _verify_registered_source(report, forward_source, protocol.expected_nav_dates[0])
     if (
         report.status != "complete"
         or tuple(day.day for day in report.daily_nav) != protocol.expected_nav_dates
@@ -243,10 +304,10 @@ def build_paper_evidence(
     if (
         len({row.strategy for row in comparisons}) != 1
         or len(comparisons) != len(benchmarks)
-        or any(row.benchmark_access != "synthetic_fixture" for row in comparisons)
+        or not paper_benchmark_access_matches(protocol)
     ):
         raise ValueError(
-            "Paper ledger evidence requires one strategy and distinct synthetic benchmarks"
+            "Paper ledger evidence requires one strategy and distinct eligible benchmarks"
         )
     baseline = report.initial_funding.cash_usd
     first = report.daily_nav[0]
@@ -261,6 +322,7 @@ def build_paper_evidence(
     ):
         raise ValueError("Paper NAV requires an initial mark before portfolio activity")
     benchmark_values = {}
+    benchmark_archive_source_id = msgspec.UNSET
     if CASH_SERIES in benchmarks:
         benchmark_values[CASH_SERIES] = (baseline,) * len(report.daily_nav)
     if benchmark_pin is msgspec.UNSET:
@@ -273,17 +335,28 @@ def build_paper_evidence(
             or sha256(benchmark_raw).hexdigest() != benchmark_pin
         ):
             raise ValueError("Frozen paper benchmark SHA-256 or source size does not match")
-        source = msgspec.convert(
-            json.loads(benchmark_raw, object_pairs_hook=_unique_fields), type=PaperBenchmark
-        )
-        if (
-            protocol.source_mode != "synthetic_fixture"
-            or source.series_id == CASH_SERIES
-            or benchmarks - {CASH_SERIES} != {source.series_id}
+        source = load_paper_benchmark(benchmark_raw)
+        if (source.source_mode == "synthetic_fixture") != (
+            protocol.source_mode == "synthetic_fixture"
         ):
-            raise ValueError(
-                "Paper benchmark identity differs from the registered synthetic series"
-            )
+            raise ValueError("Paper benchmark source mode differs from the registered protocol")
+        if forward_source is not None:
+            registered = forward_source.benchmark
+            if registered is msgspec.UNSET or (
+                source.series_id,
+                source.modeled_entry_cost_bps,
+                source.max_age_seconds,
+                source.archive_source_id,
+            ) != (
+                registered.series_id,
+                registered.modeled_entry_cost_bps,
+                registered.max_age_seconds,
+                registered.archive_source_id,
+            ):
+                raise ValueError("Paper benchmark does not match its registered settings")
+        if source.series_id == CASH_SERIES or benchmarks - {CASH_SERIES} != {source.series_id}:
+            raise ValueError("Paper benchmark identity differs from the registered noncash series")
+        benchmark_archive_source_id = source.archive_source_id
         benchmark_values[source.series_id] = _benchmark_nav(source, report.daily_nav, baseline)
     rows = []
     previous = None
@@ -311,6 +384,21 @@ def build_paper_evidence(
             paper_nav_sha256=digest,
             account_id=report.account_id,
             paper_benchmark_sha256=benchmark_pin,
+            paper_benchmark_archive_source_id=benchmark_archive_source_id,
         ),
     )
-    return load_evidence(msgspec.json.encode(evidence))
+    return load_evidence(msgspec.json.encode(evidence)), report
+
+
+def _verify_registered_source(
+    report: PaperNAV, source: ForwardPaperSource, first_day: date
+) -> None:
+    if (
+        report.account_id != source.account_id
+        or Decimal(report.initial_funding.cash_usd) != Decimal(source.initial_cash_usd)
+        or report.initial_funding.recorded_at[:10] != first_day.isoformat()
+        or report.valuation_source.kind != source.valuation_source.kind
+        or report.valuation_source.id != source.valuation_source.id
+        or report.mark_max_age_seconds != source.mark_max_age_seconds
+    ):
+        raise ValueError("Paper NAV does not match the registered paper source and initial funding")

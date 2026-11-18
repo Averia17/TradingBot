@@ -1,0 +1,10 @@
+{
+  "schema_version": "0.1",
+  "schedule_id": "fixture-paper-research",
+  "scheduled_at": "2026-11-16T15:00:00Z",
+  "max_lateness_seconds": 120,
+  "request_sha256": "486bb9572ad053bba6f591bb9be3cadca45aaeb7417f7a195984337b0156427c",
+  "job_id": "c4c43ae8-a671-849a-8657-bb0ec203ccc5",
+  "recorded_at": "2026-11-16T15:03:00Z",
+  "status": "missed"
+}

@@ -27,8 +27,9 @@ from tradingbot.adapters.tradingagents import (
     UpstreamCompatibilityError,
     research_config,
 )
-from tradingbot.budget import CallBudget
+from tradingbot.budget import CallBudget, CallBudgetExceeded, capture_usage
 from tradingbot.contracts import Contract, DecisionBatch, IntentProposals, PortfolioSnapshot, Symbol
+from tradingbot.llm_usage import LLMCall
 from tradingbot.paper_memory import (
     PAPER_CONTEXT_BYTES,
     PAPER_CONTEXT_RECORDS,
@@ -77,26 +78,32 @@ class OfflineBudget(CallBudget):
         max_calls: int,
         ensure_active: Callable[[], None],
         authorize_call: Callable[[UUID], None] | None,
+        *,
+        record_call: Callable[[LLMCall], None] | None = None,
     ):
-        super().__init__(max_calls)
+        super().__init__(max_calls, fixed_identity=("offline", MODEL_ID))
+        if record_call is not None and authorize_call is None:
+            raise ValueError("recording model calls requires authorization")
         self.ensure_active = ensure_active
         self.authorize_call = authorize_call
+        self.record_call = record_call
         self._started: set[UUID] = set()
         self._admission = Lock()
-        self._authorization_failed = Event()
+        self._call_path_failed = Event()
 
     def check_active(self):
         self.ensure_active()
-        if self._authorization_failed.is_set():
-            raise OfflineAnalysisCancelled("offline model authorization failed")
+        if self._call_path_failed.is_set():
+            raise OfflineAnalysisCancelled("offline model call authorization or usage recording failed")
 
     def on_chat_model_start(self, serialized, messages, *, run_id, **kwargs):
         with self._admission:
             self.check_active()
             if run_id in self._started:
-                self._authorization_failed.set()
+                self._call_path_failed.set()
                 raise RuntimeError("offline model run ID already authorized")
-            super().on_chat_model_start(serialized, messages, run_id=run_id, **kwargs)
+            if len(self._started) >= self.max_calls:
+                raise CallBudgetExceeded(f"LLM call budget of {self.max_calls} exhausted")
             self._started.add(run_id)
         if self.authorize_call is not None:
             try:
@@ -104,9 +111,22 @@ class OfflineBudget(CallBudget):
             except Exception:
                 # Upstream can retry or fall back after a model error. An
                 # unconfirmed permit invalidates this entire attempt.
-                self._authorization_failed.set()
+                self._call_path_failed.set()
                 raise
         self.check_active()
+        super().on_chat_model_start(serialized, messages, run_id=run_id, **kwargs)
+
+    def _finish(
+        self, run_id: UUID, status: Literal["completed", "failed"], response
+    ) -> LLMCall | None:
+        call = super()._finish(run_id, status, response)
+        if call is not None and self.record_call is not None:
+            try:
+                self.record_call(call)
+            except Exception:
+                self._call_path_failed.set()
+                raise
+        return call
 
 
 class ScriptedModel(SimpleChatModel):
@@ -278,13 +298,17 @@ def analyze_offline(
     cancelled: Event,
     *,
     authorize_call: Callable[[UUID], None] | None = None,
+    record_call: Callable[[LLMCall], None] | None = None,
     archive_root: Path | None = None,
 ) -> dict:
     """Analyze a leased job once, returning a research result v0.2 for Control."""
     if type(attempt) is not int or not 1 <= attempt <= 3 or attempt_deadline.utcoffset() is None:
         raise ValueError("invalid offline attempt identity or deadline")
 
-    return _analyze_offline(request, attempt, attempt_deadline, cancelled, authorize_call, archive_root)
+    return _analyze_offline(
+        request, attempt, attempt_deadline, cancelled, authorize_call, archive_root,
+        record_call=record_call,
+    )
 
 
 def analyze_historical(
@@ -293,6 +317,7 @@ def analyze_historical(
     archive_root: Path,
     *,
     variant: HistoricalVariant = "full_graph",
+    usage_output: Path | None = None,
 ) -> dict:
     """Use the pinned graph for a synthetic historical step with a simulated clock."""
     now = datetime.now(UTC)
@@ -303,6 +328,7 @@ def analyze_historical(
         job, 1, now + HISTORICAL_STEP_TIMEOUT, Event(), None, archive_root,
         historical_completed_at=completed_at,
         historical_variant=variant,
+        usage_output=usage_output,
     )
 
 
@@ -341,8 +367,10 @@ def _analyze_offline(
     authorize_call: Callable[[UUID], None] | None,
     archive_root: Path | None,
     *,
+    record_call: Callable[[LLMCall], None] | None = None,
     historical_completed_at: datetime | None = None,
     historical_variant: HistoricalVariant = "full_graph",
+    usage_output: Path | None = None,
 ) -> dict:
     historical = historical_completed_at is not None
     analysts = ("market",) if historical_variant == "single_analyst" else ANALYSTS
@@ -382,7 +410,7 @@ def _analyze_offline(
         ensure_active()
     upstream_version, upstream_sha = _verified_upstream()
     ensure_active()
-    budget = OfflineBudget(job.max_llm_calls, ensure_active, authorize_call)
+    budget = OfflineBudget(job.max_llm_calls, ensure_active, authorize_call, record_call=record_call)
     model = ScriptedModel(
         symbols=tuple(symbols),
         ensure_active=budget.check_active,
@@ -390,7 +418,11 @@ def _analyze_offline(
         cache=False,
         report_text=SCRIPTED_ARCHIVE_REPORT if archive_contexts else SCRIPTED_REPORT,
     )
-    with TemporaryDirectory(prefix="tradingbot-offline-") as directory, tracing_context(enabled=False):
+    with (
+        capture_usage(usage_output, budget, "synthetic_fixture"),
+        TemporaryDirectory(prefix="tradingbot-offline-") as directory,
+        tracing_context(enabled=False),
+    ):
         config = research_config(
             Path(directory),
             {
@@ -428,16 +460,21 @@ def _analyze_offline(
             json.dumps({"config": stable_config, "analysts": analysts}, sort_keys=True).encode()
         ).hexdigest()
         graph = _offline_graph(config, model, budget, archive_contexts, memory_contexts, analysts)
-        reports = collect_reports(
-            TradingAgentsAdapter(graph), symbols, job.portfolio.as_of.date().isoformat(), job.portfolio
-        )
+        with budget.role("research"):
+            reports = collect_reports(
+                TradingAgentsAdapter(graph),
+                symbols,
+                job.portfolio.as_of.date().isoformat(),
+                job.portfolio,
+            )
         for symbol, context in archive_contexts.items():
             market = reports[symbol].get("market_report")
             reports[symbol]["market_report"] = f"{market}\n\n{context}" if market else context
         for symbol, context in memory_contexts.items():
             reports[symbol]["final_trade_decision"] += f"\n\n{context}"
         budget.check_active()
-        decision = create_decisions(model, reports, job.portfolio)
+        with budget.role("portfolio_allocator"):
+            decision = create_decisions(model, reports, job.portfolio)
         budget.check_active()
         if historical_completed_at is None:
             batch = DecisionBatch.model_validate(

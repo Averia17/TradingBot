@@ -37,13 +37,39 @@ func queueInput(t *testing.T, number int, asOf time.Time) CreateJob {
 	return input
 }
 
-func queueJob(t *testing.T, ctx context.Context, store *Store, number int, asOf time.Time) CreateJob {
+func databaseNow(t *testing.T, ctx context.Context, db interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}) time.Time {
 	t.Helper()
-	input := queueInput(t, number, asOf)
+	var now time.Time
+	if err := db.QueryRow(ctx, "SELECT clock_timestamp()").Scan(&now); err != nil {
+		t.Fatal(err)
+	}
+	return now
+}
+
+func queueJob(t *testing.T, ctx context.Context, store *Store, number int, snapshotOffset time.Duration) CreateJob {
+	t.Helper()
+	input := queueInput(t, number, databaseNow(t, ctx, store.pool).Add(snapshotOffset))
 	if _, created, err := store.Create(ctx, input, nil); err != nil || !created {
 		t.Fatalf("queue job = %t, %v", created, err)
 	}
 	return input
+}
+
+func TestClaimKeepsFutureSnapshotQueued(t *testing.T) {
+	ctx, dsn, db := testDatabase(t)
+	store := openTestStore(t, ctx, dsn)
+	input := queueJob(t, ctx, store, 1, time.Minute)
+	if _, err := store.Claim(ctx, "worker", testIdentity(100), testSnapshotWindow); !errors.Is(err, ErrNoJob) {
+		t.Fatalf("claim future snapshot: %v", err)
+	}
+	var status string
+	var attempts int
+	if err := db.QueryRow(ctx, "SELECT status, attempt_count FROM research_jobs WHERE id=$1", input.ID).Scan(&status, &attempts); err != nil ||
+		status != "queued" || attempts != 0 {
+		t.Fatalf("future snapshot state = %s/%d, %v", status, attempts, err)
+	}
 }
 
 func forceAttemptTimes(t *testing.T, ctx context.Context, db *pgx.Conn, token string, ttl, deadline time.Duration) {
@@ -64,7 +90,7 @@ func TestClaimMigratesExistingJobAndReplaysAfterReconnect(t *testing.T) {
 		INSERT INTO research_schema_migrations (version) VALUES (1)`); err != nil {
 		t.Fatal(err)
 	}
-	input := queueInput(t, 1, time.Now())
+	input := queueInput(t, 1, databaseNow(t, ctx, inspection))
 	if _, err := inspection.Exec(ctx, `INSERT INTO research_snapshots (id, payload, payload_sha256) VALUES ($1, $2, sha256($2));
 		INSERT INTO research_jobs (id, snapshot_id, request, request_sha256) VALUES ($3, $1, $4, sha256($4))`,
 		pgx.QueryExecModeSimpleProtocol, input.SnapshotID, []byte(input.Snapshot), input.ID, []byte(input.Request)); err != nil {
@@ -91,7 +117,7 @@ func TestClaimMigratesExistingJobAndReplaysAfterReconnect(t *testing.T) {
 func TestConcurrentWorkersAndClaimRetriesHaveOneAttempt(t *testing.T) {
 	ctx, dsn, inspection := testDatabase(t)
 	store := openTestStore(t, ctx, dsn)
-	input := queueJob(t, ctx, store, 1, time.Now())
+	input := queueJob(t, ctx, store, 1, 0)
 	type observation struct {
 		lease Lease
 		err   error
@@ -135,7 +161,7 @@ func TestConcurrentWorkersAndClaimRetriesHaveOneAttempt(t *testing.T) {
 func TestLeaseHeartbeatRejectsStaleWorkerAndStopsAtDeadline(t *testing.T) {
 	ctx, dsn, inspection := testDatabase(t)
 	store := openTestStore(t, ctx, dsn)
-	input := queueJob(t, ctx, store, 1, time.Now())
+	input := queueJob(t, ctx, store, 1, 0)
 	claimID := testIdentity(202)
 	first, err := store.Claim(ctx, "worker-1", claimID, testSnapshotWindow)
 	if err != nil {
@@ -171,7 +197,7 @@ func TestLeaseHeartbeatRejectsStaleWorkerAndStopsAtDeadline(t *testing.T) {
 func TestClaimRechecksLeaseAfterLockingAnExpiredCandidate(t *testing.T) {
 	ctx, dsn, inspection := testDatabase(t)
 	store := openTestStore(t, ctx, dsn)
-	input := queueJob(t, ctx, store, 1, time.Now())
+	input := queueJob(t, ctx, store, 1, 0)
 	first, err := store.Claim(ctx, "worker-1", testIdentity(205), testSnapshotWindow)
 	if err != nil {
 		t.Fatal(err)
@@ -208,8 +234,8 @@ func TestExhaustedAndStaleJobsStayTerminal(t *testing.T) {
 	if _, err := store.Claim(ctx, "worker", claimID, testSnapshotWindow); !errors.Is(err, ErrNoJob) {
 		t.Fatalf("empty claim = %v", err)
 	}
-	stale := queueJob(t, ctx, store, 1, time.Now().Add(-2*time.Hour))
-	eligible := queueJob(t, ctx, store, 2, time.Now())
+	stale := queueJob(t, ctx, store, 1, -2*time.Hour)
+	eligible := queueJob(t, ctx, store, 2, 0)
 	for attempt := 1; attempt <= 3; attempt++ {
 		lease, err := store.Claim(ctx, "worker", claimID, testSnapshotWindow)
 		if err != nil || lease.Job.ID != eligible.ID || lease.Attempt != attempt {
@@ -240,7 +266,7 @@ func TestClaimRefusesCorruptStoredInputs(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			ctx, dsn, inspection := testDatabase(t)
 			store := openTestStore(t, ctx, dsn)
-			input := queueJob(t, ctx, store, 1, time.Now())
+			input := queueJob(t, ctx, store, 1, 0)
 			if _, err := inspection.Exec(ctx, test.sql); err != nil {
 				t.Fatal(err)
 			}

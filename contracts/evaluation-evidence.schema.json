@@ -217,6 +217,10 @@
             "paper_ledger_export"
           ]
         },
+        "paper_benchmark_archive_source_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+          "type": "string"
+        },
         "paper_benchmark_sha256": {
           "pattern": "^[a-f0-9]{64}$",
           "type": "string"

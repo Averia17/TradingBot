@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -108,6 +109,83 @@ func TestPaperNavReadsVersionedPostgresHistoryWithoutMigrations(t *testing.T) {
 	var replay bytes.Buffer
 	if err := run(ctx, dsn, args, &replay); !errors.Is(err, errIncomplete) || !bytes.Equal(firstRun.Bytes(), replay.Bytes()) {
 		t.Fatalf("later history changed the report for closed cutoffs: %v", err)
+	}
+
+	verify := func(t *testing.T, args []string, archived []byte, output io.Writer) error {
+		t.Helper()
+		filename := filepath.Join(t.TempDir(), "archive.json")
+		if err := os.WriteFile(filename, archived, 0600); err != nil {
+			t.Fatal(err)
+		}
+		pin := sha256.Sum256(archived)
+		return run(ctx, dsn, append(args, "--verify-report", filename, "--report-sha256", hex.EncodeToString(pin[:])), output)
+	}
+	t.Run("incomplete archive keeps its exit status and canonical bytes", func(t *testing.T) {
+		var indented, reproduced bytes.Buffer
+		if err := json.Indent(&indented, firstRun.Bytes(), "", "  "); err != nil {
+			t.Fatal(err)
+		}
+		if err := verify(t, args, indented.Bytes(), &reproduced); !errors.Is(err, errIncomplete) || !bytes.Equal(firstRun.Bytes(), reproduced.Bytes()) {
+			t.Fatalf("verified incomplete archive: %v", err)
+		}
+	})
+	t.Run("complete archive is rebuilt from the ledger", func(t *testing.T) {
+		req.EndDay = "2020-01-02"
+		bounded, err := json.Marshal(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		filename := filepath.Join(t.TempDir(), "complete-input.json")
+		if err := os.WriteFile(filename, bounded, 0600); err != nil {
+			t.Fatal(err)
+		}
+		pin := sha256.Sum256(bounded)
+		completeArgs := []string{"--input", filename, "--sha256", hex.EncodeToString(pin[:])}
+		var archived, reproduced bytes.Buffer
+		if err := run(ctx, dsn, completeArgs, &archived); err != nil {
+			t.Fatal(err)
+		}
+		if err := verify(t, completeArgs, archived.Bytes(), &reproduced); err != nil || !bytes.Equal(archived.Bytes(), reproduced.Bytes()) {
+			t.Fatalf("verified complete archive: %v", err)
+		}
+	})
+	t.Run("re-pinned cash ledger hashes and nanosecond cutoffs must still match", func(t *testing.T) {
+		alteredCash := bytes.ReplaceAll(firstRun.Bytes(), []byte(`"949.97999999"`), []byte(`"950.97999999"`))
+		alteredCash = bytes.ReplaceAll(alteredCash, []byte(`"1013.98000015"`), []byte(`"1014.98000015"`))
+		alteredHash := bytes.ReplaceAll(firstRun.Bytes(), []byte(settled.LedgerSHA256), []byte(strings.Repeat("f", 64)))
+		alteredCutoff := bytes.ReplaceAll(firstRun.Bytes(), []byte("23:59:59.999999999Z"), []byte("23:59:59.999999998Z"))
+		subNanosecond := bytes.ReplaceAll(firstRun.Bytes(), []byte("23:59:59.999999999Z"), []byte("23:59:59.9999999999Z"))
+		for _, altered := range [][]byte{alteredCash, alteredHash, alteredCutoff, subNanosecond} {
+			var reproduced bytes.Buffer
+			if err := verify(t, args, altered, &reproduced); err == nil || !strings.Contains(err.Error(), "does not match") || reproduced.Len() != 0 {
+				t.Fatalf("altered archive reached stdout or was misclassified: %v", err)
+			}
+		}
+	})
+	t.Run("duplicate fields are invalid even when pinned", func(t *testing.T) {
+		duplicated := bytes.Replace(firstRun.Bytes(), []byte(`"status":"incomplete"`), []byte(`"status":"incomplete","status":"incomplete"`), 1)
+		var reproduced bytes.Buffer
+		if err := verify(t, args, duplicated, &reproduced); err == nil || !strings.Contains(err.Error(), "report schema") || reproduced.Len() != 0 {
+			t.Fatalf("duplicate field reached stdout or was misclassified: %v", err)
+		}
+	})
+}
+
+func TestPaperNAVReportPinIsRequiredBeforeReadingLedger(t *testing.T) {
+	input := "../../../../contracts/valid-paper-nav-input.json"
+	raw, err := os.ReadFile(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inputSHA := sha256.Sum256(raw)
+	args := []string{"--input", input, "--sha256", hex.EncodeToString(inputSHA[:]), "--verify-report", input}
+	var output bytes.Buffer
+	if err := run(t.Context(), "invalid DSN", args, &output); err == nil || !strings.Contains(err.Error(), "together") {
+		t.Fatalf("missing report pin: %v", err)
+	}
+	err = run(t.Context(), "invalid DSN", append(args, "--report-sha256", strings.Repeat("0", 64)), &output)
+	if err == nil || !strings.Contains(err.Error(), "report SHA-256 mismatch") || output.Len() != 0 {
+		t.Fatalf("report not rejected before reading the ledger: %v", err)
 	}
 }
 

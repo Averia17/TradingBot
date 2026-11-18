@@ -12,6 +12,7 @@ from tradingbot_evaluation.replay import (
     Replay,
     _nanoseconds,
     _SplitUnits,
+    executable_quotes,
     replay_sha256,
     run_replay,
 )
@@ -200,6 +201,7 @@ def run_benchmarks(
     by_symbol = defaultdict(list)
     for quote in replay.quotes:
         by_symbol[quote.symbol].append(quote)
+    for quote in executable_quotes(replay):
         if quote.available_at > start_at or not split_units.quote_is_current(quote, start_at):
             continue
         latest = formation.get(quote.symbol)
@@ -277,6 +279,11 @@ def run_benchmarks(
                 for action in replay.stock_splits
             ),
             "raw_share_step_at_formation": share_steps,
+            **(
+                {"execution_calendar_id": replay.execution_calendar.calendar_id}
+                if replay.execution_calendar is not msgspec.UNSET
+                else {}
+            ),
         },
         "benchmarks": benchmarks,
     }

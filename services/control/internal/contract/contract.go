@@ -76,13 +76,27 @@ type Portfolio struct {
 	Positions   []Position `json:"positions"`
 }
 
-func compile(data []byte, reference string) *jsonschema.Schema {
+type schemaResource struct {
+	url  string
+	data []byte
+}
+
+func compile(data []byte, reference string, linked ...schemaResource) *jsonschema.Schema {
 	v, err := jsonschema.UnmarshalJSON(bytes.NewReader(data))
 	if err != nil {
 		panic(err)
 	}
 	c := jsonschema.NewCompiler()
 	c.AssertFormat()
+	for _, resource := range linked {
+		value, err := jsonschema.UnmarshalJSON(bytes.NewReader(resource.data))
+		if err != nil {
+			panic(err)
+		}
+		if err := c.AddResource(resource.url, value); err != nil {
+			panic(err)
+		}
+	}
 	if err = c.AddResource("https://tradingbot.local/schema", v); err != nil {
 		panic(err)
 	}

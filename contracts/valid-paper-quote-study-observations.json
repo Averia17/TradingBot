@@ -1,0 +1,260 @@
+{
+  "schema_version": "0.1",
+  "source_mode": "synthetic_fixture",
+  "study_id": "fixture-two-days",
+  "plan_sha256": "b22a21f27d36ca1350e900ffd49d7fe903324fef68763a273b974f4592d64df6",
+  "observations": [
+    {
+      "slot_id": "sample-1",
+      "requested_at": "2026-10-02T13:30:00Z",
+      "received_at": "2026-10-02T13:30:05Z",
+      "status": "comparison",
+      "comparison": {
+        "schema_version": "0.1",
+        "source_mode": "synthetic_fixture",
+        "as_of": "2026-10-02T13:30:05Z",
+        "market": {
+          "underlying_id": "fixture:TSLA",
+          "chain": "fixture:chain-a",
+          "side": "BUY",
+          "target_shares": "1.25",
+          "max_age_seconds": 30,
+          "allowed_issuers": [
+            "fixture:issuer-a",
+            "fixture:issuer-b"
+          ]
+        },
+        "registry": {
+          "snapshot_version": "fixture-registry-v1",
+          "wrappers": [
+            {
+              "token": {
+                "chain": "fixture:chain-a",
+                "mint": "fixture:TSLAx",
+                "program": "fixture:token-program-a",
+                "decimals": 6
+              },
+              "underlying_id": "fixture:TSLA",
+              "issuer_id": "fixture:issuer-a",
+              "revision": "tslax-r1",
+              "available_at": "2026-09-30T13:30:00Z",
+              "effective_at": "2026-10-01T13:30:00Z",
+              "shares_per_token": {
+                "numerator": "1",
+                "denominator": "1"
+              }
+            },
+            {
+              "token": {
+                "chain": "fixture:chain-a",
+                "mint": "fixture:TSLAon",
+                "program": "fixture:token-program-b",
+                "decimals": 8
+              },
+              "underlying_id": "fixture:TSLA",
+              "issuer_id": "fixture:issuer-b",
+              "revision": "tslaon-r1",
+              "available_at": "2026-09-30T13:30:00Z",
+              "effective_at": "2026-10-01T13:30:00Z",
+              "shares_per_token": {
+                "numerator": "5",
+                "denominator": "2"
+              }
+            }
+          ]
+        },
+        "reference": {
+          "observed_at": "2026-10-02T13:30:00Z",
+          "expires_at": "2026-10-02T13:30:30Z",
+          "usd_per_share": "80",
+          "settlements": [
+            {
+              "token": {
+                "chain": "fixture:chain-a",
+                "mint": "fixture:USDC",
+                "program": "fixture:token-program-a",
+                "decimals": 6
+              },
+              "usd_per_token": "1"
+            },
+            {
+              "token": {
+                "chain": "fixture:chain-a",
+                "mint": "fixture:USDon",
+                "program": "fixture:token-program-b",
+                "decimals": 8
+              },
+              "usd_per_token": "1.03"
+            }
+          ]
+        },
+        "quotes": [
+          {
+            "id": "sample-1",
+            "mode": "synthetic_firm",
+            "side": "BUY",
+            "wrapper": {
+              "chain": "fixture:chain-a",
+              "mint": "fixture:TSLAx",
+              "program": "fixture:token-program-a",
+              "decimals": 6
+            },
+            "registry_revision": "tslax-r1",
+            "settlement": {
+              "chain": "fixture:chain-a",
+              "mint": "fixture:USDC",
+              "program": "fixture:token-program-a",
+              "decimals": 6
+            },
+            "input_raw": "100000000",
+            "expected_output_raw": "1251000",
+            "min_output_raw": "1250000",
+            "observed_at": "2026-10-02T13:30:01Z",
+            "expires_at": "2026-10-02T13:30:12Z",
+            "fees": [
+              {
+                "id": "venue-fee",
+                "treatment": "embedded",
+                "amount_usd": "1"
+              },
+              {
+                "id": "network-fee",
+                "treatment": "additional",
+                "amount_usd": "0.25"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "slot_id": "sample-2",
+      "requested_at": "2026-10-05T13:30:00Z",
+      "received_at": "2026-10-05T13:30:05Z",
+      "status": "comparison",
+      "comparison": {
+        "schema_version": "0.1",
+        "source_mode": "synthetic_fixture",
+        "as_of": "2026-10-05T13:30:05Z",
+        "market": {
+          "underlying_id": "fixture:TSLA",
+          "chain": "fixture:chain-a",
+          "side": "BUY",
+          "target_shares": "1.25",
+          "max_age_seconds": 30,
+          "allowed_issuers": [
+            "fixture:issuer-a",
+            "fixture:issuer-b"
+          ]
+        },
+        "registry": {
+          "snapshot_version": "fixture-registry-v1",
+          "wrappers": [
+            {
+              "token": {
+                "chain": "fixture:chain-a",
+                "mint": "fixture:TSLAx",
+                "program": "fixture:token-program-a",
+                "decimals": 6
+              },
+              "underlying_id": "fixture:TSLA",
+              "issuer_id": "fixture:issuer-a",
+              "revision": "tslax-r1",
+              "available_at": "2026-09-30T13:30:00Z",
+              "effective_at": "2026-10-01T13:30:00Z",
+              "shares_per_token": {
+                "numerator": "1",
+                "denominator": "1"
+              }
+            },
+            {
+              "token": {
+                "chain": "fixture:chain-a",
+                "mint": "fixture:TSLAon",
+                "program": "fixture:token-program-b",
+                "decimals": 8
+              },
+              "underlying_id": "fixture:TSLA",
+              "issuer_id": "fixture:issuer-b",
+              "revision": "tslaon-r1",
+              "available_at": "2026-09-30T13:30:00Z",
+              "effective_at": "2026-10-01T13:30:00Z",
+              "shares_per_token": {
+                "numerator": "5",
+                "denominator": "2"
+              }
+            }
+          ]
+        },
+        "reference": {
+          "observed_at": "2026-10-05T13:30:00Z",
+          "expires_at": "2026-10-05T13:30:30Z",
+          "usd_per_share": "80",
+          "settlements": [
+            {
+              "token": {
+                "chain": "fixture:chain-a",
+                "mint": "fixture:USDC",
+                "program": "fixture:token-program-a",
+                "decimals": 6
+              },
+              "usd_per_token": "1"
+            },
+            {
+              "token": {
+                "chain": "fixture:chain-a",
+                "mint": "fixture:USDon",
+                "program": "fixture:token-program-b",
+                "decimals": 8
+              },
+              "usd_per_token": "1.03"
+            }
+          ]
+        },
+        "quotes": [
+          {
+            "id": "sample-2",
+            "mode": "synthetic_firm",
+            "side": "BUY",
+            "wrapper": {
+              "chain": "fixture:chain-a",
+              "mint": "fixture:TSLAx",
+              "program": "fixture:token-program-a",
+              "decimals": 6
+            },
+            "registry_revision": "tslax-r1",
+            "settlement": {
+              "chain": "fixture:chain-a",
+              "mint": "fixture:USDC",
+              "program": "fixture:token-program-a",
+              "decimals": 6
+            },
+            "input_raw": "100000000",
+            "expected_output_raw": "1251000",
+            "min_output_raw": "1250000",
+            "observed_at": "2026-10-05T13:30:01Z",
+            "expires_at": "2026-10-05T13:30:12Z",
+            "fees": [
+              {
+                "id": "venue-fee",
+                "treatment": "embedded",
+                "amount_usd": "1"
+              },
+              {
+                "id": "network-fee",
+                "treatment": "additional",
+                "amount_usd": "0.32"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "slot_id": "sample-3",
+      "requested_at": "2026-10-05T14:00:00Z",
+      "received_at": "2026-10-05T14:00:05Z",
+      "status": "below_minimum"
+    }
+  ]
+}

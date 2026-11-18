@@ -340,6 +340,26 @@ go -C services/control run ./cmd/paper-quote-pin --job $jobId --tape $tapePath -
 go -C services/control run ./cmd/paper-quote-compare --input ../../contracts/valid-paper-quote-comparison.json
 ```
 
+Для серии наблюдений `paper-quote-study` сверяет два хеша. План задаёт
+слоты по инструменту, маршруту, стороне, размеру и сессии. Файл наблюдений
+записывает полученный ответ или причину отказа. Отчёт отдельно показывает
+пропущенные слоты и ответы, которые удалось оценить.
+
+```powershell
+$plan = (Resolve-Path contracts/valid-paper-quote-study-plan.json).Path
+$observations = (Resolve-Path contracts/valid-paper-quote-study-observations.json).Path
+$planPin = (Get-FileHash $plan).Hash.ToLowerInvariant()
+$observationsPin = (Get-FileHash $observations).Hash.ToLowerInvariant()
+go -C services/control run ./cmd/paper-quote-study --plan $plan --plan-sha256 $planPin --observations $observations --observations-sha256 $observationsPin
+```
+
+Для каждого набора расчёт требует заранее заданного покрытия и
+статистического минимума. P50, P95 и P99 требуют соответственно 2, 20
+и 100 наблюдений. Отчёт применяет метод ближайшего ранга к стоимости
+котировки в одну сторону и задержке. Пример использует синтетические
+значения. Сведения о реальных котировках, расходах и доступе потребуют
+отдельных подтверждений. [Схема исследования](contracts/paper-quote-study.schema.json).
+
 Для заявки `UNKNOWN` или остатка после частичного исполнения
 `paper-apply reconcile` принимает отдельное локальное наблюдение симулятора,
 привязанное к исходной заявке и котировке. [Процедура сверки](docs/runbooks/paper.md#сверка-зависшей-виртуальной-заявки).
@@ -450,6 +470,33 @@ go -C services/control run ./cmd/paper-shadow-outcome --input $shadowInput --sha
 расписания, источнику и ID записи, даже если время запуска отредактировали.
 [Пример событийного расписания](contracts/valid-research-event-schedule.json).
 
+При запуске после пропуска Go сохраняет в PostgreSQL наблюдение о явно
+заданном календарном окне, закрытом не более 24 часов назад. Для проверки
+возьмите `job_id` из лога планировщика и прочитайте запись через Control.
+
+```powershell
+Invoke-RestMethod "http://127.0.0.1:18080/v1/research/schedule-occurrences/$researchJobId"
+```
+
+Статус `missed` означает отсутствие задания с этим ID на момент чтения.
+`job_recorded` возвращает время сохранённого задания с тем же хешем запроса.
+`job_conflict` показывает занятой ID с другим хешем. Повтор сохраняет время
+первого наблюдения. Это ограниченный журнал календарной конфигурации и
+закрытых окон, встреченных планировщиком. Архивные катализаторы в него не входят.
+[Схема](contracts/research-calendar-occurrence.schema.json) · [Пример записи](contracts/valid-research-calendar-occurrence.json).
+
+Для просмотра целого календаря сохраните исходный файл расписания и его
+SHA-256. `research-schedule-coverage` читает PostgreSQL одним снимком и
+группирует заявленные окна по UTC. По каждому окну видны время поступления
+задания, число попыток, разрешения и записанные ответы. У закрытого окна
+отдельно показаны зарегистрированный пропуск, отсутствие сведений и
+конфликт сохранённого запроса. Пустые дни и событийные задания находятся
+вне отчёта. [Схема покрытия](contracts/research-schedule-coverage.schema.json).
+
+```powershell
+go -C services/control run ./cmd/research-schedule-coverage --config $schedulePath --sha256 $scheduleHash
+```
+
 Независимый Nautilus replay читает подготовленные тестовые котировки и заявки.
 Денежные дивиденды учитываются по времени права и выплаты. Сплиты и обратные
 сплиты меняют количество на границе события, сохраняя исходные цены сделок.
@@ -464,6 +511,18 @@ uv --directory services/evaluation run --frozen tradingbot-evaluation replay exa
 uv --directory services/evaluation run --frozen tradingbot-evaluation benchmarks examples/quote-replay.json --start-at 2026-10-02T13:30:10Z --buy-and-hold-symbol TSLA
 uv --directory services/evaluation run --frozen tradingbot-evaluation benchmarks examples/quote-replay.json --start-at 2026-10-02T13:30:10Z --buy-and-hold-symbol TSLA --trend-symbol TSLA --trend-lookback-quotes 1 --trend-max-gap-seconds 60
 ```
+
+Для проверки сессий включите `execution_calendar` в синтетическую ленту
+до расчёта её хеша. Для каждого тикера укажите непересекающиеся окна
+`open`, `closed` или `halted`, ID записи, начало, исключённую верхнюю
+границу и время доступности этой записи. Время наблюдения и поступления
+котировки должно попасть в одно открытое окно, уже известное к моменту
+поступления. Следующее окно требует нового наблюдения. Просроченная
+заявка истекает по своему сроку. Одни и те же окна применяются к
+исполнению, оценке позиций и бенчмаркам. Отчёт показывает причины
+пропуска котировок и ID окон исполнений и оценок. Доступность реальной
+площадки требует отдельной проверки.
+[Вход календарного прогона](contracts/valid-evaluation-replay-calendar.json) · [Схема](contracts/evaluation-replay.schema.json).
 
 Для прогона сохранённых решений экспортируйте завершённые research jobs из
 PostgreSQL. `research-replay` принимает хеши экспорта и отдельной синтетической
@@ -566,6 +625,118 @@ uv --directory services/evaluation run --offline --frozen tradingbot-evaluation 
 
 [Пример локального плана](contracts/valid-forward-plan.json) · [Схема фиксации](contracts/forward-freeze.schema.json).
 
+В forward paper до начала запишите в `paper_forward_source` ID счёта,
+стартовый капитал, источник и допустимый возраст цен, контрольные даты UTC,
+порог просадки и настройки дополнительного эталона, если он есть. Календарь
+охватывает все сутки. Хеши конкретных выгрузок сохраняются отдельно при
+подготовке отчёта за контрольный период. Следующий пример использует
+синтетический ряд и тот же `valid-forward-plan.json`.
+
+```powershell
+$workspace = (Get-Location).Path
+$forwardPlan = (Resolve-Path contracts/valid-forward-plan.json).Path
+$trialDir = Join-Path ([IO.Path]::GetTempPath()) ('tradingbot-forward-' + [guid]::NewGuid())
+[void][IO.Directory]::CreateDirectory($trialDir)
+$protocolPath = Join-Path $trialDir 'protocol.json'
+$freezePath = Join-Path $trialDir 'freeze.json'
+$config = uv --directory services/evaluation run --offline --frozen tradingbot-evaluation forward-config-sha256 $forwardPlan --root $workspace | ConvertFrom-Json
+$protocol = Get-Content -Raw services/evaluation/examples/forward-paper-protocol.json | ConvertFrom-Json
+$protocol.configuration_sha256 = $config.configuration_sha256
+[IO.File]::WriteAllText($protocolPath, ($protocol | ConvertTo-Json -Depth 20))
+$freezeJson = uv --directory services/evaluation run --offline --frozen tradingbot-evaluation freeze-forward $forwardPlan $protocolPath --root $workspace
+[IO.File]::WriteAllText($freezePath, $freezeJson)
+$freezeHash = (Get-FileHash $freezePath).Hash.ToLowerInvariant()
+
+$navPath = (Resolve-Path services/evaluation/examples/paper-cash-nav.json).Path
+$navHash = (Get-FileHash $navPath).Hash.ToLowerInvariant()
+uv --directory services/evaluation run --offline --frozen tradingbot-evaluation forward-paper-report $freezePath $protocolPath --root $workspace --freeze-sha256 $freezeHash --through 2026-10-05 --nav $navPath --nav-sha256 $navHash
+```
+
+Для нового отчёта передайте выгрузку `paper-nav` со всеми датами от
+пополнения до указанного дня включительно. При регистрации `operating_net`
+передайте `--operating-costs` и `--operating-costs-sha256` вместе. Пока
+расходы отсутствуют или неполны, для сравнения доступен только `execution_net`.
+Для индекса полной доходности передайте `--benchmark` и
+`--benchmark-sha256`. Для локального архива используйте `retrospective`
+в протоколе, `local_archive` в файле ряда и одинаковый
+`archive_source_id` в регистрации индекса и в файле. Укажите
+`theoretical_reference` или `unknown` для доступа к индексу. Оценка
+сверяет SHA-256, идентичность источника и ряда, покрытие всех
+зарегистрированных суток и время доступности значений. Доступность
+индекса владельцу, права использования данных и рыночный результат
+требуют отдельных подтверждений.
+Промежуточный отчёт описывает накопленную выборку. Статус порога доходности
+появляется на финальной дате. Просадка сверяется с
+порогом от первого дня. Хеши подтверждают содержимое файлов. Для подтверждения
+времени регистрации и происхождения наблюдений нужны независимые записи.
+
+Для связанного ряда отчётов до регистрации задайте
+`paper_forward_source.checkpoint_history = "require_prior_receipt"`.
+Первый контрольный отчёт содержит `checkpoint_receipt`. Сохраните этот
+объект в отдельном JSON и отдельно сохраните его SHA-256. Для следующего
+отчёта добавьте `--previous-receipt <файл> --previous-receipt-sha256 <хеш>`.
+Команда сверит непосредственно предыдущую зарегистрированную дату.
+Уже опубликованные строки NAV, значения индекса и записи расходов
+должны совпасть. Новые сутки добавляются после старых, а статус покрытия
+расходов относится ко всему новому периоду. Если предыдущий отчёт
+не содержал файла расходов, у него ещё нет зафиксированного ряда
+расходов. [Схема квитанции](contracts/forward-checkpoint-receipt.schema.json).
+
+`execution_cost_diagnostics` показывает дневной NAV до явно проведённых
+комиссий исполнений. Расчёт использует проведённые объёмы и цены исполнения,
+а также дневные отметки. Полный gross NAV помечен как недоступный. Для его
+расчёта нужны независимые ориентиры цены на момент исполнения и согласованная
+база дневной оценки.
+
+Поле `paper_forward_source.power_review` фиксирует эффект над минимальным
+дневным превышением эталона, предполагаемое стандартное отклонение и
+корреляцию соседних дневных доходностей, целевую вероятность обнаружения,
+число испытаний и seed симуляции. Команда проверяет проект исследования
+до получения NAV.
+
+```powershell
+uv --directory services/evaluation run --offline --frozen tradingbot-evaluation forward-paper-power $protocolPath
+```
+
+Метод `gaussian_ar1_paired_moving_block_percentile_v1` симулирует правило
+нижней границы блочного интервала и показывает долю пересечений при нулевом
+эффекте и при заданном эффекте. Интервалы Вильсона отражают погрешность
+симуляции. Каждый контрольный отчёт повторяет расчёт для зарегистрированного
+финального календаря. В пятидневном примере недостаточно блоков.
+[Методология блочного bootstrap](https://doi.org/10.1214/aos/1176347265) · [Дизайн симуляций](https://doi.org/10.1002/sim.8086).
+
+В новой регистрации можно выбрать `gaussian_ar1_paired_mean_v1`. Этот метод
+использует нормальный интервал для среднего дневного превышения, точную
+конечновыборочную дисперсию стационарной модели AR(1) и поправку Бонферрони.
+Волатильность и корреляция взяты из протокола. `forward-paper-power` сверяет
+аналитические вероятности с независимыми симуляциями нулевого и заданного
+эффектов. `model_conditional_inference` появляется с данными только на финальном
+чекпойнте и в зарегистрированной базе NAV. Блочный интервал остаётся в
+`comparisons`. Рыночная применимость допущений и прохождение G5 неизвестны.
+[Ковариация AR(1)](https://www.stat.cmu.edu/~cshalizi/dst/18/lectures/15/lecture-15.html) · [Поправка Бонферрони](https://doi.org/10.1080/01621459.1961.10482090).
+
+Настройки `paper_forward_source.regime_review` задаются до регистрации
+эксперимента, в котором основным эталоном служит индекс полной доходности.
+
+```json
+{
+  "lookback_utc_days": 10,
+  "minimum_distinct_observations": 6,
+  "rising_threshold_bps": 100,
+  "declining_threshold_bps": 100,
+  "minimum_pairs_per_regime": 5
+}
+```
+
+Для каждой пары дневных доходностей режим рассчитывается по индексным
+уровням, доступным к началу этой пары. Повтор отметки в выходные
+сохраняет дневную пару и учитывается как одно индексное наблюдение.
+Отчёт сохраняет все пары, включая неклассифицированные. По каждой
+группе видны число пар и среднее
+превышение в доступной базе NAV. Порог покрытия и средние по группам
+используются как описательные показатели. Достаточность рыночной
+выборки проверяется отдельно.
+
 Для проверки протокола сравнения `freeze-statistics` выводит SHA-256
 заранее зарегистрированных периодов, бенчмарков и параметров блочного bootstrap.
 Команда `statistics` сверяет этот хеш, даты NAV и доступность входов. Пример
@@ -594,6 +765,15 @@ go -C services/control run ./cmd/paper-nav --input $paperNavInput --sha256 $inpu
 uv --directory services/evaluation run --offline --frozen tradingbot-evaluation paper-evidence examples/paper-cash-protocol.json examples/paper-cash-nav.json --protocol-sha256 811c97f1b0d0c36d9473ab8612af964d6e2e8fc1d759728e5d46c89db35e417f
 ```
 
+Перед использованием сохранённого отчёта его можно воспроизвести по тому
+же входному файлу цен и PostgreSQL. Команда читает журнал в одном снимке
+и выдаёт пересчитанный NAV только при совпадении. Совпавший отчёт
+с пропущенной ценой сохраняет код 1.
+
+```powershell
+go -C services/control run ./cmd/paper-nav --input $paperNavInput --sha256 $inputHash --verify-report $navPath --report-sha256 $navHash
+```
+
 Для синтетического сравнения с индексом полной доходности передайте
 `--benchmark-input`. Протокол фиксирует хеш ряда, а его файл сообщает
 время получения каждого значения и модельный расход на вход.
@@ -607,6 +787,68 @@ Nautilus уже входят в этот ряд. Если часть расхо�
 доступен только execution-net. Обе панели содержат просадку и риск
 за наблюдаемый интервал.
 [Пример протокола](services/evaluation/examples/operating-costs-protocol.json) · [Схема затрат](contracts/evaluation-operating-costs.schema.json).
+
+Для локального журнала вызовов добавьте `--usage-output <путь к новому файлу>`
+к `historical-step` или `analyze`. В журнал входят ID, роль, начало и результат
+каждого вызова, принятого в рамках лимита. Счётчики без данных остаются
+`null`. Остановка анализа через обработанную ошибку оставляет `partial`.
+При неоднозначном endpoint или тарифе поля модели и провайдера пусты.
+Команда ожидает новый файл в существующем каталоге.
+
+```powershell
+$archive = (Resolve-Path services/research/examples/selection).Path
+$usagePath = Join-Path ([IO.Path]::GetTempPath()) ('tradingbot-usage-' + [guid]::NewGuid() + '.json')
+Get-Content -Raw contracts/valid-research-historical-step.json | uv --directory services/research run --offline --frozen tradingbot historical-step --archive-root $archive --usage-output $usagePath
+```
+
+Скриптовая модель сохраняет число вызовов. Для примера расчёта ниже
+используется синтетический журнал с заданными счётчиками.
+
+```powershell
+$ratesPath = (Resolve-Path services/evaluation/examples/research-rate-schedule.json).Path
+$usagePath = (Resolve-Path contracts/valid-research-llm-usage.json).Path
+$ratesPin = (Get-FileHash $ratesPath).Hash.ToLowerInvariant()
+$usagePin = (Get-FileHash $usagePath).Hash.ToLowerInvariant()
+uv --directory services/evaluation run --offline --frozen tradingbot-evaluation research-costs --rates $ratesPath $ratesPin --usage $usagePath $usagePin
+```
+
+`research-costs` выбирает ставку по провайдеру, модели и дате UTC.
+Токены чтения и записи кеша входят во входной счётчик. Reasoning входит
+в выходной. Отчёт применяет отдельные ставки к этим долям и сохраняет
+известную часть расходов при неполном журнале. P95 описывает только
+переданные архивы, для которых удалось оценить все вызовы. Фактическая
+сумма к оплате остаётся неизвестной.
+
+Для расчёта сценарного `operating_net` передайте
+`--synthetic-opex-template <файл затрат> <хеш> --series <имя ряда NAV>`.
+Исходный файл содержит остальные статьи затрат. Команда добавляет
+дневные модельные затраты на LLM, округлённые вверх до восьми знаков.
+Перенесите поле `synthetic_operating_costs` в отдельный JSON и используйте
+его как журнал затрат. Повторное добавление LLM к тому же ряду приводит
+к ошибке. [Схема журнала](contracts/research-llm-usage.schema.json) · [Схема ставок](contracts/research-model-rates.schema.json).
+
+Для заданий worker используется журнал разрешений PostgreSQL. Каждый
+допущенный вызов занимает слот. В конце вызова worker сохраняет наблюдение
+с тем же ID. После аварии разрешение без ответа остаётся занятым и
+отображается как неизвестный расход в отчёте. Чтение включает прежние
+попытки, даже если итоговый результат пришёл от нового процесса.
+При локальной замене сначала обновите Control. Worker проверяет поддержку
+записи вызовов до получения задания.
+
+```powershell
+# TRADINGBOT_DATABASE_URL указывает на локальную PostgreSQL
+go -C services/control run ./cmd/research-usage-export --job $researchJobId > $permitArchivePath
+$permitPin = (Get-FileHash $permitArchivePath).Hash.ToLowerInvariant()
+uv --directory services/evaluation run --offline --frozen tradingbot-evaluation research-costs --rates $ratesPath $ratesPin --permit-archive $permitArchivePath $permitPin
+```
+
+Для расходов из PostgreSQL используется дата выдачи разрешения по часам
+базы. Отчёт сохраняет и фактическое время, сообщённое callback, если оно
+доступно. Незавершённые задания, пропущенные ответы и попытки, начавшиеся
+до появления журнала разрешений, исключают оценку полной суммы и P95 для
+такого задания. Полнота относится к переданному набору архивов. Для
+расходов за период в набор включают все задания стратегии за этот период.
+[Схема выгрузки](contracts/research-permit-archive.schema.json) · [Пример выгрузки](contracts/valid-research-permit-archive.json).
 
 Для проверки копии PostgreSQL и возобновления работы есть отдельное
 локальное упражнение. [Порядок восстановления paper-контура](docs/runbooks/paper.md).

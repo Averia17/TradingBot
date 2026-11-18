@@ -1,5 +1,6 @@
 """Opt-in cross-process verification against a dedicated, disposable PostgreSQL database."""
 
+import base64
 import hashlib
 import json
 import os
@@ -60,8 +61,8 @@ def process(command, env=None):
                 child.wait(timeout=5)
 
 
-def wait_for_resource(port, path, *children):
-    deadline = time.monotonic() + 45
+def wait_for_resource(port, path, *children, timeout=45):
+    deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         for child in children:
             assert child.poll() is None, f"service exited with {child.returncode}"
@@ -104,6 +105,127 @@ def research_environment():
         "TRADINGBOT_E2E_DATABASE_URL",
     }
     return {key: value for key, value in os.environ.items() if key not in database_variables}
+
+
+def test_worker_crash_preserves_observed_calls_and_keeps_orphan_budget_charged(tmp_path):
+    executable = build_go_command(tmp_path, "control")
+    exporter = build_go_command(tmp_path, "research-usage-export")
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.bind(("127.0.0.1", 0))
+        port = listener.getsockname()[1]
+    origin = f"http://127.0.0.1:{port}"
+    command = [executable, "-listen", f"127.0.0.1:{port}"]
+    env = os.environ | {"TRADINGBOT_DATABASE_URL": DATABASE_URL}
+    book = json.loads((ROOT / "contracts/valid-portfolio.json").read_text(encoding="utf-8"))
+    book.update(
+        snapshot_id=str(uuid4()),
+        as_of=(datetime.now(UTC) - timedelta(seconds=5)).isoformat(),
+    )
+    job_id = str(uuid4())
+    job = {
+        "job_schema_version": "0.1",
+        "job_id": job_id,
+        "portfolio": book,
+        "requested_symbols": ["TSLA"],
+        "max_llm_calls": 14,
+        "data_manifest": {"ref": "offline/graph", "sha256": "a" * 64},
+        "policy_version": "offline-policy",
+    }
+
+    def usage_archive():
+        return json.loads(
+            subprocess.check_output([exporter, "--job", job_id], env=env, timeout=10)
+        )
+
+    marker = tmp_path / "blocked-run"
+    pause_second_permit = """
+import sys
+from pathlib import Path
+from threading import Event, Lock
+
+from tradingbot.worker import _Worker, run_worker
+
+authorize_call = _Worker.authorize_call
+confirmed_permits = []
+admission = Lock()
+
+def pause(self, lease, watchdog, run_id):
+    with admission:
+        authorize_call(self, lease, watchdog, run_id)
+        confirmed_permits.append(run_id)
+        if len(confirmed_permits) == 2:
+            marker = Path(sys.argv[2])
+            temporary = marker.with_suffix(".tmp")
+            temporary.write_text(str(run_id), encoding="utf-8")
+            temporary.replace(marker)
+            Event().wait()
+
+_Worker.authorize_call = pause
+run_worker(sys.argv[1], "pytest-crashed-worker")
+"""
+    with process(command, env) as control:
+        wait_for_resource(port, "/readyz", control)
+        assert request(port, "/v1/research/jobs", job)[0] == 201
+        with process(
+            [sys.executable, "-c", pause_second_permit, origin, str(marker)], research_environment()
+        ) as crashing:
+            pause_deadline = time.monotonic() + 30
+            while not marker.is_file() and time.monotonic() < pause_deadline:
+                assert crashing.poll() is None, "scripted crash probe exited early"
+                time.sleep(0.025)
+            assert marker.is_file(), "second invocation was not granted a permit"
+            orphan_id = marker.read_text(encoding="utf-8")
+            early = usage_archive()
+            while (
+                not any(item["callback_payload"] for item in early["permits"])
+                and time.monotonic() < pause_deadline
+            ):
+                time.sleep(0.025)
+                early = usage_archive()
+            crashing.kill()
+            crashing.wait(timeout=5)
+        assert usage_archive() == early
+        assert early["job_id"] == job_id and early["job_status"] == "leased"
+        assert early["legacy_budget_unknown"] is False
+        assert early["permit_history_known"] is True
+        assert len(early["permits"]) == 2
+        (observed,) = [item for item in early["permits"] if item["call_id"] != orphan_id]
+        (orphan,) = [item for item in early["permits"] if item["call_id"] == orphan_id]
+        assert observed["attempt"] == orphan["attempt"] == 1
+        assert orphan["callback_payload"] is orphan["callback_sha256"] is orphan["recorded_at"] is None
+
+    recovery_worker = [
+        sys.executable, "-m", "tradingbot", "worker", "--control-url", origin,
+        "--worker-id", "pytest-recovered-worker", "--poll-interval", "0.05",
+    ]
+    with process(command, env) as control:
+        wait_for_resource(port, "/readyz", control)
+        with process(recovery_worker, research_environment()) as recovering:
+            finished = wait_for_resource(
+                port, f"/v1/research/jobs/{job_id}/result", control, recovering, timeout=90
+            )
+        exported = usage_archive()
+    assert exported["job_status"] == "completed"
+    assert exported["permit_history_known"] is True and exported["attempts"] == 2
+    assert finished["attempt"] == 2 and finished["result"]["metadata"]["llm_calls"] == 12
+    assert len(exported["permits"]) == 14
+    assert [item for item in exported["permits"] if item["attempt"] == 1] == early["permits"]
+    callbacks = []
+    for permit in exported["permits"]:
+        if permit["call_id"] == orphan_id:
+            assert permit == orphan
+            continue
+        payload = base64.b64decode(permit["callback_payload"], validate=True)
+        assert hashlib.sha256(payload).hexdigest() == permit["callback_sha256"]
+        call = json.loads(payload)
+        assert call["run_id"] == permit["call_id"] and call["status"] == "completed"
+        assert call["model"] == "scripted-offline-v1" and call["provider"] == "offline"
+        assert call["usage_source"] == "unavailable" and call["input_tokens"] is None
+        assert permit["recorded_at"] is not None
+        if permit["attempt"] == 2:
+            callbacks.append(call)
+    assert len({call["run_id"] for call in callbacks}) == len(callbacks) == 12
+    assert sum(call["role"] == "portfolio_allocator" for call in callbacks) == 1
 
 
 def settle_paper_round_trip(port, account_id, instrument):

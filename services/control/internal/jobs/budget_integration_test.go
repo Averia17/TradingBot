@@ -12,7 +12,7 @@ import (
 func TestCallBudgetSurvivesFailedAttemptAndStoreRestart(t *testing.T) {
 	ctx, dsn, db := testDatabase(t)
 	store := openTestStore(t, ctx, dsn)
-	job := queueJob(t, ctx, store, 1, time.Now())
+	job := queueJob(t, ctx, store, 1, 0)
 	first, err := store.Claim(ctx, "first", testIdentity(100), testSnapshotWindow)
 	if err != nil {
 		t.Fatal(err)
@@ -68,7 +68,7 @@ func TestCallBudgetSurvivesFailedAttemptAndStoreRestart(t *testing.T) {
 func TestConcurrentCallAuthorizationsCannotExceedBudget(t *testing.T) {
 	ctx, dsn, db := testDatabase(t)
 	store := openTestStore(t, ctx, dsn)
-	job := queueJob(t, ctx, store, 1, time.Now())
+	job := queueJob(t, ctx, store, 1, 0)
 	lease, err := store.Claim(ctx, "worker", testIdentity(100), testSnapshotWindow)
 	if err != nil {
 		t.Fatal(err)
@@ -107,11 +107,11 @@ func TestConcurrentCallAuthorizationsCannotExceedBudget(t *testing.T) {
 func TestBudgetMigrationDoesNotAssumeUnrecordedCallsWereFree(t *testing.T) {
 	ctx, dsn, db := testDatabase(t)
 	if _, err := db.Exec(ctx, researchJobsMigration+researchLeasesMigration+researchResultsMigration+`
-		CREATE TABLE research_schema_migrations (version integer PRIMARY KEY);
+		CREATE TABLE research_schema_migrations (version integer PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT clock_timestamp());
 		INSERT INTO research_schema_migrations (version) VALUES (1),(2),(3)`); err != nil {
 		t.Fatal(err)
 	}
-	input := queueInput(t, 1, time.Now())
+	input := queueInput(t, 1, databaseNow(t, ctx, db))
 	claimID, token := testIdentity(100), testIdentity(200)
 	if _, err := db.Exec(ctx, `INSERT INTO research_snapshots (id, payload, payload_sha256) VALUES ($1, $2, sha256($2));
 		INSERT INTO research_jobs (id, snapshot_id, request, request_sha256, status, attempt_count)
@@ -121,7 +121,7 @@ func TestBudgetMigrationDoesNotAssumeUnrecordedCallsWereFree(t *testing.T) {
 		pgx.QueryExecModeSimpleProtocol, input.SnapshotID, []byte(input.Snapshot), input.ID, []byte(input.Request), claimID, token); err != nil {
 		t.Fatal(err)
 	}
-	completed := queueInput(t, 2, time.Now())
+	completed := queueInput(t, 2, databaseNow(t, ctx, db))
 	completeClaim, completeToken := testIdentity(102), testIdentity(202)
 	legacyPayload := []byte(`{"result_schema_version":"0.2","metadata":{"llm_calls":3}}`)
 	if _, err := db.Exec(ctx, `INSERT INTO research_snapshots (id, payload, payload_sha256) VALUES ($1, $2, sha256($2));
@@ -149,5 +149,10 @@ func TestBudgetMigrationDoesNotAssumeUnrecordedCallsWereFree(t *testing.T) {
 	}, nil)
 	if err != nil || created || string(receipt.Payload) != string(legacyPayload) {
 		t.Fatalf("pre-migration result replay = %+v, %t, %v", receipt, created, err)
+	}
+	archive, err := ReadResearchCallUsage(ctx, dsn, completed.ID)
+	if err != nil || archive.PermitHistoryKnown || archive.LegacyBudgetUnknown ||
+		archive.Status != "completed" || archive.Attempts != 1 || len(archive.Records) != 0 {
+		t.Fatalf("completed pre-permit history must stay unknown: %+v, %v", archive, err)
 	}
 }

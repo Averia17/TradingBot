@@ -6,3 +6,4 @@ import _ "embed"
 var paperNAVSchema []byte
 
 var PaperNAVRequest = compile(paperNAVSchema, "#/$defs/Request")
+var PaperNAVReport = compile(paperNAVSchema, "#/$defs/Report")

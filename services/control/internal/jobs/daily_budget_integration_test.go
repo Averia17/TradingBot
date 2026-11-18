@@ -13,8 +13,8 @@ func TestDailyCallBudgetSharesPermitsAcrossJobsAndRestart(t *testing.T) {
 	ctx, dsn, db := testDatabase(t)
 	firstStore := openTestStore(t, ctx, dsn)
 	secondStore := openTestStore(t, ctx, dsn)
-	firstJob := queueJob(t, ctx, firstStore, 1, time.Now())
-	secondJob := queueJob(t, ctx, secondStore, 2, time.Now())
+	firstJob := queueJob(t, ctx, firstStore, 1, 0)
+	secondJob := queueJob(t, ctx, secondStore, 2, 0)
 	first, err := firstStore.Claim(ctx, "first", testIdentity(100), testSnapshotWindow)
 	if err != nil || first.Job.ID != firstJob.ID {
 		t.Fatalf("claim first = %+v, %v", first, err)
@@ -124,7 +124,7 @@ func TestDailyCallBudgetFutureActivationAndMissingActiveDay(t *testing.T) {
 	if err != nil || prior.Status != "unconfigured" || prior.RemainingPermits != nil {
 		t.Fatalf("day preceding activation = %+v, %v", prior, err)
 	}
-	job := queueJob(t, ctx, store, 1, time.Now())
+	job := queueJob(t, ctx, store, 1, 0)
 	lease, err := store.Claim(ctx, "worker", testIdentity(100), testSnapshotWindow)
 	if err != nil {
 		t.Fatal(err)
@@ -151,7 +151,7 @@ func TestDailyCallBudgetFutureActivationAndMissingActiveDay(t *testing.T) {
 func TestDailyCallBudgetActivationIsVisibleAfterLockWait(t *testing.T) {
 	ctx, dsn, db := testDatabase(t)
 	store := openTestStore(t, ctx, dsn)
-	job := queueJob(t, ctx, store, 1, time.Now())
+	job := queueJob(t, ctx, store, 1, 0)
 	lease, err := store.Claim(ctx, "worker", testIdentity(100), testSnapshotWindow)
 	if err != nil {
 		t.Fatal(err)
@@ -212,7 +212,7 @@ func TestDailyCallBudgetActivationIsVisibleAfterLockWait(t *testing.T) {
 func TestDailyCallBudgetReportsExactUTCDateBoundaries(t *testing.T) {
 	ctx, dsn, db := testDatabase(t)
 	store := openTestStore(t, ctx, dsn)
-	job := queueJob(t, ctx, store, 1, time.Now())
+	job := queueJob(t, ctx, store, 1, 0)
 	lease, err := store.Claim(ctx, "worker", testIdentity(100), testSnapshotWindow)
 	if err != nil {
 		t.Fatal(err)

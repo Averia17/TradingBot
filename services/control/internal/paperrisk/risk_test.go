@@ -85,3 +85,58 @@ func TestPaperRiskAllowsReductionButStillChecksHeldUnitsAndFees(t *testing.T) {
 		t.Fatalf("fee cap rounded upward: %v", err)
 	}
 }
+
+func TestOwnerExecutionCostCapUsesWorstPriceAndExecutedPartialQuantity(t *testing.T) {
+	now := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
+	instrument := ledger.Instrument{ID: "fixture:TSLA", RegistryVersion: "fixture-v1", Decimals: 2}
+	account := ledger.Account{ID: "paper-account", Version: 1, CashUSD: "1000", ReservedCashUSD: "0",
+		Positions: []ledger.Position{{Instrument: instrument, QuantityRaw: "500", ReservedQuantityRaw: "0"}}}
+	policy := Policy{Version: "execution-budget", MaxOrderUSD: "150", MinFreeCashUSD: "0", MaxPositionBPS: 10000,
+		MaxGroupBPS: 10000, MaxGrossBPS: 10000, MaxFeeBPS: 100, MaxMarkAgeSeconds: 60, MaxExecutionCostBPS: new(25),
+		Instruments: []InstrumentRule{{Instrument: instrument, Symbol: "TSLA", Group: "tech"}}}
+	marks := []Mark{{Instrument: instrument, PriceUSD: "20", At: now, AvailableAt: now}}
+	intent := papersim.Intent{AccountID: account.ID, SnapshotVersion: account.Version, Instrument: instrument,
+		Side: "BUY", QuantityRaw: "500", GrossLimitUSD: "100.15", MaxFeeUSD: "0.1",
+		DecidedAt: now.Add(-time.Second), ExpiresAt: now.Add(time.Minute)}
+	assertRefusal := func(err error) {
+		t.Helper()
+		reason, ok := RefusalReason(err)
+		if !ok || reason != ledger.RiskMaximumExecutionCost {
+			t.Fatalf("expected execution cost refusal, got %v", err)
+		}
+	}
+
+	if err := Check(account, intent, policy, marks, now); err != nil {
+		t.Fatalf("exact BUY cost boundary: %v", err)
+	}
+	intent.GrossLimitUSD = "100.15000001"
+	assertRefusal(Check(account, intent, policy, marks, now))
+	intent.GrossLimitUSD = "100.15"
+	fill := &papersim.FixtureFill{QuantityRaw: "100", GrossUSD: "20.03", FeeUSD: "0.02"}
+	if err := CheckOrder(account, intent, policy, marks, now, nil, fill); err != nil {
+		t.Fatalf("exact executed cost boundary: %v", err)
+	}
+	fill.FeeUSD = "0.02000001"
+	assertRefusal(CheckOrder(account, intent, policy, marks, now, nil, fill))
+
+	intent.Side, intent.GrossLimitUSD = "SELL", "99.85"
+	if err := Check(account, intent, policy, marks, now); err != nil {
+		t.Fatalf("exact SELL cost boundary: %v", err)
+	}
+	intent.GrossLimitUSD = "99.84999999"
+	assertRefusal(Check(account, intent, policy, marks, now))
+	intent.GrossLimitUSD, intent.MaxFeeUSD = "100.1", "0.25000001"
+	assertRefusal(Check(account, intent, policy, marks, now))
+
+	policy.MaxExecutionCostBPS = new(0)
+	intent.MaxFeeUSD = "0"
+	if err := Check(account, intent, policy, marks, now); err != nil {
+		t.Fatalf("zero-cost price improvement: %v", err)
+	}
+	intent.MaxFeeUSD = "0.00000001"
+	assertRefusal(Check(account, intent, policy, marks, now))
+	policy.MaxExecutionCostBPS = new(-1)
+	if err := policy.Validate(); !errors.Is(err, ErrPolicy) {
+		t.Fatalf("negative owner cost cap accepted: %v", err)
+	}
+}

@@ -1,0 +1,50 @@
+{
+  "schema_version": "0.2",
+  "experiment_id": "offline-paper-smoke",
+  "configuration_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "source_mode": "synthetic_fixture",
+  "model_training_cutoff": null,
+  "nav_basis": "execution_net",
+  "splits": {
+    "train_start": "2026-10-01",
+    "validation_start": "2026-10-02",
+    "test_start": "2026-10-03",
+    "end_exclusive": "2026-10-06",
+    "embargo_calendar_days": 0
+  },
+  "expected_nav_dates": ["2026-10-01", "2026-10-02", "2026-10-03", "2026-10-04", "2026-10-05"],
+  "primary_comparison_id": "cash-panel",
+  "comparisons": [
+    {
+      "comparison_id": "cash-panel",
+      "strategy": "offline-research",
+      "benchmark": "uninvested-cash",
+      "benchmark_access": "synthetic_fixture",
+      "minimum_daily_excess_bps": 0
+    }
+  ],
+  "bootstrap": {
+    "block_marks": 2,
+    "minimum_blocks": 2,
+    "replications": 100,
+    "seed": 8,
+    "family_alpha_bps": 500
+  },
+  "paper_forward_source": {
+    "account_id": "11111111-1111-4111-8111-111111111111",
+    "initial_cash_usd": "1000",
+    "valuation_source": {"kind": "synthetic_fixture", "id": "test-marks"},
+    "mark_max_age_seconds": 90,
+    "checkpoints_utc": ["2026-10-04", "2026-10-05"],
+    "maximum_drawdown_bps": 250,
+    "power_review": {
+      "method": "gaussian_ar1_paired_moving_block_percentile_v1",
+      "alternative_increment_bps": 10,
+      "daily_excess_sd_bps": 30,
+      "lag_one_correlation_bps": 4000,
+      "target_detection_bps": 8000,
+      "trials": 200,
+      "seed": 23
+    }
+  }
+}

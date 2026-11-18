@@ -1,0 +1,197 @@
+{
+  "$defs": {
+    "LLMCall": {
+      "additionalProperties": false,
+      "properties": {
+        "input_tokens": {
+          "anyOf": [
+            {
+              "maximum": 1000000000,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Input Tokens"
+        },
+        "output_tokens": {
+          "anyOf": [
+            {
+              "maximum": 1000000000,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Output Tokens"
+        },
+        "cache_read_tokens": {
+          "anyOf": [
+            {
+              "maximum": 1000000000,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Cache Read Tokens"
+        },
+        "cache_write_tokens": {
+          "anyOf": [
+            {
+              "maximum": 1000000000,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Cache Write Tokens"
+        },
+        "reasoning_tokens": {
+          "anyOf": [
+            {
+              "maximum": 1000000000,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Reasoning Tokens"
+        },
+        "usage_source": {
+          "enum": [
+            "langchain_usage_metadata",
+            "unavailable"
+          ],
+          "title": "Usage Source",
+          "type": "string"
+        },
+        "run_id": {
+          "format": "uuid",
+          "title": "Run Id",
+          "type": "string"
+        },
+        "provider": {
+          "anyOf": [
+            {
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:/@-]{0,191}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Provider"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:/@-]{0,191}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Model"
+        },
+        "role": {
+          "enum": [
+            "research",
+            "portfolio_allocator",
+            "unknown"
+          ],
+          "title": "Role",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "completed",
+            "failed",
+            "unfinished"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "started_at": {
+          "format": "date-time",
+          "title": "Started At",
+          "type": "string"
+        }
+      },
+      "required": [
+        "input_tokens",
+        "output_tokens",
+        "cache_read_tokens",
+        "cache_write_tokens",
+        "reasoning_tokens",
+        "usage_source",
+        "run_id",
+        "provider",
+        "model",
+        "role",
+        "status",
+        "started_at"
+      ],
+      "title": "LLMCall",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "0.1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "source_mode": {
+      "enum": [
+        "synthetic_fixture",
+        "provider_reported"
+      ],
+      "title": "Source Mode",
+      "type": "string"
+    },
+    "llm_calls": {
+      "maximum": 4096,
+      "minimum": 0,
+      "title": "Llm Calls",
+      "type": "integer"
+    },
+    "capture_status": {
+      "enum": [
+        "complete",
+        "partial"
+      ],
+      "title": "Capture Status",
+      "type": "string"
+    },
+    "calls": {
+      "items": {
+        "$ref": "#/$defs/LLMCall"
+      },
+      "maxItems": 4096,
+      "title": "Calls",
+      "type": "array"
+    }
+  },
+  "required": [
+    "schema_version",
+    "source_mode",
+    "llm_calls",
+    "capture_status",
+    "calls"
+  ],
+  "title": "LLMUsageReport",
+  "type": "object"
+}

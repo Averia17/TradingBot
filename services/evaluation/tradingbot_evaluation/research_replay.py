@@ -21,7 +21,9 @@ from tradingbot_evaluation.replay import (
     Replay,
     _nanoseconds,
     _unique_fields,
+    executable_quotes,
     load_replay,
+    replay_event_count,
     replay_prefix,
     run_replay,
 )
@@ -362,6 +364,8 @@ def _matching_order(
     window: _Window,
     commission_bps: int,
     audit: dict,
+    *,
+    calendar_horizon: datetime | None = None,
 ) -> tuple[Order | None, str]:
     if intent.action == "HOLD":
         return None, "hold"
@@ -378,7 +382,12 @@ def _matching_order(
         return None, "expired"
     execution = next((q for q in quotes if window.completed < q.observed_at), None)
     if execution is None:
-        return None, "no_executable_quote"
+        status = (
+            "expired"
+            if calendar_horizon is not None and window.expiry <= calendar_horizon
+            else "no_executable_quote"
+        )
+        return None, status
     if window.expiry <= execution.available_at:
         return None, "expired"
     audit["execution_quote_observed_at"] = _at(execution.observed_at)
@@ -441,12 +450,8 @@ def _verify_snapshots(
     splits: dict[str, list[datetime]],
 ) -> None:
     if (
-        len(timeline) > MAX_PREFIX_SYMBOLS
-        or len(replay.quotes)
-        + len(replay.orders)
-        + len(replay.cash_dividends)
-        + len(replay.stock_splits)
-        > MAX_PREFIX_EVENTS
+        len({quote.symbol for quote in replay.quotes} | timeline.keys()) > MAX_PREFIX_SYMBOLS
+        or replay_event_count(replay) > MAX_PREFIX_EVENTS
     ):
         raise ValueError(
             f"Snapshot continuity is bounded to {MAX_PREFIX_SYMBOLS} symbols "
@@ -523,6 +528,8 @@ def _prepare_records(
     if decoded_bytes > _MAX_RESEARCH_RECORD_BYTES:
         raise ValueError("Decoded research export records exceed the input limit")
     timeline, splits = _tape_timeline(tape)
+    latest_quote = max(quote.available_at for quote in tape.quotes)
+    calendar_horizon = latest_quote if tape.execution_calendar is not msgspec.UNSET else None
 
     issued_orders = []
     jobs = []
@@ -601,6 +608,7 @@ def _prepare_records(
                     window,
                     tape.commission_bps,
                     audit,
+                    calendar_horizon=calendar_horizon,
                 )
             if order is not None:
                 issued_orders.append(order)
@@ -613,7 +621,7 @@ def _prepare_records(
         # Running each prefix also handles analyses with overlapping clocks.
         _verify_snapshots(replay, snapshots, jobs, timeline, splits)
         horizon = max(
-            max(quote.available_at for quote in replay.quotes),
+            latest_quote,
             max(cutoff for _, cutoff in snapshots),
         )
         evaluation = run_replay(replay, through=horizon)
@@ -631,7 +639,7 @@ def _prepare_records(
 
 def _tape_timeline(tape: Replay) -> tuple[dict[str, list[Quote]], dict[str, list[datetime]]]:
     timeline = defaultdict(list)
-    for quote in sorted(tape.quotes, key=lambda q: q.available_at):
+    for quote in sorted(executable_quotes(tape), key=lambda q: q.available_at):
         timeline[quote.symbol].append(quote)
     splits = defaultdict(list)
     for action in tape.stock_splits:

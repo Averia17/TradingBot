@@ -55,8 +55,12 @@ class HistoricalStep(Contract):
         return job | {"portfolio": portfolio | {"as_of": as_of}}
 
 
-def run_historical_step(data: bytes, archive_root: Path) -> dict:
+def run_historical_step(
+    data: bytes, archive_root: Path, *, usage_output: Path | None = None
+) -> dict:
     if len(data) > MAX_STEP_BYTES:
         raise ValueError("historical step exceeds the input size limit")
     step = HistoricalStep.model_validate(decode_pinned_json(data))
-    return analyze_historical(step.job, step.completed_at, archive_root, variant=step.variant)
+    return analyze_historical(
+        step.job, step.completed_at, archive_root, variant=step.variant, usage_output=usage_output
+    )

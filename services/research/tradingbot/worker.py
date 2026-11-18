@@ -15,12 +15,15 @@ from time import monotonic
 from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 
+from tradingbot.llm_usage import LLMCall
+
 _LOG = logging.getLogger(__name__)
 _JOBS_PATH = "/v1/research/jobs/"
 _MAX_REQUEST_BYTES = 256 * 1024
 _MAX_RESPONSE_BYTES = 512 * 1024
 _RESULT_KEYS = {"result_schema_version", "batch", "reports", "metadata"}
 _PERMIT_KEYS = {"job_id", "call_id", "attempt", "remaining_llm_calls"}
+_USAGE_KEYS = {"job_id", "call_id", "attempt", "recorded_at"}
 _LEASE_KEYS = {
     "job_id",
     "status",
@@ -94,15 +97,27 @@ class ControlClient:
     ) -> dict | None:
         if len(body) > _MAX_REQUEST_BYTES:
             raise ValueError("Control request exceeds body limit")
+        return self._request("POST", _JOBS_PATH + endpoint, body, expected, timeout)
+
+    def get(self, path: str) -> dict | None:
+        return self._request("GET", path, None, (200,), None)
+
+    def _request(
+        self,
+        method: str,
+        path: str,
+        body: bytes | None,
+        expected: tuple[int, ...],
+        timeout: float | None,
+    ) -> dict | None:
         budget = self._timeout if timeout is None else min(self._timeout, timeout)
         if budget <= 0:
             raise ControlError()
         # The direct HTTP connection does not consult proxies or follow redirects.
         connection = self._connection(self._host, self._port, timeout=budget)
         try:
-            connection.request(
-                "POST", _JOBS_PATH + endpoint, body, {"Content-Type": "application/json"}
-            )
+            headers = {"Content-Type": "application/json"} if body is not None else {}
+            connection.request(method, path, body, headers)
             with connection.getresponse() as response:
                 status = response.status
                 if status not in expected:
@@ -211,6 +226,8 @@ class _Worker:
     archive_root: Path | None
 
     def run(self) -> None:
+        if self.analyze is None and not self.wait_for_call_usage():
+            return
         claim_id = str(uuid4())
         while not self.stop.is_set():
             try:
@@ -249,9 +266,33 @@ class _Worker:
                             lease.attempt,
                             type(exc).__name__,
                         )
+                        if (
+                            self.analyze is None
+                            and isinstance(exc, ControlError)
+                            and exc.status == 404
+                            and not self.wait_for_call_usage()
+                        ):
+                            return
                     claim_id = str(uuid4())
                     continue
             self.stop.wait(self.poll_interval)
+
+    def wait_for_call_usage(self) -> bool:
+        while not self.stop.is_set():
+            try:
+                capabilities = self.control.get("/v1/capabilities")
+            except ControlError as exc:
+                if not exc.retryable:
+                    raise
+                _LOG.warning("Research capabilities response unavailable: %s", exc)
+                self.stop.wait(self.poll_interval)
+                continue
+            if capabilities is not None and capabilities.get("research_call_usage") is True:
+                return True
+            message = "Control does not advertise durable research call usage"
+            _LOG.error(message)
+            raise RuntimeError(message)
+        return False
 
     def renew(self, lease: _Lease) -> _Lease | None:
         identity = _encode({"worker_id": self.worker_id, "lease_token": lease.token})
@@ -287,7 +328,9 @@ class _Worker:
             from tradingbot.adapters.offline import analyze_offline
 
             analyze = partial(
-                analyze_offline, authorize_call=partial(self.authorize_call, active, watchdog)
+                analyze_offline,
+                authorize_call=partial(self.authorize_call, active, watchdog),
+                record_call=partial(self.record_call, active, watchdog),
             )
         if self.archive_root is not None:
             analyze = partial(analyze, archive_root=self.archive_root)
@@ -335,24 +378,42 @@ class _Worker:
         )
 
     def authorize_call(self, lease: _Lease, watchdog: _LeaseWatchdog, run_id: UUID) -> None:
-        call_id = str(run_id)
-        body = _encode({"worker_id": self.worker_id, "lease_token": lease.token, "call_id": call_id})
+        self._post_call(
+            lease, watchdog, "/authorize-call", run_id, {"call_id": str(run_id)}, _valid_permit
+        )
+
+    def record_call(self, lease: _Lease, watchdog: _LeaseWatchdog, call: LLMCall) -> None:
+        self._post_call(
+            lease,
+            watchdog,
+            "/record-call",
+            call.run_id,
+            {"call_usage_schema_version": "0.1", "call": call.model_dump(mode="json")},
+            _valid_usage_receipt,
+        )
+
+    def _post_call(
+        self,
+        lease: _Lease,
+        watchdog: _LeaseWatchdog,
+        suffix: str,
+        run_id: UUID,
+        fields: dict,
+        validate: Callable[[dict], bool],
+    ) -> None:
+        body = _encode(fields | {"worker_id": self.worker_id, "lease_token": lease.token})
         for transmission in range(3):
             if self.stop.is_set() or (remaining := watchdog.remaining()) <= 0:
                 raise ControlError()
             try:
-                response = self.control.post(
-                    lease.job_id + "/authorize-call", body, (200, 201), remaining
-                )
+                response = self.control.post(lease.job_id + suffix, body, (200, 201), remaining)
                 if (
                     response is None
-                    or response.keys() != _PERMIT_KEYS
-                    or response["job_id"] != lease.job_id
-                    or response["call_id"] != call_id
-                    or type(response["attempt"]) is not int
-                    or response["attempt"] != lease.attempt
-                    or type(response["remaining_llm_calls"]) is not int
-                    or not 0 <= response["remaining_llm_calls"] < 64
+                    or response.get("job_id") != lease.job_id
+                    or response.get("call_id") != str(run_id)
+                    or type(response.get("attempt")) is not int
+                    or response.get("attempt") != lease.attempt
+                    or not validate(response)
                 ):
                     raise ControlError(retryable=True)
             except ControlError as exc:
@@ -414,6 +475,24 @@ def _valid_receipt(response: dict, expected: bytes) -> bool:
         return _encode(response["result"]) == expected
     except (TypeError, ValueError, OverflowError, RecursionError):
         return False
+
+
+def _valid_permit(response: dict) -> bool:
+    return (
+        response.keys() == _PERMIT_KEYS
+        and type(response["remaining_llm_calls"]) is int
+        and 0 <= response["remaining_llm_calls"] < 64
+    )
+
+
+def _valid_usage_receipt(response: dict) -> bool:
+    if response.keys() != _USAGE_KEYS or not isinstance(response["recorded_at"], str):
+        return False
+    try:
+        _timestamp(response["recorded_at"])
+    except (ValueError, OverflowError):
+        return False
+    return True
 
 
 def run_worker(

@@ -6,6 +6,8 @@ the updater promotes its source commit.
 """
 
 import inspect
+import os
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from importlib.metadata import version
@@ -126,6 +128,47 @@ def research_config(runtime: Path, overrides: dict | None = None) -> dict:
         memory_log_path=str(runtime / "memory.md"),
     )
     return config
+
+
+def usage_model_identities(config: dict) -> dict[tuple[str, str], tuple[str, str]]:
+    """Attribute callbacks only to configured native-provider model names."""
+    base_provider = config["llm_provider"].lower()
+    model_patterns = {
+        "openai": r"(?:gpt-|chatgpt-|o[134]-?)[A-Za-z0-9_.-]{1,180}",
+        "anthropic": r"claude-[A-Za-z0-9_.-]{1,180}",
+        "google": r"gemini-[A-Za-z0-9_.-]{1,180}",
+    }
+    endpoint_environment = {
+        "openai": ("OPENAI_BASE_URL",),
+        "anthropic": ("ANTHROPIC_BASE_URL", "ANTHROPIC_PROFILE"),
+        "google": ("GOOGLE_GENAI_USE_VERTEXAI", "GOOGLE_GEMINI_BASE_URL", "GOOGLE_VERTEX_BASE_URL"),
+    }
+    identities = {}
+    ambiguous = set()
+    for tier in ("quick", "deep"):
+        provider = (config.get(f"{tier}_think_provider") or base_provider).lower()
+        model = config[f"{tier}_think_llm"]
+        if not isinstance(model, str):
+            continue
+        if provider == "google":
+            model = model.removeprefix("models/")
+        pattern = model_patterns.get(provider)
+        endpoint = config.get(f"{tier}_think_backend_url")
+        if provider == base_provider:
+            endpoint = endpoint or config.get("backend_url")
+        if (
+            pattern is None
+            or not re.fullmatch(pattern, model)
+            or endpoint
+            or any(os.getenv(name) for name in endpoint_environment[provider])
+        ):
+            # An OpenAI-compatible client may expose the same callback name
+            # as another native tier sharing this model name.
+            ambiguous.add(model)
+            continue
+        integration = "google_genai" if provider == "google" else provider
+        identities[integration, model] = provider, model
+    return {identity: model for identity, model in identities.items() if model[1] not in ambiguous}
 
 
 class TradingAgentsAdapter:
