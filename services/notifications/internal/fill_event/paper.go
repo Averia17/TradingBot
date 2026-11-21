@@ -71,7 +71,7 @@ func DecodePaper(data []byte) (PaperEvent, error) {
 	if token, err := decoder.Token(); err != nil || token != json.Delim('{') {
 		return PaperEvent{}, errInvalidJSON
 	}
-	fields := make(map[string]any)
+	fields := make(map[string]any, 20)
 	for decoder.More() {
 		token, err := decoder.Token()
 		key, ok := token.(string)
@@ -82,7 +82,13 @@ func DecodePaper(data []byte) (PaperEvent, error) {
 			return PaperEvent{}, errInvalidJSON
 		}
 		var value any
+		valueStart := decoder.InputOffset()
 		if err := decoder.Decode(&value); err != nil {
+			return PaperEvent{}, errInvalidJSON
+		}
+		// Match time.Time's wire decoder, which requires an unescaped timestamp.
+		if (key == "filled_at" || key == "recorded_at") &&
+			bytes.IndexByte(data[valueStart:decoder.InputOffset()], '\\') >= 0 {
 			return PaperEvent{}, errInvalidJSON
 		}
 		switch value := value.(type) {
@@ -105,8 +111,8 @@ func DecodePaper(data []byte) (PaperEvent, error) {
 	if err := paperSchema.Validate(fields); err != nil {
 		return PaperEvent{}, errors.New("invalid paper fill schema")
 	}
-	var event PaperEvent
-	if err := json.Unmarshal(data, &event); err != nil {
+	event, err := paperFillFromFields(fields)
+	if err != nil {
 		return PaperEvent{}, errInvalidJSON
 	}
 	if event.ID != "paper:"+event.AccountID+":"+event.FillEventID || event.FillEventID == event.AccountID ||
@@ -114,4 +120,47 @@ func DecodePaper(data []byte) (PaperEvent, error) {
 		return PaperEvent{}, errors.New("invalid paper fill identity or recording time")
 	}
 	return event, nil
+}
+
+func paperFillFromFields(fields map[string]any) (PaperEvent, error) {
+	// The schema has already checked all required fields and exact string amounts.
+	stringField := func(name string) string {
+		value, _ := fields[name].(string)
+		return value
+	}
+	precision, _ := fields["decimals"].(json.Number)
+	decimals, err := precision.Int64()
+	if err != nil {
+		return PaperEvent{}, err
+	}
+	filledAt, err := time.Parse(time.RFC3339Nano, stringField("filled_at"))
+	if err != nil {
+		return PaperEvent{}, err
+	}
+	recordedAt, err := time.Parse(time.RFC3339Nano, stringField("recorded_at"))
+	if err != nil {
+		return PaperEvent{}, err
+	}
+	return PaperEvent{
+		Version:         stringField("version"),
+		ID:              stringField("id"),
+		Mode:            stringField("mode"),
+		Source:          stringField("source"),
+		AccountID:       stringField("account_id"),
+		OrderID:         stringField("order_id"),
+		DecisionID:      stringField("decision_id"),
+		QuoteID:         stringField("quote_id"),
+		ResearchJobID:   stringField("research_job_id"),
+		FillEventID:     stringField("fill_event_id"),
+		InstrumentID:    stringField("instrument_id"),
+		RegistryVersion: stringField("registry_version"),
+		Decimals:        int(decimals),
+		Side:            stringField("side"),
+		QuantityRaw:     stringField("quantity_raw"),
+		GrossUSD:        stringField("gross_usd"),
+		FeeUSD:          stringField("fee_usd"),
+		Currency:        stringField("currency"),
+		FilledAt:        filledAt,
+		RecordedAt:      recordedAt,
+	}, nil
 }

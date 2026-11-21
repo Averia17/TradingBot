@@ -6,7 +6,7 @@ from hashlib import sha256
 
 import msgspec
 
-from tradingbot_evaluation.replay import MAX_INPUT_BYTES, Replay, load_replay, replay_sha256
+from tradingbot_evaluation.replay import MAX_INPUT_BYTES, Replay, replay_sha256
 from tradingbot_evaluation.replay_evidence import (
     MAX_MARK_DAYS,
     native_daily_nav,
@@ -22,14 +22,13 @@ from tradingbot_evaluation.statistics import (
     EvaluationProtocol,
     WalkForwardProvenance,
     WalkForwardSource,
-    _validate_protocol,
     load_evidence,
-    protocol_sha256,
+    verify_frozen_protocol,
 )
 from tradingbot_evaluation.walk_forward import (
     WalkForwardPlan,
+    _run_walk_forward,
     load_walk_forward_plan,
-    run_walk_forward,
 )
 
 
@@ -42,27 +41,21 @@ def derive_walk_forward_evidence(
     infer: Callable[[bytes], bytes],
     identity_registry_raw: bytes | None = None,
 ) -> EvaluationEvidence:
-    frozen = protocol_sha256(protocol)
-    if frozen != expected_protocol_sha256:
-        raise ValueError("Frozen protocol SHA-256 differs from the expected digest")
-    _validate_protocol(protocol)
+    frozen = verify_frozen_protocol(protocol, expected_protocol_sha256)
     source = protocol.walk_forward_source
     if source is msgspec.UNSET:
         raise ValueError("A frozen walk-forward source is required")
     plan = study_plan(protocol, plan_raw, source.plan_sha256)
-    identity = study_identity(source, plan, tape_raw, identity_registry_raw)
+    tape, identity = study_tape(source, plan, tape_raw, identity_registry_raw)
     benchmarks = source.benchmarks
     if identity is not None:
         benchmarks = resolve_identity_benchmarks(benchmarks, identity)
     replay, provenance, _ = reproduce_study(
         plan,
-        plan_raw,
-        tape_raw,
-        plan_sha256=source.plan_sha256,
-        tape_sha256=source.tape_sha256,
+        tape,
+        identity,
+        source=source,
         infer=infer,
-        identity_registry_raw=identity_registry_raw,
-        identity_registry_sha256=source.identity_registry_sha256,
     )
     evidence = EvaluationEvidence(
         schema_version=protocol.schema_version,
@@ -80,12 +73,12 @@ def derive_walk_forward_evidence(
     return load_evidence(msgspec.json.encode(evidence))
 
 
-def study_identity(
+def study_tape(
     source: WalkForwardSource | AblationSource,
     plan: WalkForwardPlan,
     tape_raw: bytes,
     registry_raw: bytes | None,
-) -> ReplayIdentity | None:
+) -> tuple[Replay, ReplayIdentity | None]:
     registry_sha = source.identity_registry_sha256
     has_registry = registry_sha is not msgspec.UNSET
     if has_registry != (registry_raw is not None) or has_registry != (
@@ -110,7 +103,7 @@ def study_identity(
         if identity.registry != plan.identity_registry:
             raise ValueError("Walk-forward plan and tape registry references differ")
         validate_identity_quotes(tape, identity)
-    return identity
+    return tape, identity
 
 
 def study_plan(
@@ -132,31 +125,21 @@ def study_plan(
 
 def reproduce_study(
     plan: WalkForwardPlan,
-    plan_raw: bytes,
-    tape_raw: bytes,
+    tape: Replay,
+    identity: ReplayIdentity | None,
     *,
-    plan_sha256: str,
-    tape_sha256: str,
+    source: WalkForwardSource | AblationSource,
     infer: Callable[[bytes], bytes],
-    identity_registry_raw: bytes | None = None,
-    identity_registry_sha256: str | msgspec.UnsetType = msgspec.UNSET,
 ) -> tuple[Replay, WalkForwardProvenance, tuple[str, ...]]:
-    report = run_walk_forward(
-        plan_raw,
-        tape_raw,
+    prepared, report = _run_walk_forward(
+        plan,
+        tape,
+        identity,
+        plan_hash=source.plan_sha256,
+        tape_hash=source.tape_sha256,
         infer=infer,
-        expected_plan_sha256=plan_sha256,
-        expected_tape_sha256=tape_sha256,
-        identity_registry_raw=identity_registry_raw,
-        expected_identity_registry_sha256=(
-            None if identity_registry_sha256 is msgspec.UNSET else identity_registry_sha256
-        ),
-        include_replay_input=True,
     )
-    native = report["native_replay_input"]
-    if identity_registry_sha256 is not msgspec.UNSET:
-        native = native["replay"]
-    replay = load_replay(msgspec.json.encode(native))
+    replay = prepared.replay
     digest = replay_sha256(replay)
     if digest != report["normalized_input_sha256"]:
         raise RuntimeError("Walk-forward produced a different normalized replay")
@@ -167,13 +150,13 @@ def reproduce_study(
     )
     provenance = WalkForwardProvenance(
         method="synthetic_walk_forward",
-        plan_sha256=plan_sha256,
-        tape_sha256=tape_sha256,
+        plan_sha256=source.plan_sha256,
+        tape_sha256=source.tape_sha256,
         research_steps_sha256=steps_digest,
         step_count=len(plan.steps),
         llm_calls_used=report["llm_calls_used"],
         max_total_llm_calls=plan.max_total_llm_calls,
         replay=native_replay_provenance(digest),
-        identity_registry_sha256=identity_registry_sha256,
+        identity_registry_sha256=source.identity_registry_sha256,
     )
     return replay, provenance, config_digests

@@ -27,14 +27,12 @@ type resultDocument struct {
 	Reports       map[string]map[string]string `json:"reports"`
 	Metadata      any                          `json:"metadata"`
 	ExpiresAt     time.Time                    `json:"-"`
+
+	checkedBatch contract.Batch
+	batchValid   bool
 }
 
-func (h jobHTTP) complete(w http.ResponseWriter, r *http.Request) {
-	jobID := strings.ToLower(r.PathValue("id"))
-	if !jobUUID.MatchString(jobID) {
-		writeError(w, http.StatusBadRequest, "invalid_job_id")
-		return
-	}
+func (h jobHTTP) complete(w http.ResponseWriter, r *http.Request, jobID string) {
 	body, ok := readJSONBody(w, r)
 	if !ok {
 		return
@@ -83,20 +81,11 @@ func (h jobHTTP) complete(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "storage_unavailable")
 	default:
 		w.Header().Set("Location", "/v1/research/jobs/"+result.JobID+"/result")
-		status := http.StatusOK
-		if created {
-			status = http.StatusCreated
-		}
-		writeResult(w, status, result)
+		writeResult(w, createStatus(created), result)
 	}
 }
 
-func (h jobHTTP) getResult(w http.ResponseWriter, r *http.Request) {
-	jobID := strings.ToLower(r.PathValue("id"))
-	if !jobUUID.MatchString(jobID) {
-		writeError(w, http.StatusBadRequest, "invalid_job_id")
-		return
-	}
+func (h jobHTTP) getResult(w http.ResponseWriter, r *http.Request, jobID string) {
 	ctx, cancel := context.WithTimeout(r.Context(), jobStoreTimeout)
 	defer cancel()
 	result, err := h.store.GetResult(ctx, jobID)
@@ -153,7 +142,28 @@ func parseResultDocument(fields map[string]json.RawMessage) (resultDocument, err
 		return resultDocument{}, errInvalidResult
 	}
 	document.Batch, err = json.Marshal(batch)
-	return document, err
+	if err != nil {
+		return resultDocument{}, err
+	}
+	// Local checks do not need a job lock. Record their verdict for the
+	// store callback, where lease authority and the durable clock are known.
+	document.checkedBatch, err = contract.DecodeBatch(document.Batch)
+	document.batchValid = err == nil && document.matchesReportHashes()
+	return document, nil
+}
+
+func (d resultDocument) matchesReportHashes() bool {
+	count := 0
+	for symbol, reports := range d.Reports {
+		for field, text := range reports {
+			digest := sha256.Sum256([]byte(text))
+			if d.checkedBatch.Evidence[symbol+":"+field] != hex.EncodeToString(digest[:]) {
+				return false
+			}
+			count++
+		}
+	}
+	return count == len(d.checkedBatch.Evidence)
 }
 
 func (d resultDocument) validate(job jobs.Job, dbNow time.Time, maxAge time.Duration) error {
@@ -188,29 +198,17 @@ func (d resultDocument) validate(job jobs.Job, dbNow time.Time, maxAge time.Dura
 	if err != nil {
 		return errInvalidStoredJob
 	}
-	batch, err := contract.ParseBatch(d.Batch, dbNow, maxAge)
-	if err != nil || !batch.Expires.Equal(d.ExpiresAt) || contract.CheckAllocation(batch, portfolio, request.RequestedSymbols) != nil {
+	if !d.batchValid || d.checkedBatch.CheckFreshness(dbNow, maxAge) != nil ||
+		!d.checkedBatch.Expires.Equal(d.ExpiresAt) || contract.CheckAllocation(d.checkedBatch, portfolio, request.RequestedSymbols) != nil {
 		return errInvalidResult
 	}
 	if len(d.Reports) != len(request.RequestedSymbols) {
 		return errInvalidResult
 	}
-	count := 0
 	for _, symbol := range request.RequestedSymbols {
-		reports, exists := d.Reports[symbol]
-		if !exists {
+		if _, exists := d.Reports[symbol]; !exists {
 			return errInvalidResult
 		}
-		for field, text := range reports {
-			digest := sha256.Sum256([]byte(text))
-			if batch.Evidence[symbol+":"+field] != hex.EncodeToString(digest[:]) {
-				return errInvalidResult
-			}
-			count++
-		}
-	}
-	if count != len(batch.Evidence) {
-		return errInvalidResult
 	}
 	return nil
 }

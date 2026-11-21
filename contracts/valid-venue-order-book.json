@@ -1,0 +1,17 @@
+{
+  "symbol": "NVDA",
+  "depth": 5,
+  "provider": "dzengi",
+  "firmness": "indicative",
+  "provider_timestamp": 1795185000123,
+  "requested_at": "2026-11-20T14:30:00Z",
+  "observed_at": "2026-11-20T14:30:00.25Z",
+  "bids": [
+    {"price": "100.001", "quantity": "9007199254740993.01"},
+    {"price": "99.99", "quantity": "1"}
+  ],
+  "asks": [
+    {"price": "100.01", "quantity": "0.00000001"},
+    {"price": "100.5", "quantity": "20"}
+  ]
+}

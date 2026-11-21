@@ -1,0 +1,223 @@
+{
+  "$defs": {
+    "MarketScreen": {
+      "additionalProperties": false,
+      "properties": {
+        "market_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$",
+          "title": "Market Id",
+          "type": "string"
+        },
+        "security_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$",
+          "title": "Security Id",
+          "type": "string"
+        },
+        "symbol": {
+          "pattern": "^[A-Z][A-Z0-9.\\-]{0,15}$",
+          "title": "Symbol",
+          "type": "string"
+        },
+        "observation_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$",
+          "title": "Observation Id",
+          "type": "string"
+        },
+        "observed_at": {
+          "format": "date-time",
+          "title": "Observed At",
+          "type": "string"
+        },
+        "available_at": {
+          "format": "date-time",
+          "title": "Available At",
+          "type": "string"
+        },
+        "mark_usd": {
+          "pattern": "^(?:0|[1-9][0-9]{0,11})(?:\\.[0-9]{1,8})?$",
+          "title": "Mark Usd",
+          "type": "string"
+        },
+        "index_usd": {
+          "pattern": "^(?:0|[1-9][0-9]{0,11})(?:\\.[0-9]{1,8})?$",
+          "title": "Index Usd",
+          "type": "string"
+        },
+        "mark_stress_bps": {
+          "maximum": 10000,
+          "minimum": 1,
+          "title": "Mark Stress Bps",
+          "type": "integer"
+        },
+        "status": {
+          "enum": [
+            "eligible",
+            "no_eligible_options",
+            "not_yet_available",
+            "stale_observation",
+            "mark_basis_above_limit"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "options": {
+          "items": {
+            "$ref": "#/$defs/Option"
+          },
+          "maxItems": 24,
+          "title": "Options",
+          "type": "array"
+        }
+      },
+      "required": [
+        "market_id",
+        "security_id",
+        "symbol",
+        "observation_id",
+        "observed_at",
+        "available_at",
+        "mark_usd",
+        "index_usd",
+        "mark_stress_bps",
+        "status",
+        "options"
+      ],
+      "title": "MarketScreen",
+      "type": "object"
+    },
+    "Option": {
+      "additionalProperties": false,
+      "properties": {
+        "option_id": {
+          "maxLength": 140,
+          "minLength": 1,
+          "title": "Option Id",
+          "type": "string"
+        },
+        "side": {
+          "enum": [
+            "LONG",
+            "SHORT"
+          ],
+          "title": "Side",
+          "type": "string"
+        },
+        "leverage": {
+          "maximum": 100,
+          "minimum": 1,
+          "title": "Leverage",
+          "type": "integer"
+        },
+        "notional_usd": {
+          "pattern": "^(?:0|[1-9][0-9]{0,11})(?:\\.[0-9]{1,8})?$",
+          "title": "Notional Usd",
+          "type": "string"
+        },
+        "initial_margin_usd": {
+          "pattern": "^(?:0|[1-9][0-9]{0,11})(?:\\.[0-9]{1,8})?$",
+          "title": "Initial Margin Usd",
+          "type": "string"
+        },
+        "scenario_loss_usd": {
+          "pattern": "^(?:0|[1-9][0-9]{0,11})(?:\\.[0-9]{1,8})?$",
+          "title": "Scenario Loss Usd",
+          "type": "string"
+        },
+        "scenario_headroom_usd": {
+          "pattern": "^(?:0|[1-9][0-9]{0,11})(?:\\.[0-9]{1,8})?$",
+          "title": "Scenario Headroom Usd",
+          "type": "string"
+        },
+        "projected_funding_cost_bps": {
+          "maximum": 20000,
+          "minimum": -10000,
+          "title": "Projected Funding Cost Bps",
+          "type": "integer"
+        },
+        "estimated_total_cost_bps": {
+          "maximum": 20000,
+          "minimum": -10000,
+          "title": "Estimated Total Cost Bps",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "option_id",
+        "side",
+        "leverage",
+        "notional_usd",
+        "initial_margin_usd",
+        "scenario_loss_usd",
+        "scenario_headroom_usd",
+        "projected_funding_cost_bps",
+        "estimated_total_cost_bps"
+      ],
+      "title": "Option",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "0.1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "source_mode": {
+      "enum": [
+        "synthetic_fixture",
+        "observed_market"
+      ],
+      "title": "Source Mode",
+      "type": "string"
+    },
+    "study_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Study Sha256",
+      "type": "string"
+    },
+    "as_of": {
+      "format": "date-time",
+      "title": "As Of",
+      "type": "string"
+    },
+    "horizon_hours": {
+      "maximum": 720,
+      "minimum": 1,
+      "title": "Horizon Hours",
+      "type": "integer"
+    },
+    "available_collateral_usd": {
+      "pattern": "^(?:0|[1-9][0-9]{0,11})(?:\\.[0-9]{1,8})?$",
+      "title": "Available Collateral Usd",
+      "type": "string"
+    },
+    "min_net_edge_bps": {
+      "maximum": 10000,
+      "minimum": 0,
+      "title": "Min Net Edge Bps",
+      "type": "integer"
+    },
+    "markets": {
+      "items": {
+        "$ref": "#/$defs/MarketScreen"
+      },
+      "maxItems": 8,
+      "minItems": 1,
+      "title": "Markets",
+      "type": "array"
+    }
+  },
+  "required": [
+    "schema_version",
+    "source_mode",
+    "study_sha256",
+    "as_of",
+    "horizon_hours",
+    "available_collateral_usd",
+    "min_net_edge_bps",
+    "markets"
+  ],
+  "title": "PerpScreen",
+  "type": "object"
+}

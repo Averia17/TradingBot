@@ -1,18 +1,14 @@
 package notifications
 
 import (
-	"bytes"
 	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"math"
-	"net/http"
 	"slices"
 	"strconv"
 	"strings"
@@ -165,16 +161,19 @@ func (c *PortfolioCommands) handleCommand(ctx context.Context, message string) e
 	if len(args) == 0 {
 		return nil
 	}
-	view := strings.TrimPrefix(args[0], "/")
-	if args[0] != "/"+view || (view != "portfolio" && view != "positions" && view != "performance") {
+	maxArgs := 1
+	switch args[0] {
+	case "/portfolio", "/positions":
+	case "/performance":
+		maxArgs = 2
+	default:
 		return nil
 	}
 	period := defaultPortfolioPeriod
-	if view == "performance" && len(args) == 2 {
+	if len(args) == 2 {
 		period = args[1]
 	}
-	if (view != "performance" && len(args) != 1) || len(args) > 2 ||
-		(period != "7d" && period != "30d" && period != "all") {
+	if len(args) > maxArgs || (period != "7d" && period != "30d" && period != "all") {
 		return c.telegram.Send(ctx, "Команды: /portfolio, /positions, /performance [7d|30d|all].")
 	}
 	report, err := c.analytics.fetch(ctx, period)
@@ -186,7 +185,7 @@ func (c *PortfolioCommands) handleCommand(ctx context.Context, message string) e
 	key := base64.RawURLEncoding.EncodeToString(sum[:12])
 	c.cache[c.nextCache] = cachedPortfolio{key: key, report: report}
 	c.nextCache = (c.nextCache + 1) % maxCachedReports
-	return c.sendView(ctx, view, 0, key, report)
+	return c.sendView(ctx, args[0][1:], 0, key, report)
 }
 
 func (c *PortfolioCommands) handleCallback(ctx context.Context, id, data string) error {
@@ -202,17 +201,14 @@ func (c *PortfolioCommands) handleCallback(ctx context.Context, id, data string)
 		return nil
 	}
 	for _, entry := range c.cache {
-		if entry.key == "" || entry.key != parts[1] {
+		if entry.key == "" || entry.key != parts[1] || !entry.report.hasPage(parts[2], page) {
 			continue
 		}
-		if (parts[2] == "positions" && page <= max(0, len(entry.report.Positions)-1)/positionsPerPage) ||
-			((parts[2] == "portfolio" || parts[2] == "performance") && page == 0) {
-			// A failed acknowledgement does not prevent the report reply.
-			if err := c.answerCallback(ctx, id, ""); err != nil && ctx.Err() == nil {
-				slog.Warn("Telegram portfolio button acknowledgement failed", "error", err)
-			}
-			return c.sendView(ctx, parts[2], page, entry.key, entry.report)
+		// A failed acknowledgement does not prevent the report reply.
+		if err := c.answerCallback(ctx, id, ""); err != nil && ctx.Err() == nil {
+			slog.Warn("Telegram portfolio button acknowledgement failed", "error", err)
 		}
+		return c.sendView(ctx, parts[2], page, entry.key, entry.report)
 	}
 	return c.answerCallback(ctx, id, "Отчёт устарел. Откройте /portfolio.")
 }
@@ -251,7 +247,7 @@ func (c *PortfolioCommands) sendView(ctx context.Context, view string, page int,
 		if page > 0 {
 			nav = append(nav, button("Назад", "positions", page-1))
 		}
-		if (page+1)*positionsPerPage < len(report.Positions) {
+		if page+1 < report.positionPageCount() {
 			nav = append(nav, button("Дальше", "positions", page+1))
 		}
 		if len(nav) > 0 {
@@ -260,40 +256,4 @@ func (c *PortfolioCommands) sendView(ctx context.Context, view string, page int,
 		rows = append(rows, []telegramButton{button("Сводка", "portfolio", 0)})
 	}
 	return c.telegram.sendMessage(ctx, content, &telegramKeyboard{Rows: rows})
-}
-
-func (t *Telegram) commandRequest(ctx context.Context, method string, value any, limit int64, result any) error {
-	payload, err := json.Marshal(value)
-	if err != nil {
-		return errors.New("cannot encode Telegram command request")
-	}
-	endpoint := strings.TrimSuffix(t.endpoint, "/sendMessage") + "/" + method
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
-	if err != nil {
-		return errors.New("cannot build Telegram command request")
-	}
-	request.Header.Set("Content-Type", "application/json")
-	response, err := t.client.Do(request)
-	if err != nil {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		return errors.New("Telegram command request transport failed")
-	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		return fmt.Errorf("Telegram command request failed (HTTP %d)", response.StatusCode)
-	}
-	body, err := io.ReadAll(io.LimitReader(response.Body, limit+1))
-	if err != nil || int64(len(body)) > limit {
-		return errors.New("Telegram command response could not be read")
-	}
-	var reply struct {
-		OK     bool            `json:"ok"`
-		Result json.RawMessage `json:"result"`
-	}
-	if json.Unmarshal(body, &reply) != nil || !reply.OK || json.Unmarshal(reply.Result, result) != nil {
-		return errors.New("Telegram command request was unsuccessful")
-	}
-	return nil
 }

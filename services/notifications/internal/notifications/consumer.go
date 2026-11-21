@@ -35,14 +35,14 @@ func Consume(ctx context.Context, brokers []string, topic, group string, send fu
 
 	slog.Info("polling Kafka for trade notifications", "topic", topic, "group", group)
 	for ctx.Err() == nil {
-		if err := consumeOne(ctx, kafka, send); err != nil {
+		if err := pollAndDeliver(ctx, kafka, send); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func consumeOne(ctx context.Context, kafka *kgo.Client, send func(context.Context, string) error) error {
+func pollAndDeliver(ctx context.Context, kafka *kgo.Client, send func(context.Context, string) error) error {
 	fetches := kafka.PollRecords(ctx, 1)
 	defer kafka.AllowRebalance()
 	if ctx.Err() != nil {
@@ -56,23 +56,23 @@ func consumeOne(ctx context.Context, kafka *kgo.Client, send func(context.Contex
 		return nil
 	}
 	record := records.Next()
-	position := fmt.Sprintf("%s[%d]@%d", record.Topic, record.Partition, record.Offset)
 	id, message, err := decodeMessage(record)
 	if err != nil {
-		return fmt.Errorf("Kafka record %s: %w", position, err)
+		return fmt.Errorf("Kafka record %s[%d]@%d: %w", record.Topic, record.Partition, record.Offset, err)
 	}
 	if string(record.Key) != id {
-		return fmt.Errorf("Kafka record %s key does not match the fill ID", position)
+		return fmt.Errorf("Kafka record %s[%d]@%d key does not match the fill ID", record.Topic, record.Partition, record.Offset)
 	}
 	if err := send(ctx, message); err != nil {
-		return fmt.Errorf("send trade %s from Kafka record %s: %w", id, position, err)
+		return fmt.Errorf("send trade %s from Kafka record %s[%d]@%d: %w", id, record.Topic, record.Partition, record.Offset, err)
 	}
 
 	// Finish the offset commit even if shutdown arrives after Telegram accepted the message.
 	commit, cancel := context.WithTimeout(context.WithoutCancel(ctx), 8*time.Second)
 	defer cancel()
 	if err := kafka.CommitRecords(commit, record); err != nil {
-		return fmt.Errorf("Telegram accepted trade %s but Kafka record %s was not confirmed committed: %w", id, position, err)
+		return fmt.Errorf("Telegram accepted trade %s but Kafka record %s[%d]@%d was not confirmed committed: %w",
+			id, record.Topic, record.Partition, record.Offset, err)
 	}
 	slog.Info("trade notification delivered", "fill_id", id, "topic", record.Topic,
 		"partition", record.Partition, "offset", record.Offset)
@@ -99,14 +99,7 @@ func paperMessage(event fill_event.PaperEvent) string {
 	if event.Side == "SELL" {
 		side = "Продажа"
 	}
-	quantity := event.QuantityRaw
-	if event.Decimals > 0 {
-		if len(quantity) <= event.Decimals {
-			quantity = strings.Repeat("0", event.Decimals+1-len(quantity)) + quantity
-		}
-		point := len(quantity) - event.Decimals
-		quantity = quantity[:point] + "." + quantity[point:]
-	}
+	quantity := decimalQuantity(event.QuantityRaw, event.Decimals)
 	return fmt.Sprintf("[PAPER · СИМУЛЯЦИЯ] %s %s\nКоличество: %s\nВаловая сумма: %s USD\nКомиссия: %s USD\nИсполнено: %s\nID исполнения: %s",
 		side, event.InstrumentID, quantity, event.GrossUSD, event.FeeUSD, event.FilledAt.Format(time.RFC3339Nano), event.ID)
 }

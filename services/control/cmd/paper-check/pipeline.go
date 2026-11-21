@@ -7,6 +7,9 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+
+	"tradingbot/control/internal/jobs"
+	"tradingbot/control/internal/paper_workflow"
 )
 
 const pipelinePageSize = 100
@@ -49,7 +52,9 @@ func checkPipeline(ctx context.Context, tx pgx.Tx, stallAfter time.Duration, r *
 	}
 	// Limit candidates before reading and validating their document hashes.
 	rows, err := tx.Query(ctx, `WITH candidates AS MATERIALIZED (
-		SELECT d.job_id, j.status, j.attempt_count, j.created_at FROM research_paper_dispatch d
+		SELECT d.job_id, j.status, j.attempt_count, j.created_at, j.request AS job_request,
+			j.request_sha256 AS job_sha256, j.identity_registry_sha256 AS registry_sha
+		FROM research_paper_dispatch d
 		JOIN research_jobs j ON j.id=d.job_id
 		WHERE d.account_id=$1 AND (d.finished_at IS NULL OR d.job_id=nullif($2,'')::uuid)
 		ORDER BY (d.job_id=nullif($2,'')::uuid) DESC NULLS LAST, j.created_at, d.job_id
@@ -60,7 +65,10 @@ func checkPipeline(ctx context.Context, tx pgx.Tx, stallAfter time.Duration, r *
 		d.finished_at, coalesce(d.finished_status,''), d.request, d.request_sha256,
 		coalesce(p.account_id=d.account_id AND p.request_sha256=d.request_sha256
 			AND p.quote_sha256 IS NOT DISTINCT FROM sha256(p.quote)
-			AND p.result_sha256 IS NOT DISTINCT FROM sha256(p.result), p.job_id IS NULL)
+			AND p.result_sha256 IS NOT DISTINCT FROM sha256(p.result), p.job_id IS NULL),
+		c.job_request, c.job_sha256, c.registry_sha, a.identity_registry_sha256,
+		CASE WHEN c.registry_sha <> '' THEN rr.payload END,
+		CASE WHEN c.registry_sha <> '' THEN rr.payload_sha256 END
 	FROM candidates c
 	JOIN research_paper_dispatch d ON d.job_id=c.job_id
 	LEFT JOIN research_job_attempts a ON a.job_id=c.job_id AND a.attempt=c.attempt_count
@@ -80,13 +88,18 @@ func checkPipeline(ctx context.Context, tx pgx.Tx, stallAfter time.Duration, r *
 			break
 		}
 		var job pipelineJob
+		var archivedJob jobs.Job
+		var archivedResult jobs.Result
 		var completedAttempt *int
-		var request, requestHash []byte
+		var request, requestHash, jobHash, resultHash []byte
+		var registrySHA string
+		var attemptRegistrySHA *string
 		var applicationOK bool
 		if err := rows.Scan(&job.JobID, &job.ResearchStatus, &job.AttemptCount, &job.JobCreatedAt,
 			&job.LeaseExpiresAt, &job.ResearchCompletedAt, &completedAttempt,
 			&job.ApplicationCreatedAt, &job.ApplicationReceipt, &job.OrderID, &job.OrderStatus,
-			&job.FinishedAt, &job.FinishedStatus, &request, &requestHash, &applicationOK); err != nil {
+			&job.FinishedAt, &job.FinishedStatus, &request, &requestHash, &applicationOK,
+			&archivedJob.Request, &jobHash, &registrySHA, &attemptRegistrySHA, &archivedResult.Payload, &resultHash); err != nil {
 			return err
 		}
 		if job.JobID == selected {
@@ -98,7 +111,21 @@ func checkPipeline(ctx context.Context, tx pgx.Tx, stallAfter time.Duration, r *
 				*stamp = stamp.UTC()
 			}
 		}
-		code := job.classify(r.CheckedAt, stallAfter, applicationOK && validDispatchBinding(request, requestHash, job.JobID, r.AccountID), completedAttempt)
+		archivedJob.ID, archivedJob.Status, archivedJob.CreatedAt = job.JobID, job.ResearchStatus, job.JobCreatedAt
+		bindingOK := applicationOK && matchesDigest(request, requestHash) && matchesDigest(archivedJob.Request, jobHash) &&
+			(attemptRegistrySHA == nil || *attemptRegistrySHA == registrySHA)
+		if bindingOK && registrySHA != "" {
+			var receipt *jobs.Result
+			if completedAttempt != nil && job.ResearchCompletedAt != nil {
+				archivedResult.JobID, archivedResult.Attempt, archivedResult.CompletedAt = job.JobID, *completedAttempt, *job.ResearchCompletedAt
+				receipt = &archivedResult
+			}
+			bindingOK = (receipt == nil || matchesDigest(receipt.Payload, resultHash)) &&
+				paper_workflow.CheckArchivedIdentityDispatch(request, archivedJob, receipt, r.AccountID, registrySHA, r.CheckedAt)
+		} else if bindingOK {
+			bindingOK = validLegacyDispatchBinding(request, archivedJob, r.AccountID)
+		}
+		code := job.classify(r.CheckedAt, stallAfter, bindingOK, completedAttempt)
 		r.Pipeline.Jobs = append(r.Pipeline.Jobs, job)
 		if code != "" {
 			r.Issues = append(r.Issues, issue{Code: code, JobID: job.JobID, OrderID: job.OrderID})
@@ -130,16 +157,22 @@ func checkFillRelay(ctx context.Context, tx pgx.Tx, stallAfter time.Duration, r 
 	return nil
 }
 
-func validDispatchBinding(body, digest []byte, jobID, accountID string) bool {
+func validLegacyDispatchBinding(body []byte, job jobs.Job, accountID string) bool {
 	var binding struct {
-		Version string `json:"paper_apply_schema_version"`
-		JobID   string `json:"job_id"`
-		Context struct {
+		Version  string          `json:"paper_apply_schema_version"`
+		JobID    string          `json:"job_id"`
+		Identity json.RawMessage `json:"identity_binding"`
+		Context  struct {
 			AccountID string `json:"account_id"`
 		} `json:"snapshot_context"`
 	}
-	return matchesDigest(body, digest) && json.Unmarshal(body, &binding) == nil &&
-		binding.Version == "0.1" && binding.JobID == jobID && binding.Context.AccountID == accountID
+	var input struct {
+		Version  string          `json:"job_schema_version"`
+		Registry json.RawMessage `json:"identity_registry"`
+	}
+	return json.Unmarshal(body, &binding) == nil && binding.Version == paper_workflow.Version && len(binding.Identity) == 0 &&
+		binding.JobID == job.ID && binding.Context.AccountID == accountID &&
+		json.Unmarshal(job.Request, &input) == nil && input.Version == "0.1" && len(input.Registry) == 0
 }
 
 func (j *pipelineJob) classify(now time.Time, stallAfter time.Duration, bindingOK bool, completedAttempt *int) string {

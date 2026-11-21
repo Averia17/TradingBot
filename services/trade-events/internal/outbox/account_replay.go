@@ -14,6 +14,8 @@ import (
 
 var paperAccountIDPattern = regexp.MustCompile(`^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$`)
 
+const paperAccountReplayPageSize = 128
+
 // ReplayPaperAccount republishes a bounded ledger prefix without changing its
 // pgqueue state. Consumers deduplicate overlap with concurrent delivery.
 func (o *Outbox) ReplayPaperAccount(ctx context.Context, producer *kgo.Client, accountID string) (int64, error) {
@@ -52,7 +54,8 @@ func (o *Outbox) readPaperAccountReplayBatch(ctx context.Context, accountID stri
 		return nil, fmt.Errorf("read paper account replay page after version %d: %w", after, err)
 	}
 	defer rows.Close()
-	var records []*kgo.Record
+	records := make([]*kgo.Record, 0, min(paperAccountReplayPageSize, through-after))
+	kafkaKey := []byte(accountID)
 	want := after
 	for rows.Next() {
 		want++
@@ -70,7 +73,7 @@ func (o *Outbox) readPaperAccountReplayBatch(ctx context.Context, accountID stri
 		if err != nil {
 			return nil, fmt.Errorf("encode paper account replay version %d: %w", want, err)
 		}
-		records = append(records, &kgo.Record{Topic: PaperAccountTopic, Key: []byte(accountID), Value: payload})
+		records = append(records, &kgo.Record{Topic: PaperAccountTopic, Key: kafkaKey, Value: payload})
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("read paper account replay page after version %d: %w", after, err)

@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from fractions import Fraction
+from functools import partial
 from hashlib import sha256
 from itertools import pairwise
 from typing import Annotated
@@ -17,6 +18,7 @@ from nautilus_trader.model.identifiers import ClientId, Venue
 from tradingbot_evaluation.replay import (
     _FRACTIONAL_SECONDS,
     EPOCH,
+    NativeNav,
     Order,
     Replay,
     Timestamp,
@@ -25,6 +27,7 @@ from tradingbot_evaluation.replay import (
     _run_replay,
     _scaled_usd,
     _whole_shares,
+    replay_nav_series,
 )
 
 
@@ -270,14 +273,14 @@ def _cycles(config: EqualWeightSchedule, start_at: datetime) -> tuple[_Cycle, ..
     )
 
 
-def run_scheduled_equal_weight(
+def _scheduled_simulation(
     replay: Replay,
     *,
     config: EqualWeightSchedule,
     start_at: datetime,
     end_at: datetime,
     universe: tuple[str, ...],
-) -> dict:
+):
     if not universe:
         raise ValueError("Scheduled equal weight requires an initial executable universe")
     cycles = _cycles(config, start_at)
@@ -293,26 +296,55 @@ def run_scheduled_equal_weight(
             if at <= end_at
         )
 
+    make_strategy = partial(
+        _ScheduledStrategy, cycles=cycles, universe=universe, config=config,
+        commission_bps=replay.commission_bps,
+    )
+    return cycles, (boundaries, _PHASE_CLIENT), make_strategy
+
+
+def scheduled_equal_weight_nav(
+    replay: Replay,
+    cutoffs: tuple[datetime, ...],
+    *,
+    config: EqualWeightSchedule,
+    start_at: datetime,
+    universe: tuple[str, ...],
+) -> dict[datetime, NativeNav]:
+    if not cutoffs:
+        return {}
+    _, phases, make_strategy = _scheduled_simulation(
+        replay, config=config, start_at=start_at, end_at=cutoffs[-1], universe=universe,
+    )
+    return replay_nav_series(
+        msgspec.structs.replace(replay, orders=()), cutoffs,
+        strategy_factory=make_strategy, strategy_data=phases,
+    )
+
+
+def run_scheduled_equal_weight(
+    replay: Replay,
+    *,
+    config: EqualWeightSchedule,
+    start_at: datetime,
+    end_at: datetime,
+    universe: tuple[str, ...],
+) -> dict:
+    cycles, phases, make_strategy = _scheduled_simulation(
+        replay, config=config, start_at=start_at, end_at=end_at, universe=universe,
+    )
     strategy = None
 
     def strategy_factory(instruments, orders, units):
         nonlocal strategy
-        strategy = _ScheduledStrategy(
-            instruments,
-            orders,
-            units,
-            cycles=cycles,
-            universe=universe,
-            config=config,
-            commission_bps=replay.commission_bps,
-        )
+        strategy = make_strategy(instruments, orders, units)
         return strategy
 
     result = _run_replay(
         msgspec.structs.replace(replay, orders=()),
         through=end_at,
         strategy_factory=strategy_factory,
-        strategy_data=(boundaries, _PHASE_CLIENT),
+        strategy_data=phases,
     )
     reached = sum(cycle.cutoff <= end_at for cycle in cycles)
     if strategy is None or len(strategy.rebalances) != reached:

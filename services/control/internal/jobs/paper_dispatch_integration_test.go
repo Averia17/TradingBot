@@ -69,8 +69,8 @@ func TestOwnerBoundPaperEntryCannotArmExistingResearch(t *testing.T) {
 		t.Fatalf("could not queue the plain research job: %t %v", created, err)
 	}
 	plain.PaperDispatch = dispatch
-	bound := BoundPaperEntry{Job: plain, OwnerRegistrySHA256: ownerPin}
-	if _, created, err := store.CreateBoundPaperEntry(ctx, bound, nil); !errors.Is(err, ErrConflict) || created {
+	bound := BoundPaperJob{Job: plain, OwnerRegistrySHA256: ownerPin}
+	if _, created, err := store.CreateBoundPaperJob(ctx, bound, nil); !errors.Is(err, ErrConflict) || created {
 		t.Fatalf("existing research became dispatchable: %t %v", created, err)
 	}
 	if _, err := store.GetPaperDispatch(ctx, plain.ID); !errors.Is(err, ErrNotFound) {
@@ -79,18 +79,18 @@ func TestOwnerBoundPaperEntryCannotArmExistingResearch(t *testing.T) {
 	bound.Job = job(2)
 	bound.Job.PaperDispatch = dispatch
 	bound.OwnerRegistrySHA256 = strings.Repeat("b", 64)
-	if _, created, err := store.CreateBoundPaperEntry(ctx, bound, nil); !errors.Is(err, ErrConflict) || created {
+	if _, created, err := store.CreateBoundPaperJob(ctx, bound, nil); !errors.Is(err, ErrConflict) || created {
 		t.Fatalf("wrong owner registry accepted: %t %v", created, err)
 	}
 	bound.OwnerRegistrySHA256 = ownerPin
 	refused := errors.New("owner admission check denied")
-	if _, created, err := store.CreateBoundPaperEntry(ctx, bound, func() error { return refused }); !errors.Is(err, refused) || created {
+	if _, created, err := store.CreateBoundPaperJob(ctx, bound, func() error { return refused }); !errors.Is(err, refused) || created {
 		t.Fatalf("failed owner admission was not rolled back: %t %v", created, err)
 	}
 	if _, err := store.Get(ctx, bound.Job.ID); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("failed admission left a research row: %v", err)
 	}
-	queued, created, err := store.CreateBoundPaperEntry(ctx, bound, nil)
+	queued, created, err := store.CreateBoundPaperJob(ctx, bound, nil)
 	if err != nil || !created || queued.ID != bound.Job.ID {
 		t.Fatalf("authorized owner did not create bound job: %+v %t %v", queued, created, err)
 	}
@@ -98,7 +98,7 @@ func TestOwnerBoundPaperEntryCannotArmExistingResearch(t *testing.T) {
 	if err != nil || task.AccountID != dispatch.AccountID || !bytes.Equal(task.Request, dispatch.Request) {
 		t.Fatalf("bound job lacks its exact durable dispatch: %+v %v", task, err)
 	}
-	replayed, created, err := store.CreateBoundPaperEntry(ctx, bound, func() error { return refused })
+	replayed, created, err := store.CreateBoundPaperJob(ctx, bound, func() error { return refused })
 	if err != nil || created || !replayed.CreatedAt.Equal(queued.CreatedAt) {
 		t.Fatalf("bound replay did not return original admission: %+v %t %v", replayed, created, err)
 	}

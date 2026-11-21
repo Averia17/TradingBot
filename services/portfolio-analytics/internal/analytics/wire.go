@@ -137,7 +137,10 @@ func decodeRecord(data []byte, schema *jsonschema.Schema, dst any) error {
 	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.UseNumber()
-	src, err := readObject(decoder, 0)
+	if token, err := decoder.Token(); err != nil || token != json.Delim('{') {
+		return errors.New("expected a JSON object")
+	}
+	src, err := readObjectFields(decoder, 0)
 	if err != nil {
 		return err
 	}
@@ -156,12 +159,9 @@ func decodeRecord(data []byte, schema *jsonschema.Schema, dst any) error {
 
 // The record contracts contain objects and scalars. encoding/json by itself
 // accepts a repeated key, which would make an event's identity ambiguous.
-func readObject(decoder *json.Decoder, depth int) (map[string]any, error) {
+func readObjectFields(decoder *json.Decoder, depth int) (map[string]any, error) {
 	if depth > 4 {
 		return nil, errors.New("record is nested too deeply")
-	}
-	if token, err := decoder.Token(); err != nil || token != json.Delim('{') {
-		return nil, errors.New("expected a JSON object")
 	}
 	fields := make(map[string]any)
 	for decoder.More() {
@@ -173,28 +173,20 @@ func readObject(decoder *json.Decoder, depth int) (map[string]any, error) {
 		if _, exists := fields[key]; exists {
 			return nil, errors.New("duplicate JSON key")
 		}
-		var data json.RawMessage
-		if err := decoder.Decode(&data); err != nil {
+		value, err := decoder.Token()
+		if err != nil {
 			return nil, errors.New("invalid JSON value")
 		}
-		nested := json.NewDecoder(bytes.NewReader(data))
-		nested.UseNumber()
-		if len(data) > 0 && data[0] == '{' {
-			value, err := readObject(nested, depth+1)
+		if delimiter, ok := value.(json.Delim); ok {
+			if delimiter != '{' {
+				return nil, errors.New("unexpected JSON delimiter")
+			}
+			value, err = readObjectFields(decoder, depth+1)
 			if err != nil {
 				return nil, err
 			}
-			fields[key] = value
-		} else {
-			value, err := nested.Token()
-			if err != nil {
-				return nil, errors.New("invalid JSON scalar")
-			}
-			if _, ok := value.(json.Delim); ok {
-				return nil, errors.New("unexpected JSON delimiter")
-			}
-			fields[key] = value
 		}
+		fields[key] = value
 	}
 	if token, err := decoder.Token(); err != nil || token != json.Delim('}') {
 		return nil, errors.New("invalid end of JSON object")

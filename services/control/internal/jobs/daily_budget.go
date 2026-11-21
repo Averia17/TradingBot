@@ -41,38 +41,41 @@ func (s *Store) SetDailyCallBudget(ctx context.Context, day string, maxCalls int
 	if !validBudgetDay(day) || maxCalls < 0 {
 		return errors.New("invalid research call limit or UTC day")
 	}
-	return pgx.BeginTxFunc(ctx, s.pool, pgx.TxOptions{IsoLevel: pgx.ReadCommitted}, func(tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx, `SET LOCAL synchronous_commit = 'on'`); err != nil {
-			return fmt.Errorf("configure durable research daily limit: %w", err)
+	tx, err := s.beginWrite(ctx)
+	if err != nil {
+		return fmt.Errorf("begin research daily limit: %w", err)
+	}
+	defer rollback(tx)
+	if _, err := lockDailyCallPolicy(ctx, tx); err != nil {
+		return err
+	}
+	var existing int64
+	err = tx.QueryRow(ctx, `SELECT max_calls FROM research_daily_call_limits WHERE utc_day=$1::date`, day).Scan(&existing)
+	if err == nil {
+		if existing == maxCalls {
+			return nil
 		}
-		if _, err := lockDailyCallPolicy(ctx, tx); err != nil {
-			return err
-		}
-		var existing int64
-		err := tx.QueryRow(ctx, `SELECT max_calls FROM research_daily_call_limits WHERE utc_day=$1::date`, day).Scan(&existing)
-		if err == nil {
-			if existing == maxCalls {
-				return nil
-			}
-			return ErrDailyBudgetConflict
-		}
-		if !errors.Is(err, pgx.ErrNoRows) {
-			return fmt.Errorf("read existing research daily limit: %w", err)
-		}
-		result, err := tx.Exec(ctx, `INSERT INTO research_daily_call_limits (utc_day, max_calls)
-			SELECT $1::date, $2 WHERE $1::date >= (clock_timestamp() AT TIME ZONE 'UTC')::date`, day, maxCalls)
-		if err != nil {
-			return fmt.Errorf("record research daily limit: %w", err)
-		}
-		if result.RowsAffected() != 1 {
-			return errors.New("cannot configure a new research call limit for a past UTC day")
-		}
-		if _, err := tx.Exec(ctx, `UPDATE research_daily_call_policy
-			SET active_from = LEAST(active_from, $1::date) WHERE singleton`, day); err != nil {
-			return fmt.Errorf("activate research daily limits: %w", err)
-		}
-		return nil
-	})
+		return ErrDailyBudgetConflict
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("read existing research daily limit: %w", err)
+	}
+	result, err := tx.Exec(ctx, `INSERT INTO research_daily_call_limits (utc_day, max_calls)
+		SELECT $1::date, $2 WHERE $1::date >= (clock_timestamp() AT TIME ZONE 'UTC')::date`, day, maxCalls)
+	if err != nil {
+		return fmt.Errorf("record research daily limit: %w", err)
+	}
+	if result.RowsAffected() != 1 {
+		return errors.New("cannot configure a new research call limit for a past UTC day")
+	}
+	if _, err := tx.Exec(ctx, `UPDATE research_daily_call_policy
+		SET active_from = LEAST(active_from, $1::date) WHERE singleton`, day); err != nil {
+		return fmt.Errorf("activate research daily limits: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit research daily limit: %w", err)
+	}
+	return nil
 }
 
 // ReadDailyCallBudget reports durable permits from one PostgreSQL snapshot and

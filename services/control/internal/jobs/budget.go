@@ -21,41 +21,40 @@ type CallPermit struct {
 	Remaining int // Budget immediately after this grant, including any earlier attempts.
 }
 
+type jobCallBudget struct {
+	limit   int
+	invalid bool
+}
+
+func (b *jobCallBudget) UnmarshalJSON(value []byte) error {
+	// Only authorization requires a budget; read-only replay and completion
+	// still accept older jobs whose otherwise valid requests omit it.
+	if json.Unmarshal(value, &b.limit) != nil {
+		b.invalid = true
+	}
+	return nil
+}
+
 // AuthorizeCall reserves a job slot and any required daily capacity before an
 // invocation. Even a lost response, failed invocation or expired attempt keeps
 // the slot consumed. A replay can retrieve only its own active attempt's permit.
 func (s *Store) AuthorizeCall(ctx context.Context, jobID, workerID, token, callID string) (CallPermit, bool, error) {
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
-	if err != nil {
-		return CallPermit{}, false, fmt.Errorf("begin research call authorization: %w", err)
-	}
-	defer rollback(tx)
-	if _, err := tx.Exec(ctx, `SET LOCAL synchronous_commit = 'on'`); err != nil {
-		return CallPermit{}, false, fmt.Errorf("configure durable research call authorization: %w", err)
-	}
-	// Serialize with other permits, heartbeat, attempts and completion.
-	var legacyUnknown bool
-	err = tx.QueryRow(ctx, `SELECT legacy_budget_unknown FROM research_jobs WHERE id = $1 FOR UPDATE`, jobID).Scan(&legacyUnknown)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return CallPermit{}, false, ErrNotFound
-	}
-	if err != nil {
-		return CallPermit{}, false, fmt.Errorf("lock research job for call authorization: %w", err)
-	}
-	lease, _, err := currentLease(ctx, tx, jobID)
+	job, err := s.beginWorkerJob(ctx, jobID, "call authorization")
 	if err != nil {
 		return CallPermit{}, false, err
 	}
-	if lease.WorkerID != workerID || lease.Token != token {
-		return CallPermit{}, false, ErrLeaseConflict
+	defer rollback(job.tx)
+	lease, _, err := job.workerLease(ctx, workerID, token)
+	if err != nil {
+		return CallPermit{}, false, err
 	}
-	if legacyUnknown {
+	if job.legacyBudgetUnknown {
 		return CallPermit{}, false, ErrBudgetExhausted
 	}
-	grant := CallPermit{JobID: lease.Job.ID, CallID: callID}
+	grant := CallPermit{JobID: job.id, CallID: callID}
 	var leaseActive bool
-	err = tx.QueryRow(ctx, `SELECT attempt, remaining_llm_calls, clock_timestamp() < $3::timestamptz
-		FROM research_call_permits WHERE job_id = $1 AND call_id = $2`, jobID, callID, lease.ExpiresAt).
+	err = job.tx.QueryRow(ctx, `SELECT attempt, remaining_llm_calls, clock_timestamp() < $3::timestamptz
+		FROM research_call_permits WHERE job_id = $1 AND call_id = $2`, job.id, callID, lease.ExpiresAt).
 		Scan(&grant.Attempt, &grant.Remaining, &leaseActive)
 	if err == nil {
 		if !leaseActive {
@@ -69,18 +68,22 @@ func (s *Store) AuthorizeCall(ctx context.Context, jobID, workerID, token, callI
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return CallPermit{}, false, fmt.Errorf("look up committed research call permit: %w", err)
 	}
-	limit, err := storedCallLimit(ctx, tx, lease.Job.ID)
+	inputs, err := readJobInputs(ctx, job.tx, job.id)
 	if err != nil {
 		return CallPermit{}, false, err
 	}
-	activeFrom, err := lockDailyCallPolicy(ctx, tx)
+	budget := inputs.callBudget
+	if budget.invalid || budget.limit < 1 || budget.limit > maxJobCallPermits {
+		return CallPermit{}, false, errors.New("invalid persisted research call budget")
+	}
+	activeFrom, err := lockDailyCallPolicy(ctx, job.tx)
 	if err != nil {
 		return CallPermit{}, false, err
 	}
 	// Use the database clock at the actual insert, after validation and any
 	// waits. A new statement sees every receipt committed under the policy lock.
 	var created bool
-	err = tx.QueryRow(ctx, `WITH budget AS MATERIALIZED (
+	err = job.tx.QueryRow(ctx, `WITH budget AS MATERIALIZED (
 			SELECT $4::integer - (SELECT count(*)::integer FROM research_call_permits WHERE job_id = $1) AS available,
 			       clock_timestamp() AS now
 		), inserted AS (
@@ -95,7 +98,7 @@ func (s *Store) AuthorizeCall(ctx context.Context, jobID, workerID, token, callI
 			RETURNING remaining_llm_calls
 		)
 		SELECT available - 1, now < $5::timestamptz, EXISTS (SELECT 1 FROM inserted) FROM budget`,
-		jobID, lease.Attempt, callID, limit, lease.ExpiresAt, activeFrom).Scan(&grant.Remaining, &leaseActive, &created)
+		job.id, job.attempt, callID, budget.limit, lease.ExpiresAt, activeFrom).Scan(&grant.Remaining, &leaseActive, &created)
 	if err != nil {
 		return CallPermit{}, false, fmt.Errorf("persist research call permit: %w", err)
 	}
@@ -105,23 +108,9 @@ func (s *Store) AuthorizeCall(ctx context.Context, jobID, workerID, token, callI
 	if !created {
 		return CallPermit{}, false, ErrBudgetExhausted
 	}
-	if err := tx.Commit(ctx); err != nil {
+	if err := job.tx.Commit(ctx); err != nil {
 		return CallPermit{}, false, fmt.Errorf("commit research call permit: %w", err)
 	}
-	grant.Attempt = lease.Attempt
+	grant.Attempt = job.attempt
 	return grant, true, nil
-}
-
-func storedCallLimit(ctx context.Context, tx pgx.Tx, jobID string) (int, error) {
-	job, _, err := claimInputs(ctx, tx, jobID)
-	if err != nil {
-		return 0, err
-	}
-	var request struct {
-		MaxLLMCalls int `json:"max_llm_calls"`
-	}
-	if json.Unmarshal(job.Request, &request) != nil || request.MaxLLMCalls < 1 || request.MaxLLMCalls > 64 {
-		return 0, errors.New("invalid persisted research call budget")
-	}
-	return request.MaxLLMCalls, nil
 }

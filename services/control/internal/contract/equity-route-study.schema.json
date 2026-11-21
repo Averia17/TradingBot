@@ -1,0 +1,450 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Equity route research snapshot",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "source_mode",
+    "as_of",
+    "horizon_hours",
+    "account",
+    "policy",
+    "securities"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "0.1"
+    },
+    "source_mode": {
+      "enum": [
+        "synthetic_fixture",
+        "observed_market"
+      ]
+    },
+    "as_of": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "horizon_hours": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 720
+    },
+    "account": {
+      "$ref": "#/$defs/Account"
+    },
+    "policy": {
+      "$ref": "#/$defs/Policy"
+    },
+    "securities": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 8,
+      "items": {
+        "$ref": "#/$defs/Security"
+      }
+    }
+  },
+  "$defs": {
+    "Amount": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]{0,11})(\\.[0-9]{1,8})?$"
+    },
+    "Id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$"
+    },
+    "BPS": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 10000
+    },
+    "Symbol": {
+      "type": "string",
+      "pattern": "^[A-Z][A-Z0-9.\\-]{0,15}$"
+    },
+    "Account": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "snapshot_id",
+        "spot_cash_usd",
+        "perp_collateral_usd",
+        "remaining_stress_budget_usd",
+        "has_open_perps",
+        "has_pending_orders"
+      ],
+      "properties": {
+        "snapshot_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "spot_cash_usd": {
+          "$ref": "#/$defs/Amount"
+        },
+        "perp_collateral_usd": {
+          "$ref": "#/$defs/Amount"
+        },
+        "remaining_stress_budget_usd": {
+          "$ref": "#/$defs/Amount"
+        },
+        "has_open_perps": {
+          "type": "boolean"
+        },
+        "has_pending_orders": {
+          "type": "boolean"
+        }
+      }
+    },
+    "Policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "allow_leverage",
+        "max_notional_usd",
+        "max_perp_capital_at_risk_usd",
+        "min_stress_move_bps",
+        "max_observation_age_seconds",
+        "max_basis_bps",
+        "maintenance_buffer_bps",
+        "min_forecast_uncertainty_bps",
+        "min_net_edge_bps",
+        "min_perp_advantage_bps",
+        "min_leverage_advantage_usd",
+        "stress_loss_penalty_bps"
+      ],
+      "properties": {
+        "version": {
+          "$ref": "#/$defs/Id"
+        },
+        "allow_leverage": {
+          "type": "boolean"
+        },
+        "max_leverage": {
+          "description": "Owner cap for isolated perpetual entries. Absent with allow_leverage enabled, the legacy cap is 2. Disabled leverage always caps entries at 1.",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        },
+        "max_notional_usd": {
+          "$ref": "#/$defs/Amount"
+        },
+        "max_perp_capital_at_risk_usd": {
+          "$ref": "#/$defs/Amount"
+        },
+        "min_stress_move_bps": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10000
+        },
+        "max_observation_age_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 86400
+        },
+        "max_basis_bps": {
+          "$ref": "#/$defs/BPS"
+        },
+        "maintenance_buffer_bps": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10000
+        },
+        "min_forecast_uncertainty_bps": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10000
+        },
+        "min_net_edge_bps": {
+          "$ref": "#/$defs/BPS"
+        },
+        "min_perp_advantage_bps": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10000
+        },
+        "min_leverage_advantage_usd": {
+          "$ref": "#/$defs/Amount"
+        },
+        "stress_loss_penalty_bps": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10000
+        }
+      }
+    },
+    "Security": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "security_id",
+        "symbol",
+        "held_spot",
+        "corporate_action_window_clear",
+        "market_stress_down_bps",
+        "market_stress_up_bps",
+        "sizes"
+      ],
+      "properties": {
+        "security_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "symbol": {
+          "$ref": "#/$defs/Symbol"
+        },
+        "held_spot": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/HeldSpot"
+            }
+          ]
+        },
+        "corporate_action_window_clear": {
+          "type": "boolean"
+        },
+        "market_stress_down_bps": {
+          "$ref": "#/$defs/BPS"
+        },
+        "market_stress_up_bps": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 30000
+        },
+        "sizes": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "items": {
+            "$ref": "#/$defs/Size"
+          }
+        }
+      }
+    },
+    "HeldSpot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "market_id",
+        "notional_usd"
+      ],
+      "properties": {
+        "market_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "notional_usd": {
+          "$ref": "#/$defs/Amount"
+        }
+      }
+    },
+    "Size": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "notional_usd",
+        "spot",
+        "perp"
+      ],
+      "properties": {
+        "notional_usd": {
+          "$ref": "#/$defs/Amount"
+        },
+        "spot": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/SpotQuote"
+            }
+          ]
+        },
+        "perp": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/PerpQuote"
+            }
+          ]
+        }
+      }
+    },
+    "QuoteObservation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "observation_sha256",
+        "market_id",
+        "observed_at",
+        "available_at"
+      ],
+      "properties": {
+        "observation_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "market_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "observed_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "available_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "SpotQuote": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "observation",
+        "costs",
+        "exit_bps"
+      ],
+      "properties": {
+        "observation": {
+          "$ref": "#/$defs/QuoteObservation"
+        },
+        "costs": {
+          "$ref": "#/$defs/Costs"
+        },
+        "exit_bps": {
+          "$ref": "#/$defs/BPS"
+        }
+      }
+    },
+    "PerpQuote": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "observation",
+        "external_session_until",
+        "mark_basis_bps",
+        "margin_mode",
+        "venue_max_leverage",
+        "maintenance_margin_bps",
+        "long",
+        "short"
+      ],
+      "properties": {
+        "observation": {
+          "$ref": "#/$defs/QuoteObservation"
+        },
+        "external_session_until": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string",
+              "format": "date-time"
+            }
+          ]
+        },
+        "mark_basis_bps": {
+          "$ref": "#/$defs/BPS"
+        },
+        "margin_mode": {
+          "enum": [
+            "isolated",
+            "strict_isolated",
+            "cross_only",
+            "unknown"
+          ]
+        },
+        "venue_max_leverage": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        },
+        "maintenance_margin_bps": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10000
+        },
+        "long": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/PerpCosts"
+            }
+          ]
+        },
+        "short": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/PerpCosts"
+            }
+          ]
+        }
+      }
+    },
+    "Costs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "base_bps",
+        "stress_bps"
+      ],
+      "properties": {
+        "base_bps": {
+          "$ref": "#/$defs/BPS"
+        },
+        "stress_bps": {
+          "$ref": "#/$defs/BPS"
+        }
+      }
+    },
+    "PerpCosts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "execution",
+        "basis",
+        "funding"
+      ],
+      "properties": {
+        "execution": {
+          "$ref": "#/$defs/Costs"
+        },
+        "basis": {
+          "$ref": "#/$defs/Costs"
+        },
+        "funding": {
+          "$ref": "#/$defs/Funding"
+        }
+      }
+    },
+    "Funding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "forecast_bps",
+        "stress_bps"
+      ],
+      "properties": {
+        "forecast_bps": {
+          "type": "integer",
+          "minimum": -10000,
+          "maximum": 10000
+        },
+        "stress_bps": {
+          "$ref": "#/$defs/BPS"
+        }
+      }
+    }
+  }
+}

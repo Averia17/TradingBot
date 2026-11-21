@@ -9,11 +9,11 @@ import (
 	"syscall"
 	"time"
 
-	"tradingbot/control/internal/researchscheduler"
+	"tradingbot/control/internal/research_scheduler"
 )
 
 func main() {
-	var config researchscheduler.Config
+	var config research_scheduler.Config
 	path := flag.String("config", "", "frozen research schedule JSON file")
 	flag.StringVar(&config.ControlURL, "control-url", "http://127.0.0.1:18080", "loopback Control HTTP origin")
 	flag.StringVar(&config.ArchiveRoot, "archive-root", "", "directory containing the frozen local archives")
@@ -25,7 +25,7 @@ func main() {
 		slog.Error("cannot open schedule config", "error", err)
 		os.Exit(2)
 	}
-	schedule, err := researchscheduler.Load(file)
+	schedule, err := research_scheduler.Load(file)
 	file.Close()
 	if err != nil {
 		slog.Error("cannot load schedule config", "error", err)
@@ -33,7 +33,7 @@ func main() {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	if err := researchscheduler.Run(ctx, schedule, config); err != nil {
+	if err := research_scheduler.Run(ctx, schedule, config); err != nil {
 		slog.Error("research schedule stopped", "error", err)
 		os.Exit(1)
 	}

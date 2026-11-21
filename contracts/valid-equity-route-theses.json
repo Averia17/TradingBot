@@ -1,0 +1,21 @@
+{
+  "schema_version": "0.1",
+  "source_mode": "synthetic_fixture",
+  "study_sha256": "38130062ecfc9a843251ff224f489da78c863041d02cf3bb5708304859c96f53",
+  "theses": [
+    {
+      "security_id": "fixture-nvda",
+      "symbol": "NVDA",
+      "expected_price_return_bps": 250,
+      "uncertainty_bps": 20,
+      "review_in_hours": 2,
+      "thesis": "Synthetic forecast shared across all routes",
+      "invalidation_conditions": [
+        "Synthetic catalyst invalidated"
+      ],
+      "evidence_sha256": [
+        "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      ]
+    }
+  ]
+}

@@ -63,9 +63,9 @@ type CreateJob struct {
 	PaperDispatch *PaperDispatchInput
 }
 
-// BoundPaperEntry is the owner scheduler's explicit admission of a research
-// job and its paper dispatch in a single durable transaction.
-type BoundPaperEntry struct {
+// BoundPaperJob pairs an owner-approved entry or review job with its paper
+// dispatch. Both are persisted in one transaction.
+type BoundPaperJob struct {
 	Job                 CreateJob
 	OwnerRegistrySHA256 string
 }
@@ -101,6 +101,18 @@ func Open(ctx context.Context, dsn string) (*Store, error) {
 func (s *Store) Close() { s.pool.Close() }
 
 func (s *Store) Ping(ctx context.Context) error { return s.pool.Ping(ctx) }
+
+func (s *Store) beginWrite(ctx context.Context) (pgx.Tx, error) {
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+	if err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec(ctx, `SET LOCAL synchronous_commit = 'on'`); err != nil {
+		rollback(tx)
+		return nil, fmt.Errorf("configure durable commit: %w", err)
+	}
+	return tx, nil
+}
 
 // Now returns the same accounting clock used to timestamp research receipts.
 func (s *Store) Now(ctx context.Context) (time.Time, error) {
@@ -199,10 +211,10 @@ func (s *Store) Create(ctx context.Context, input CreateJob, admit func() error)
 	return s.create(ctx, input, registrySHA, false, admit)
 }
 
-// CreateBoundPaperEntry admits only a matching registry-bound job and its
+// CreateBoundPaperJob admits only a matching registry-bound job and its
 // owner dispatch. An identical research-only job is a conflict, including
 // when another transaction won the concurrent insertion.
-func (s *Store) CreateBoundPaperEntry(ctx context.Context, bound BoundPaperEntry, admit func() error) (Job, bool, error) {
+func (s *Store) CreateBoundPaperJob(ctx context.Context, bound BoundPaperJob, admit func() error) (Job, bool, error) {
 	input := bound.Job
 	registrySHA, err := jobRegistryPin(input.Request)
 	if err != nil || registrySHA == "" || registrySHA != bound.OwnerRegistrySHA256 || input.PaperDispatch == nil {
@@ -212,7 +224,7 @@ func (s *Store) CreateBoundPaperEntry(ctx context.Context, bound BoundPaperEntry
 }
 
 func (s *Store) create(ctx context.Context, input CreateJob, registrySHA string, requireBoundDispatch bool, admit func() error) (Job, bool, error) {
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+	tx, err := s.beginWrite(ctx)
 	if err != nil {
 		return Job{}, false, fmt.Errorf("begin research job transaction: %w", err)
 	}
@@ -221,9 +233,6 @@ func (s *Store) create(ctx context.Context, input CreateJob, registrySHA string,
 	snapshotHash := sha256.Sum256(input.Snapshot)
 	if job, err := existingJob(ctx, tx, input, requestHash[:], snapshotHash[:], requireBoundDispatch); !errors.Is(err, ErrNotFound) {
 		return job, false, err
-	}
-	if _, err := tx.Exec(ctx, `SET LOCAL synchronous_commit = 'on'`); err != nil {
-		return Job{}, false, fmt.Errorf("configure durable research job commit: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO research_snapshots (id, payload, payload_sha256) VALUES ($1, $2, $3)
 		ON CONFLICT (id) DO NOTHING`, input.SnapshotID, []byte(input.Snapshot), snapshotHash[:]); err != nil {

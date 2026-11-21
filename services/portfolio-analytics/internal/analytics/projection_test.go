@@ -21,21 +21,69 @@ func TestProjectionKeepsReservesAndMatchesFIFO(t *testing.T) {
 	}
 	position := state.Positions["equity:ABC"]
 	if state.Version != 7 || state.CashUSD != "947.5" || state.ReservedCashUSD != "0" ||
-		state.RealizedUSD != "5.25" || position.QuantityRaw != "3" || amountString(position.basis()) != "57.75" {
+		state.RealizedUSD != "5.25" || position.QuantityRaw != "3" || formatUSDUnits(position.remainingCostBasis()) != "57.75" {
 		t.Fatalf("unexpected final portfolio: %+v, position %+v", state, position)
 	}
 }
 
 func TestPartialSalesAllocateTheCumulativeFIFORemainder(t *testing.T) {
-	position := holding{Lots: []lot{{Quantity: "3", Basis: "1"}}}
+	position := holding{}
+	position.addLot("3", usdAmount("1"))
+	var persisted holding
+	data, err := json.Marshal(position)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(data, &persisted); err != nil {
+		t.Fatal(err)
+	}
 	for i, want := range []string{"0.33333333", "0.33333333", "0.33333334"} {
 		got, err := position.sell(rawAmount("1"))
-		if err != nil || amountString(got) != want {
+		if err != nil || formatUSDUnits(got) != want {
 			t.Fatalf("sale %d: want %s, got %v, err %v", i+1, want, got, err)
+		}
+		if _, err := persisted.sell(rawAmount("1")); err != nil {
+			t.Fatal(err)
+		}
+		if position.remainingCostBasis().Cmp(persisted.remainingCostBasis()) != 0 {
+			t.Fatalf("sale %d: replayed and persisted cost bases differ", i+1)
 		}
 	}
 	if len(position.Lots) != 0 {
 		t.Fatal("fully sold lot remains")
+	}
+}
+
+func TestExactUSDFormattingUsesTheCanonicalDecimal(t *testing.T) {
+	for _, want := range []string{"0", "0.00000001", "-0.00000001", "0.1", "1", "-1.00000001", "999999999999999999999999999999.12345678"} {
+		if got := formatUSDUnits(usdAmount(want)); got != want {
+			t.Errorf("format %s as %s", want, got)
+		}
+	}
+}
+
+func TestNonFillEventsCompareBalancesAtExactScale(t *testing.T) {
+	state := newState()
+	events := scenario()
+	if err := state.apply(events[0]); err != nil {
+		t.Fatal(err)
+	}
+	events[1].CashUSD = "1000.00000000"
+	if err := state.apply(events[1]); err != nil {
+		t.Fatalf("equivalent cash representation: %v", err)
+	}
+	for _, event := range events[2:4] {
+		if event.Kind == "paper_order.unknown" {
+			changed := event
+			changed.ReservedCashUSD = "120.99999999"
+			if err := state.apply(changed); err == nil {
+				t.Fatal("UNKNOWN changed its cash reservation by a single unit")
+			}
+			event.ReservedCashUSD = "121.00000000"
+		}
+		if err := state.apply(event); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
@@ -50,10 +98,13 @@ func TestAccountEventRejectsInvalidShapes(t *testing.T) {
 	}
 	for _, invalid := range []string{
 		strings.Replace(string(data), `"decimals":0`, `"decimals":0,"decimals":1`, 1),
+		strings.Replace(string(data), `"decimals":0`, `"decimals":0,"\u0064ecimals":1`, 1),
 		strings.Replace(string(data), `"decimals":0,`, ``, 1),
 		strings.Replace(string(data), `"fee_usd":"1"`, `"fee_usd":1`, 1),
 		strings.Replace(string(data), `"side":"BUY"`, `"side":"BUY","extra":0`, 1),
 		strings.Replace(string(data), `"reserved_cash_usd":"121"`, `"reserved_cash_usd":"924"`, 1),
+		strings.Replace(string(data), `"fee_usd":"1"`, `"fee_usd":["1"]`, 1),
+		string(data) + `{}`,
 	} {
 		if _, err := DecodeAccount([]byte(invalid)); err == nil {
 			t.Fatalf("accepted invalid event %s", invalid)

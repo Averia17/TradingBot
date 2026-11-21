@@ -155,6 +155,14 @@ def test_archive_rejects_link_outside_root(tmp_path):
             [record("filing", "10q", available=12), record("filing", "10q", revision=2)],
             "revision timestamps",
         ),
+        (
+            [
+                record("filing", "10q", revision=3, available=13),
+                record("filing", "10q", revision=1, available=9),
+                record("filing", "10q", revision=2, available=14),
+            ],
+            "revision timestamps",
+        ),
         ([record("bar", "opening", event=12, available=9)], "event_time.*available_at"),
         ([record("bar", "opening", payload={"close": 0.125})], "decimal strings"),
     ],

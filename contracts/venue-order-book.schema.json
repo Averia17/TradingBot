@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Venue order book HTTP v1",
+  "$ref": "#/$defs/OrderBook",
+  "$defs": {
+    "BookRequest": {
+      "type": "object",
+      "properties": {
+        "symbol": {"type": "string", "pattern": "^[A-Z][A-Z0-9.-]{0,15}$"},
+        "depth": {"enum": [5, 10, 20, 50, 100, 500], "default": 5}
+      },
+      "required": ["symbol"],
+      "additionalProperties": false
+    },
+    "Decimal": {
+      "type": "string",
+      "pattern": "^(?:[1-9][0-9]*(?:\\.[0-9]*[1-9])?|0\\.[0-9]*[1-9])$"
+    },
+    "BookLevel": {
+      "type": "object",
+      "properties": {
+        "price": {"$ref": "#/$defs/Decimal", "description": "Price in the market quote currency."},
+        "quantity": {"$ref": "#/$defs/Decimal", "description": "Quantity in the provider's market units."}
+      },
+      "required": ["price", "quantity"],
+      "additionalProperties": false
+    },
+    "OrderBook": {
+      "type": "object",
+      "properties": {
+        "symbol": {"type": "string", "pattern": "^[A-Z][A-Z0-9.-]{0,15}$"},
+        "depth": {"enum": [5, 10, 20, 50, 100, 500]},
+        "provider": {"enum": ["dzengi", "binance"]},
+        "firmness": {"const": "indicative"},
+        "provider_timestamp": {"type": "integer", "minimum": 1, "description": "Dzengi's order-book timestamp as Unix time in milliseconds."},
+        "provider_sequence": {"type": "integer", "minimum": 1, "description": "Binance Spot's depth snapshot lastUpdateId."},
+        "requested_at": {"type": "string", "format": "date-time"},
+        "observed_at": {"type": "string", "format": "date-time"},
+        "bids": {"type": "array", "maxItems": 500, "items": {"$ref": "#/$defs/BookLevel"}, "description": "Prices in descending order."},
+        "asks": {"type": "array", "maxItems": 500, "items": {"$ref": "#/$defs/BookLevel"}, "description": "Prices in ascending order."}
+      },
+      "required": ["symbol", "depth", "provider", "firmness", "requested_at", "observed_at", "bids", "asks"],
+      "if": {"properties": {"provider": {"const": "binance"}}},
+      "then": {"required": ["provider_sequence"], "not": {"required": ["provider_timestamp"]}},
+      "else": {"required": ["provider_timestamp"], "not": {"required": ["provider_sequence"]}},
+      "anyOf": [{"properties": {"bids": {"minItems": 1}}}, {"properties": {"asks": {"minItems": 1}}}],
+      "additionalProperties": false
+    }
+  }
+}

@@ -5,20 +5,43 @@ import socket
 import subprocess
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from threading import Barrier
 from uuid import uuid4
 
 import pytest
 from test_worker_postgres import build_go_command, process, request, wait_for_resource
 
-from tradingbot.entry_cycles import ENTRY_CYCLE_PLAN, poll_cycles, run_cycles
+from tradingbot.entry_cycles import ENTRY_CYCLE_PLAN, StagedEntry, _persist, poll_cycles, run_cycles
 from tradingbot.snapshots import ArchiveReference, read_pinned_json
 
 ROOT = Path(__file__).resolve().parents[3]
 ARCHIVE = ROOT / "services/research/examples/selection"
 ACCOUNT = "11111111-1111-4111-8111-111111111111"
 AT = datetime(2026, 11, 18, 10, 0, 1, tzinfo=UTC)
+
+
+def test_concurrent_entry_publishers_keep_first_journal_and_remove_drafts(tmp_path):
+    path = tmp_path / "journal" / "occurrence.json"
+    start = Barrier(2)
+
+    def publish(admission):
+        staged = StagedEntry(
+            schema_version="0.1",
+            owner_binding_sha256="1" * 64,
+            admission_sha256=hashlib.sha256(admission.encode()).hexdigest(),
+            admission=admission,
+            selection="{}",
+        )
+        start.wait(timeout=5)
+        return _persist(path, staged)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first, second = executor.map(publish, ('{"attempt":1}', '{"attempt":2}'))
+    assert first == second == StagedEntry.model_validate_json(path.read_bytes())
+    assert list(path.parent.iterdir()) == [path]
 
 
 def put(root, name, value):
@@ -152,7 +175,7 @@ def test_bound_owner_plan_submits_exact_stable_job_and_retries_without_new_snaps
 
 @pytest.mark.parametrize(
     "mutation",
-    ["owner-pin", "tape-sha", "tape-account", "tape-registry", "screening", "screening-pin"],
+    ["owner-pin", "tape-sha", "tape-account", "tape-registry", "quote-registry", "screening", "screening-pin"],
 )
 def test_bound_owner_plan_rejects_untrusted_inputs_before_go(tmp_path, mutation):
     _, plan, _ = identity_fixture(tmp_path)
@@ -161,12 +184,14 @@ def test_bound_owner_plan_rejects_untrusted_inputs_before_go(tmp_path, mutation)
         registry_sha = "a" * 64
     if mutation == "tape-sha":
         (tmp_path / plan["quote_tape"]["ref"]).write_bytes(b"{}")
-    if mutation in {"tape-account", "tape-registry"}:
+    if mutation in {"tape-account", "tape-registry", "quote-registry"}:
         tape = json.loads((tmp_path / plan["quote_tape"]["ref"]).read_bytes())
         if mutation == "tape-account":
             tape["account_id"] = str(uuid4())
-        else:
+        elif mutation == "tape-registry":
             tape["identity_registry_sha256"] = "b" * 64
+        else:
+            tape["observations"][0]["quote"]["identity_registry_sha256"] = "b" * 64
         plan["quote_tape"] = put(tmp_path, "quote-tape.json", tape)
     if mutation in {"screening", "screening-pin"}:
         occurrence = plan["occurrences"][0]
@@ -325,7 +350,7 @@ def test_foreground_replays_an_uncertain_submission_and_keeps_other_occurrences_
         scheduled = json.loads(config)["scheduled_at"]
         attempts[scheduled].append(config)
         if scheduled == first and len(attempts[first]) <= 2:
-            raise subprocess.TimeoutExpired("paper-apply", 45)
+            raise subprocess.TimeoutExpired("paper", 45)
         return {
             "entry_schedule_schema_version": "0.1",
             "status": "queued",
@@ -415,7 +440,7 @@ def test_command_schedules_two_occurrences_and_replays_them_on_postgres(tmp_path
     account_id = str(uuid4())
     plan["account_id"] = account_id
     control = build_go_command(tmp_path, "control")
-    paper_apply = build_go_command(tmp_path, "paper-apply")
+    paper_apply = build_go_command(tmp_path, "paper")
     env = os.environ | {
         "TRADINGBOT_DATABASE_URL": os.environ["TRADINGBOT_ENTRY_CYCLE_TEST_DATABASE_URL"]
     }
@@ -491,7 +516,7 @@ def test_command_schedules_two_occurrences_and_replays_them_on_postgres(tmp_path
             plan_ref["sha256"],
             "--journal",
             str(tmp_path / "journal"),
-            "--paper-apply",
+            "--paper-cli",
             paper_apply,
         ]
 

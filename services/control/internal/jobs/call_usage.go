@@ -53,32 +53,19 @@ func (s *Store) RecordCallUsage(ctx context.Context, input RecordResearchCallUsa
 		return CallUsageReceipt{}, false, ErrInvalidCallUsage
 	}
 	digest := sha256.Sum256(payload)
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+	job, err := s.beginWorkerJob(ctx, input.JobID, "call usage receipt")
 	if err != nil {
-		return CallUsageReceipt{}, false, fmt.Errorf("begin research call usage receipt: %w", err)
+		return CallUsageReceipt{}, false, err
 	}
-	defer rollback(tx)
-	if _, err := tx.Exec(ctx, `SET LOCAL synchronous_commit = 'on'`); err != nil {
-		return CallUsageReceipt{}, false, fmt.Errorf("configure durable research call usage receipt: %w", err)
-	}
-	var status string
-	var currentAttempt int
-	receipt := CallUsageReceipt{CallID: input.Call.RunID}
-	err = tx.QueryRow(ctx, `SELECT id::text, status, attempt_count
-		FROM research_jobs WHERE id=$1 FOR UPDATE`, input.JobID).Scan(&receipt.JobID, &status, &currentAttempt)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return CallUsageReceipt{}, false, ErrNotFound
-	}
-	if err != nil {
-		return CallUsageReceipt{}, false, fmt.Errorf("lock research job for call usage: %w", err)
-	}
+	defer rollback(job.tx)
+	receipt := CallUsageReceipt{JobID: job.id, CallID: input.Call.RunID}
 	var (
 		owner, token         string
 		expiresAt            time.Time
 		existingAt           *time.Time
 		stored, storedDigest []byte
 	)
-	err = tx.QueryRow(ctx, `SELECT p.attempt, a.worker_id, a.lease_token::text, a.expires_at,
+	err = job.tx.QueryRow(ctx, `SELECT p.attempt, a.worker_id, a.lease_token::text, a.expires_at,
 		u.recorded_at, u.payload, u.payload_sha256
 		FROM research_call_permits p
 		JOIN research_job_attempts a USING (job_id, attempt)
@@ -101,10 +88,10 @@ func (s *Store) RecordCallUsage(ctx context.Context, input RecordResearchCallUsa
 		receipt.RecordedAt = existingAt.UTC()
 		return receipt, false, nil
 	}
-	if status != "leased" || currentAttempt != receipt.Attempt {
+	if job.status != "leased" || job.attempt != receipt.Attempt {
 		return CallUsageReceipt{}, false, ErrLeaseConflict
 	}
-	err = tx.QueryRow(ctx, `WITH observed AS MATERIALIZED (SELECT clock_timestamp() AS recorded_at)
+	err = job.tx.QueryRow(ctx, `WITH observed AS MATERIALIZED (SELECT clock_timestamp() AS recorded_at)
 		INSERT INTO research_call_usage (job_id,call_id,payload,payload_sha256,recorded_at)
 		SELECT $1,$2,$3,$4,recorded_at FROM observed WHERE recorded_at < $5::timestamptz
 		RETURNING recorded_at`, receipt.JobID, receipt.CallID, payload, digest[:], expiresAt).Scan(&receipt.RecordedAt)
@@ -114,7 +101,7 @@ func (s *Store) RecordCallUsage(ctx context.Context, input RecordResearchCallUsa
 	if err != nil {
 		return CallUsageReceipt{}, false, fmt.Errorf("insert research call usage receipt: %w", err)
 	}
-	if err := tx.Commit(ctx); err != nil {
+	if err := job.tx.Commit(ctx); err != nil {
 		return CallUsageReceipt{}, false, fmt.Errorf("commit research call usage receipt: %w", err)
 	}
 	receipt.RecordedAt = receipt.RecordedAt.UTC()

@@ -126,8 +126,8 @@ func (c *portfolioClient) fetch(ctx context.Context, period string) (portfolioRe
 	if resp.StatusCode != http.StatusOK {
 		return portfolioReport{}, fmt.Errorf("portfolio report returned HTTP %d", resp.StatusCode)
 	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxAnalyticsResponse+1))
-	if err != nil || len(body) > maxAnalyticsResponse {
+	body, err := readBoundedBody(resp.Body, maxAnalyticsResponse)
+	if err != nil {
 		return portfolioReport{}, errors.New("portfolio report could not be read")
 	}
 	var report portfolioReport
@@ -191,6 +191,21 @@ func portfolioSummary(report portfolioReport) string {
 	return sb.String()
 }
 
+func (r portfolioReport) positionPageCount() int {
+	return max(1, (len(r.Positions)+positionsPerPage-1)/positionsPerPage)
+}
+
+func (r portfolioReport) hasPage(view string, page int) bool {
+	switch view {
+	case "positions":
+		return page >= 0 && page < r.positionPageCount()
+	case "portfolio", "performance":
+		return page == 0
+	default:
+		return false
+	}
+}
+
 func positionPage(report portfolioReport, page int) string {
 	var sb strings.Builder
 	sb.WriteString(reportHeading("Позиции", report))
@@ -202,7 +217,7 @@ func positionPage(report portfolioReport, page int) string {
 			sb.WriteString("\nПозиции пока недоступны.\n")
 		}
 	} else {
-		fmt.Fprintf(&sb, "\nСтраница %d из %d\n", page+1, (len(report.Positions)+positionsPerPage-1)/positionsPerPage)
+		fmt.Fprintf(&sb, "\nСтраница %d из %d\n", page+1, report.positionPageCount())
 		for _, p := range report.Positions[start:min(start+positionsPerPage, len(report.Positions))] {
 			fmt.Fprintf(&sb, "\n%s · реестр %s\nКоличество: %s · в резерве %s\nСебестоимость FIFO: %s\nЦена: %s · %s\nРыночная стоимость: %s · вес %s\nНереализованный P&L: %s\n",
 				displayLabel(p.InstrumentID), displayLabel(p.RegistryVersion),
@@ -301,6 +316,10 @@ func positionQuantity(raw string, decimals int) string {
 	if !rawQuantity.MatchString(raw) || decimals < 0 || decimals > 30 {
 		return unavailable
 	}
+	return trimFraction(decimalQuantity(raw, decimals))
+}
+
+func decimalQuantity(raw string, decimals int) string {
 	if decimals == 0 {
 		return raw
 	}
@@ -308,7 +327,7 @@ func positionQuantity(raw string, decimals int) string {
 		raw = strings.Repeat("0", decimals+1-len(raw)) + raw
 	}
 	point := len(raw) - decimals
-	return trimFraction(raw[:point] + "." + raw[point:])
+	return raw[:point] + "." + raw[point:]
 }
 
 func trimFraction(value string) string {

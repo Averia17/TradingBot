@@ -13,21 +13,16 @@ import (
 	"time"
 )
 
-func testServer(t *testing.T, now time.Time) *httptest.Server {
-	t.Helper()
-	server := httptest.NewServer(NewHandler(time.Hour, func() time.Time { return now }, nil))
-	t.Cleanup(server.Close)
-	return server
+func testHandler(now time.Time) http.Handler {
+	return NewHandler(time.Hour, func() time.Time { return now }, nil)
 }
 
-func postValidation(t *testing.T, server *httptest.Server, contentType string, body []byte) *http.Response {
-	t.Helper()
-	response, err := server.Client().Post(server.URL+"/v1/research/validate", contentType, bytes.NewReader(body))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { response.Body.Close() })
-	return response
+func postValidation(handler http.Handler, contentType string, body []byte) *http.Response {
+	request := httptest.NewRequest(http.MethodPost, "/v1/research/validate", bytes.NewReader(body))
+	request.Header.Set("Content-Type", contentType)
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	return recorder.Result()
 }
 
 func fixture(t *testing.T, filename string) json.RawMessage {
@@ -67,32 +62,26 @@ func assertResponse(t *testing.T, response *http.Response, wantStatus int, wantJ
 }
 
 func TestHealthAndActualCapabilities(t *testing.T) {
-	server := testServer(t, time.Now())
-	health, err := server.Client().Get(server.URL + "/healthz")
-	if err != nil {
-		t.Fatal(err)
-	}
+	handler := testHandler(time.Now())
+	health := callJobAPI(handler, http.MethodGet, "/healthz", nil)
 	defer health.Body.Close()
 	assertResponse(t, health, http.StatusOK, `{"status":"ok"}`)
 
-	capabilities, err := server.Client().Get(server.URL + "/v1/capabilities")
-	if err != nil {
-		t.Fatal(err)
-	}
+	capabilities := callJobAPI(handler, http.MethodGet, "/v1/capabilities", nil)
 	defer capabilities.Body.Close()
 	assertResponse(t, capabilities, http.StatusOK, `{"durable_jobs":false,"execution":false,"ledger":false,"research_batch_schema_version":"0.1","research_job_call_budget":false,"research_job_leases":false,"research_job_results":false,"research_validation":true}`)
 }
 
 func TestValidatesPythonResearchFixture(t *testing.T) {
 	now := time.Date(2026, 10, 4, 12, 1, 0, 0, time.UTC)
-	server := testServer(t, now)
-	response := postValidation(t, server, "application/json; charset=utf-8", validationBody(t))
+	response := postValidation(testHandler(now), "application/json; charset=utf-8", validationBody(t))
+	defer response.Body.Close()
 	assertResponse(t, response, http.StatusOK, `{"valid":true}`)
 }
 
 func TestValidationRejectsInvalidInput(t *testing.T) {
 	now := time.Date(2026, 10, 4, 12, 1, 0, 0, time.UTC)
-	server := testServer(t, now)
+	handler := testHandler(now)
 	payload := validationBody(t)
 	for _, test := range []struct {
 		name        string
@@ -112,7 +101,8 @@ func TestValidationRejectsInvalidInput(t *testing.T) {
 		{"duplicate symbols", bytes.Replace(payload, []byte(`["TSLA","NVDA"]`), []byte(`["TSLA","TSLA"]`), 1), "application/json", 422, "invalid_requested_symbols"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			response := postValidation(t, server, test.contentType, test.body)
+			response := postValidation(handler, test.contentType, test.body)
+			defer response.Body.Close()
 			assertResponse(t, response, test.wantStatus, `{"error":"`+test.wantError+`"}`)
 		})
 	}
@@ -120,17 +110,13 @@ func TestValidationRejectsInvalidInput(t *testing.T) {
 
 func TestRejectsExpiredResearchFixture(t *testing.T) {
 	now := time.Date(2026, 10, 4, 12, 30, 0, 0, time.UTC)
-	server := testServer(t, now)
-	response := postValidation(t, server, "application/json", validationBody(t))
+	response := postValidation(testHandler(now), "application/json", validationBody(t))
+	defer response.Body.Close()
 	assertResponse(t, response, http.StatusUnprocessableEntity, `{"error":"invalid_batch"}`)
 }
 
 func TestValidationRequiresPost(t *testing.T) {
-	server := testServer(t, time.Now())
-	response, err := server.Client().Get(server.URL + "/v1/research/validate")
-	if err != nil {
-		t.Fatal(err)
-	}
+	response := callJobAPI(testHandler(time.Now()), http.MethodGet, "/v1/research/validate", nil)
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusMethodNotAllowed || response.Header.Get("Allow") != "POST" {
 		t.Fatalf("got status %d, Allow %q", response.StatusCode, response.Header.Get("Allow"))

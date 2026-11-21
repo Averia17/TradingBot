@@ -7,6 +7,7 @@ from uuid import UUID
 
 import pytest
 
+from tradingbot import security_identity
 from tradingbot.security_identity import (
     SecurityBinding,
     load_identity_registry,
@@ -275,10 +276,20 @@ def stable_example():
     return root, json.loads((root / "identity-request.json").read_bytes())
 
 
-def test_stable_selector_ranks_reused_ticker_and_emits_ordered_job_bindings():
+def test_stable_selector_ranks_reused_ticker_and_emits_ordered_job_bindings(monkeypatch):
     root, config = stable_example()
     reference = config["identity_registry"]
+    project_roster = security_identity._project_universe
+    projected_rosters = 0
+
+    def count_roster_projection(*args, **kwargs):
+        nonlocal projected_rosters
+        projected_rosters += 1
+        return project_roster(*args, **kwargs)
+
+    monkeypatch.setattr(security_identity, "_project_universe", count_roster_projection)
     receipt = plan_research(root, config, trusted_identity_registry=reference)
+    assert projected_rosters == 1
     job = receipt["job"]
     assert receipt["selection_schema_version"] == "0.2"
     assert job["job_schema_version"] == "0.2"

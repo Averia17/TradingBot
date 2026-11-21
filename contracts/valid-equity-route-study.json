@@ -1,0 +1,155 @@
+{
+  "schema_version": "0.1",
+  "source_mode": "synthetic_fixture",
+  "as_of": "2026-10-05T14:35:00Z",
+  "horizon_hours": 4,
+  "account": {
+    "snapshot_id": "fixture-1",
+    "spot_cash_usd": "520",
+    "perp_collateral_usd": "800",
+    "remaining_stress_budget_usd": "140",
+    "has_open_perps": false,
+    "has_pending_orders": false
+  },
+  "policy": {
+    "version": "fixture-policy-1",
+    "allow_leverage": true,
+    "max_notional_usd": "1500",
+    "max_perp_capital_at_risk_usd": "800",
+    "min_stress_move_bps": 600,
+    "max_observation_age_seconds": 60,
+    "max_basis_bps": 50,
+    "maintenance_buffer_bps": 100,
+    "min_forecast_uncertainty_bps": 40,
+    "min_net_edge_bps": 25,
+    "min_perp_advantage_bps": 25,
+    "min_leverage_advantage_usd": "5",
+    "stress_loss_penalty_bps": 300
+  },
+  "securities": [
+    {
+      "security_id": "fixture-nvda",
+      "symbol": "NVDA",
+      "held_spot": null,
+      "corporate_action_window_clear": true,
+      "market_stress_down_bps": 700,
+      "market_stress_up_bps": 900,
+      "sizes": [
+        {
+          "notional_usd": "500",
+          "spot": {
+            "observation": {
+              "observation_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "market_id": "fixture-spot-nvda",
+              "observed_at": "2026-10-05T14:34:50Z",
+              "available_at": "2026-10-05T14:34:51Z"
+            },
+            "costs": {
+              "base_bps": 45,
+              "stress_bps": 50
+            },
+            "exit_bps": 20
+          },
+          "perp": {
+            "observation": {
+              "observation_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "market_id": "fixture-perp-nvda",
+              "observed_at": "2026-10-05T14:34:50Z",
+              "available_at": "2026-10-05T14:34:51Z"
+            },
+            "external_session_until": "2026-10-05T20:00:00Z",
+            "mark_basis_bps": 10,
+            "margin_mode": "isolated",
+            "venue_max_leverage": 10,
+            "maintenance_margin_bps": 500,
+            "long": {
+              "execution": {
+                "base_bps": 15,
+                "stress_bps": 35
+              },
+              "basis": {
+                "base_bps": 2,
+                "stress_bps": 25
+              },
+              "funding": {
+                "forecast_bps": 3,
+                "stress_bps": 24
+              }
+            },
+            "short": {
+              "execution": {
+                "base_bps": 17,
+                "stress_bps": 38
+              },
+              "basis": {
+                "base_bps": 3,
+                "stress_bps": 25
+              },
+              "funding": {
+                "forecast_bps": -3,
+                "stress_bps": 24
+              }
+            }
+          }
+        },
+        {
+          "notional_usd": "1500",
+          "spot": {
+            "observation": {
+              "observation_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "market_id": "fixture-spot-nvda",
+              "observed_at": "2026-10-05T14:34:50Z",
+              "available_at": "2026-10-05T14:34:51Z"
+            },
+            "costs": {
+              "base_bps": 45,
+              "stress_bps": 50
+            },
+            "exit_bps": 20
+          },
+          "perp": {
+            "observation": {
+              "observation_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "market_id": "fixture-perp-nvda",
+              "observed_at": "2026-10-05T14:34:50Z",
+              "available_at": "2026-10-05T14:34:51Z"
+            },
+            "external_session_until": "2026-10-05T20:00:00Z",
+            "mark_basis_bps": 10,
+            "margin_mode": "isolated",
+            "venue_max_leverage": 10,
+            "maintenance_margin_bps": 500,
+            "long": {
+              "execution": {
+                "base_bps": 15,
+                "stress_bps": 35
+              },
+              "basis": {
+                "base_bps": 2,
+                "stress_bps": 25
+              },
+              "funding": {
+                "forecast_bps": 3,
+                "stress_bps": 24
+              }
+            },
+            "short": {
+              "execution": {
+                "base_bps": 17,
+                "stress_bps": 38
+              },
+              "basis": {
+                "base_bps": 3,
+                "stress_bps": 25
+              },
+              "funding": {
+                "forecast_bps": -3,
+                "stress_bps": 24
+              }
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

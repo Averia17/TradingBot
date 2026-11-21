@@ -1,0 +1,15 @@
+{
+  "paper_quote_collection_schema_version": "0.1",
+  "account_id": "11111111-1111-4111-8111-111111111111",
+  "identity_registry_sha256": "a5178dc17a6c1af8ccf452f27bf63130b325d62e01edacdf9d5fb9d9beda6052",
+  "cash_mint": "USDC-fixture",
+  "requests": [
+    {
+      "security_id": "fixture-equity-1",
+      "instrument": {"instrument_id": "fixture:TESTx", "registry_version": "fixture-v1", "decimals": 2},
+      "token_mint": "TESTx-fixture",
+      "side": "BUY",
+      "amount_raw": "100000000"
+    }
+  ]
+}

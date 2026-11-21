@@ -1,9 +1,11 @@
 package analytics
 
 import (
+	"cmp"
 	_ "embed"
 	"errors"
 	"slices"
+	"sort"
 	"time"
 )
 
@@ -67,14 +69,14 @@ func DecodeValuation(data []byte) (Valuation, error) {
 }
 
 type valuationIndex struct {
-	marks      map[Instrument][]Valuation
-	benchmarks []Valuation
-	costs      []Valuation
-	coverage   []Valuation
+	marks     map[Instrument]valuationTimeline
+	benchmark valuationTimeline
+	costs     []Valuation
+	coverage  []Valuation
 }
 
 func indexValuations(rows []Valuation, benchmarkID string) valuationIndex {
-	index := valuationIndex{marks: make(map[Instrument][]Valuation)}
+	index := valuationIndex{marks: make(map[Instrument]valuationTimeline)}
 	for _, row := range rows {
 		switch row.Kind {
 		case "mark":
@@ -82,7 +84,7 @@ func indexValuations(rows []Valuation, benchmarkID string) valuationIndex {
 			index.marks[key] = append(index.marks[key], row)
 		case "benchmark":
 			if row.Benchmark.SeriesID == benchmarkID {
-				index.benchmarks = append(index.benchmarks, row)
+				index.benchmark = append(index.benchmark, row)
 			}
 		case "operating_cost":
 			index.costs = append(index.costs, row)
@@ -90,37 +92,51 @@ func indexValuations(rows []Valuation, benchmarkID string) valuationIndex {
 			index.coverage = append(index.coverage, row)
 		}
 	}
-	for _, rows := range index.marks {
-		sortValuations(rows)
+	for instrument, rows := range index.marks {
+		index.marks[instrument] = buildValuationTimeline(rows)
 	}
-	sortValuations(index.benchmarks)
-	sortValuations(index.coverage)
+	index.benchmark = buildValuationTimeline(index.benchmark)
+	slices.SortFunc(index.coverage, compareValuationPriority)
 	return index
 }
 
-func sortValuations(rows []Valuation) {
-	slices.SortFunc(rows, func(a, b Valuation) int {
-		if cmp := b.ObservedAt.Compare(a.ObservedAt); cmp != 0 {
-			return cmp
-		}
-		if cmp := b.AvailableAt.Compare(a.AvailableAt); cmp != 0 {
-			return cmp
-		}
-		if a.ID < b.ID {
-			return -1
-		}
-		if a.ID > b.ID {
-			return 1
-		}
-		return 0
-	})
+func compareValuationPriority(a, b Valuation) int {
+	if byObservation := b.ObservedAt.Compare(a.ObservedAt); byObservation != 0 {
+		return byObservation
+	}
+	if byAvailability := b.AvailableAt.Compare(a.AvailableAt); byAvailability != 0 {
+		return byAvailability
+	}
+	return cmp.Compare(a.ID, b.ID)
 }
 
-func latestAt(rows []Valuation, cutoff time.Time) *Valuation {
-	for i := range rows {
-		if !rows[i].AvailableAt.After(cutoff) && !rows[i].ObservedAt.After(cutoff) {
-			return &rows[i]
+func (v Valuation) visibleAt() time.Time { return maxTime(v.ObservedAt, v.AvailableAt) }
+
+// A timeline contains only observations that become the best visible mark.
+// Its rows are ordered by when the information becomes usable.
+type valuationTimeline []Valuation
+
+func buildValuationTimeline(rows []Valuation) valuationTimeline {
+	slices.SortFunc(rows, func(a, b Valuation) int {
+		if byVisibility := a.visibleAt().Compare(b.visibleAt()); byVisibility != 0 {
+			return byVisibility
+		}
+		return compareValuationPriority(a, b)
+	})
+	timeline := rows[:0]
+	for _, row := range rows {
+		if len(timeline) == 0 || compareValuationPriority(row, timeline[len(timeline)-1]) < 0 {
+			timeline = append(timeline, row)
 		}
 	}
-	return nil
+	clear(rows[len(timeline):])
+	return timeline
+}
+
+func (t valuationTimeline) latestVisibleAt(cutoff time.Time) *Valuation {
+	next := sort.Search(len(t), func(i int) bool { return t[i].visibleAt().After(cutoff) })
+	if next == 0 {
+		return nil
+	}
+	return &t[next-1]
 }

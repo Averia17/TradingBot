@@ -1,0 +1,11 @@
+{
+  "symbol": "NVDABUSDT",
+  "depth": 50,
+  "provider": "binance",
+  "firmness": "indicative",
+  "provider_sequence": 280686768,
+  "requested_at": "2026-11-21T15:24:00Z",
+  "observed_at": "2026-11-21T15:24:00.25Z",
+  "bids": [{"price": "129.78", "quantity": "29.369"}],
+  "asks": [{"price": "129.79", "quantity": "1.083"}]
+}

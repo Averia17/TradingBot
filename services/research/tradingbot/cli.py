@@ -40,34 +40,56 @@ def analyze(args):
         raise ValueError("use unique uppercase US equity symbols")
     if args.output.exists():
         raise FileExistsError("run output already exists; choose a new path")
-    from tradingbot.adapters.tradingagents import create_runtime, usage_model_identities
+    from tradingbot.adapters.tradingagents import (
+        create_portfolio_model,
+        create_runtime,
+        research_config,
+        usage_model_identities,
+    )
     from tradingbot.budget import CallBudget, capture_usage
+    from tradingbot.prepared_analysis import load_prepared_reports
     from tradingbot.research import collect_reports, create_decisions
 
     overrides = json.loads(args.config.read_text(encoding="utf-8-sig")) if args.config else None
+    if (args.data_archive is None) != (args.data_sha256 is None):
+        raise ValueError("prepared analysis requires --data-archive and --data-sha256 together")
+    snapshot = None
+    if args.data_archive is not None:
+        snapshot, reports = load_prepared_reports(args.data_archive, args.data_sha256, book, symbols)
     budget = CallBudget(args.max_calls)
+    runtime_path = args.output.parent / "upstream-runtime"
     with capture_usage(args.usage_output, budget, "provider_reported"):
-        runtime = create_runtime(
-            args.output.parent / "upstream-runtime", overrides, callbacks=[budget]
-        )
-        config = runtime.config
+        if snapshot is None:
+            runtime = create_runtime(runtime_path, overrides, callbacks=[budget])
+            config = runtime.config
+        else:
+            config = research_config(runtime_path, overrides)
         budget.configure_identities(usage_model_identities(config))
-        with budget.role("research"):
-            reports = collect_reports(runtime.adapter, symbols, date, book)
+        if snapshot is None:
+            with budget.role("research"):
+                reports = collect_reports(runtime.adapter, symbols, date, book)
         with budget.role("portfolio_allocator"):
-            batch = create_decisions(runtime.decision_model(), reports, book)
+            model = create_portfolio_model(config, callbacks=[budget])
+            batch = create_decisions(model, reports, book)
     metadata = budget.summary() | {
         "source_mode": "upstream_date_research",
         "analysis_date": date,
         "models": {
             key: config[key] for key in ("llm_provider", "quick_think_llm", "deep_think_llm")
-        },
+        } | {"reasoning_effort": config.get("openai_reasoning_effort")},
         "config_sha256": hashlib.sha256(
             json.dumps(config, sort_keys=True, default=str).encode()
         ).hexdigest(),
         "intraday_pit_verified": False,
         "alpha_measured": False,
     }
+    if snapshot is not None:
+        metadata |= {
+            "source_mode": "prepared_archive_research",
+            "snapshot_sha256": snapshot.sha256,
+            "archive_sha256": snapshot.archive.sha256,
+            "archive_source_mode": snapshot.source_mode,
+        }
     save_run(args.output, batch, reports, book, metadata)
     return batch
 
@@ -125,7 +147,8 @@ def main(argv=None) -> int:
     schema = commands.add_parser("schema", help="Export the exact research JSON contract")
     schema.add_argument("--output", type=Path, required=True)
     schema.add_argument(
-        "--document", choices=("decision-batch", "llm-usage"), default="decision-batch"
+        "--document", choices=("decision-batch", "llm-usage", "perp-screen"),
+        default="decision-batch",
     )
     commands.add_parser("doctor", help="Show installed component versions without credentials")
     commands.add_parser(
@@ -168,7 +191,7 @@ def main(argv=None) -> int:
     identity_review = commands.add_parser(
         "prepare-identity-review", help="Prepare a frozen stable paper review from local Go receipts"
     )
-    identity_review.add_argument("--paper-apply", type=Path, required=True)
+    identity_review.add_argument("--paper-cli", type=Path, required=True)
     identity_review.add_argument("--archive-root", type=Path, required=True)
     identity_review.add_argument("--account", required=True)
     identity_review.add_argument("--order", required=True)
@@ -179,6 +202,13 @@ def main(argv=None) -> int:
         identity_review.add_argument(f"--{reference}-ref", required=True)
         identity_review.add_argument(f"--{reference}-sha256", required=True)
     identity_review.add_argument("--max-llm-calls", type=int, required=True)
+    prepared = commands.add_parser(
+        "prepare-research", help="Collect equity prices and merge pinned issuer archives"
+    )
+    prepared.add_argument("--symbols", nargs="+", required=True)
+    prepared.add_argument("--source", action="append", nargs=2, required=True, metavar=("PATH", "SHA256"))
+    prepared.add_argument("--cash-usd", default="1000", help="Cash for the virtual research portfolio")
+    prepared.add_argument("--output", type=Path, required=True)
     real = commands.add_parser(
         "analyze", help="Run actual TradingAgents; requires provider API credentials"
     )
@@ -186,15 +216,39 @@ def main(argv=None) -> int:
     real.add_argument("--symbols", nargs="+", required=True)
     real.add_argument("--date")
     real.add_argument("--config", type=Path)
+    real.add_argument("--data-archive", type=Path, help="Read market, filing and news evidence from a local archive")
+    real.add_argument("--data-sha256", help="SHA-256 of the exact prepared archive bytes")
     real.add_argument("--max-calls", type=int, default=64)
     real.add_argument("--output", type=Path, required=True)
     real.add_argument("--usage-output", type=Path, help="Write local model-callback evidence")
+    perp = commands.add_parser("perp-research", help="Select a perpetual entry for research")
+    perp.add_argument("--study", type=Path, required=True)
+    perp.add_argument("--screen-binary", type=Path, required=True)
+    perp.add_argument("--fixture-forecast", type=Path, help="Scripted forecast for synthetic input")
+    perp.add_argument("--config", type=Path)
+    perp.add_argument("--max-calls", type=int, choices=range(1, 65), default=64, metavar="1-64")
+    perp.add_argument("--usage-output", type=Path)
+    equity = commands.add_parser("equity-theses", help="Forecast underlying equities for route research")
+    equity.add_argument("--route-binary", type=Path, required=True)
+    equity.add_argument("--study", type=Path, required=True)
+    equity.add_argument("--archive-root", type=Path, required=True)
+    for reference in ("data-manifest", "identity-registry"):
+        equity.add_argument(f"--{reference}-ref", required=True)
+        equity.add_argument(f"--{reference}-sha256", required=True)
+    equity.add_argument("--config", type=Path)
+    equity.add_argument("--usage-output", type=Path)
+    equity.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
     try:
         if args.command == "schema":
             from tradingbot.llm_usage import LLMUsageReport
 
-            document = LLMUsageReport if args.document == "llm-usage" else DecisionBatch
+            if args.document == "perp-screen":
+                from tradingbot.perp_research import PerpScreen
+
+                document = PerpScreen
+            else:
+                document = LLMUsageReport if args.document == "llm-usage" else DecisionBatch
             args.output.parent.mkdir(parents=True, exist_ok=True)
             write_json(args.output, document.model_json_schema(mode="serialization"))
         elif args.command == "doctor":
@@ -209,9 +263,17 @@ def main(argv=None) -> int:
             components["tradingagents_adapter"] = check_compatibility()
             print(json.dumps(components, indent=2))
         elif args.command == "probe-engine":
-            from tradingbot.evaluation import run_synthetic_probe
+            from tradingbot.nautilus_probe import run_synthetic_probe
 
             print(json.dumps(run_synthetic_probe(), indent=2))
+        elif args.command == "perp-research":
+            from tradingbot.perp_research import run_perp_research
+
+            print(json.dumps(run_perp_research(args), indent=2, ensure_ascii=True))
+        elif args.command == "equity-theses":
+            from tradingbot.equity_thesis import run_equity_theses
+
+            print(json.dumps(run_equity_theses(args), indent=2))
         elif args.command == "worker":
             _serve_worker(args)
         elif args.command == "historical-step":
@@ -235,6 +297,22 @@ def main(argv=None) -> int:
             from tradingbot.prepare_identity_review import prepare_from_args
 
             print(json.dumps(prepare_from_args(args), separators=(",", ":")))
+        elif args.command == "prepare-research":
+            from tradingbot.prepare_research import prepare
+
+            if args.output.exists():
+                raise FileExistsError("prepared output already exists; choose a new path")
+            sources = [(Path(path), digest) for path, digest in args.source]
+            book, archive = prepare(args.symbols, sources, args.cash_usd)
+            args.output.mkdir(parents=True, exist_ok=False)
+            archive_path = args.output / "data-archive.json"
+            write_json(archive_path, archive)
+            write_json(args.output / "portfolio.json", book.model_dump(mode="json"))
+            print(json.dumps({
+                "as_of": book.as_of.isoformat(),
+                "archive_sha256": hashlib.sha256(archive_path.read_bytes()).hexdigest(),
+                "records": len(archive["records"]),
+            }))
         else:
             if args.command == "demo":
                 from tradingbot.demo import demo_batch

@@ -9,7 +9,7 @@ import (
 
 	"tradingbot/control/internal/contract"
 	"tradingbot/control/internal/ledger"
-	"tradingbot/control/internal/papermemory"
+	"tradingbot/control/internal/paper_memory"
 )
 
 type paperAccountStore interface {
@@ -51,12 +51,8 @@ func (h paperHTTP) create(w http.ResponseWriter, r *http.Request) {
 		writePaperError(w, err)
 		return
 	}
-	status := http.StatusOK
-	if created {
-		status = http.StatusCreated
-	}
 	w.Header().Set("Location", "/v1/paper/accounts/"+account.ID)
-	writeJSON(w, status, account)
+	writeJSON(w, createStatus(created), account)
 }
 
 func (h paperHTTP) get(w http.ResponseWriter, r *http.Request) {
@@ -87,12 +83,8 @@ func (h paperOrderHTTP) reserve(w http.ResponseWriter, r *http.Request) {
 		writePaperError(w, err)
 		return
 	}
-	status := http.StatusOK
-	if created {
-		status = http.StatusCreated
-	}
 	w.Header().Set("Location", "/v1/paper/accounts/"+order.AccountID+"/orders/"+order.OrderID)
-	writeJSON(w, status, order)
+	writeJSON(w, createStatus(created), order)
 }
 
 func (h paperOrderHTTP) get(w http.ResponseWriter, r *http.Request) {
@@ -158,7 +150,7 @@ func (h paperOrderHTTP) outcomes(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), jobStoreTimeout)
 	defer cancel()
-	snapshot, err := papermemory.Load(ctx, h.store, r.PathValue("id"), asOf)
+	snapshot, err := paper_memory.Load(ctx, h.store, r.PathValue("id"), asOf)
 	if err != nil {
 		writePaperError(w, err)
 		return
@@ -170,7 +162,7 @@ func writePaperError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, ledger.ErrInvalid):
 		writeError(w, http.StatusBadRequest, "invalid_paper_request")
-	case errors.Is(err, ledger.ErrNotFound), errors.Is(err, papermemory.ErrNoHistory):
+	case errors.Is(err, ledger.ErrNotFound), errors.Is(err, paper_memory.ErrNoHistory):
 		writeError(w, http.StatusNotFound, "paper_record_not_found")
 	case errors.Is(err, ledger.ErrStale):
 		writeError(w, http.StatusConflict, "paper_snapshot_stale")

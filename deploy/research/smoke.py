@@ -473,9 +473,9 @@ def main():
             "config", "--quiet",
         )
         for binary, arguments in (
-            ("paper-apply", ("dispatch", "--help")),
-            ("paper-apply", ("schedule-entry", "--help")),
-            ("paper-apply", ("schedule-review", "--help")),
+            ("paper", ("dispatch", "--help")),
+            ("paper", ("schedule-entry", "--help")),
+            ("paper", ("schedule-review", "--help")),
             ("paper-check", ("--help",)),
             ("paper-memory", ("record-lesson", "--help")),
             ("paper-memory", ("correct-lesson", "--help")),

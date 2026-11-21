@@ -24,6 +24,7 @@ func TestPaperFillWirePreservesExactAmountsAndIdentities(t *testing.T) {
 		"duplicated field":    strings.Replace(string(data), `"gross_usd": "1"`, `"gross_usd": "1", "gross_usd": "1"`, 1),
 		"premature recording": strings.Replace(string(data), `09:00:02.123456Z`, `08:59:59.123456Z`, 1),
 		"numeric amount":      strings.Replace(string(data), `"gross_usd": "1"`, `"gross_usd": 1`, 1),
+		"escaped timestamp":   strings.Replace(string(data), `09:00:02.123456Z`, `09:00:02.123456\u005a`, 1),
 		"trailing JSON":       string(data) + "{}",
 	} {
 		t.Run(name, func(t *testing.T) {

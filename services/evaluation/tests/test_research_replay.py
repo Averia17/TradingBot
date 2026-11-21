@@ -1,5 +1,6 @@
 import base64
 import json
+from datetime import datetime
 from hashlib import sha256
 from pathlib import Path
 
@@ -8,7 +9,13 @@ import pytest
 
 from tradingbot_evaluation.__main__ import main
 from tradingbot_evaluation.ablation_evidence import derive_ablation_evidence
-from tradingbot_evaluation.research_replay import run_research_replay
+from tradingbot_evaluation.replay import load_replay
+from tradingbot_evaluation.research_replay import (
+    _index_tape,
+    _time_ns,
+    _verify_execution_state,
+    run_research_replay,
+)
 from tradingbot_evaluation.statistics import evaluate_statistics, load_protocol, protocol_sha256
 from tradingbot_evaluation.walk_forward import run_walk_forward
 from tradingbot_evaluation.walk_forward_evidence import derive_walk_forward_evidence
@@ -247,6 +254,35 @@ def test_strict_research_replay_sizes_only_from_the_first_reopened_quote():
     )
 
 
+def test_quote_index_preserves_arrival_order_observation_ties_and_split_boundaries():
+    replay_tape = tape(
+        [
+            quote(13, "103", "103", available=16),
+            quote(10, "100", "100"),
+            quote(13, "102", "102", available=14),
+            quote(11, "200", "200", available=15),
+            quote(17, "52", "52", available=19),
+        ],
+        stock_splits=[
+            dict(action_id="split", symbol="TSLA", available_at=at(16), effective_at=at(17),
+                 old_shares=1, new_shares=2),
+        ],
+    )
+    indexed = _index_tape(load_replay(encode(replay_tape)))["TSLA"]
+
+    def cutoff(second):
+        return datetime.fromisoformat(at(second))
+
+    assert indexed.reference_at(cutoff(15)).bid_usd == "102"
+    assert indexed.reference_at(cutoff(16)).bid_usd == "103"
+    assert indexed.reference_at(cutoff(16), mark_floor=cutoff(14)) is None
+    assert indexed.reference_at(cutoff(17)) is None
+    assert indexed.reference_at(cutoff(19), mark_floor=cutoff(17)).bid_usd == "52"
+    assert indexed.execution_after(cutoff(12)).available_at == cutoff(14)
+    assert indexed.execution_after(cutoff(13)).available_at == cutoff(19)
+    assert indexed.execution_after(cutoff(17)) is None
+
+
 def continuous_inputs():
     quotes = tape()["quotes"]
     quotes[-1]["ask_usd"] = "105.00"
@@ -300,6 +336,42 @@ def test_snapshot_that_changes_before_execution_cannot_pass_strict_replay():
     assert len(run(entries[:2], replay_tape)["fills"]) == 2
     with pytest.raises(ValueError, match="snapshot became stale before execution"):
         run(entries[:2], replay_tape, require_snapshot_continuity=True)
+
+
+@pytest.mark.parametrize(
+    ("extra_owner", "extra_time", "stale"),
+    [("same", 20, False), ("other", 20, True), ("same", 19, True), ("other", 10, False)],
+)
+def test_snapshot_continuity_checks_all_fills_at_execution_time(extra_owner, extra_time, stale):
+    jobs = [
+        {"job_id": "same", "snapshot_as_of": at(10)},
+        {"job_id": "other", "snapshot_as_of": at(5)},
+    ]
+    decisions = [
+        {
+            "job_id": "same",
+            "decision_id": "buy",
+            "status": "submitted_to_replay",
+            "execution_quote_available_at": at(20),
+        },
+        {
+            "job_id": extra_owner,
+            "decision_id": "other-fill",
+            "status": "submitted_to_replay",
+            "execution_quote_available_at": at(extra_time),
+        },
+    ]
+    evaluation = {
+        "fills": [
+            {"intent_id": "buy", "quote_available_at_ns": str(_time_ns(at(20)))},
+            {"intent_id": "other-fill", "quote_available_at_ns": str(_time_ns(at(extra_time)))},
+        ],
+    }
+    if stale:
+        with pytest.raises(ValueError, match="Job same snapshot became stale before execution"):
+            _verify_execution_state(evaluation, jobs, decisions)
+    else:
+        _verify_execution_state(evaluation, jobs, decisions)
 
 
 def test_strict_snapshot_counts_only_effective_actions_and_paid_dividends():

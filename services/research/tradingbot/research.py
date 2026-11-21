@@ -63,7 +63,7 @@ def create_decisions(
                 "Respect max_position_pct times total equity, including existing exposure. "
                 "Cite only provided evidence_ids. Review the CURRENT forward opportunity; "
                 "never hold just to recover entry price. No tools, keys, token selection or execution. "
-                "This input is upstream date-level research, not verified intraday PIT data. "
+                "Use evidence timestamps and coverage as supplied; intraday PIT is not independently verified. "
                 "Real executable quotes are unavailable: do not claim cost-adjusted alpha or fills."
             ),
         },

@@ -3,6 +3,7 @@
 import os
 import subprocess
 from collections.abc import Callable
+from datetime import datetime
 from decimal import Decimal
 from hashlib import sha256
 from pathlib import Path
@@ -15,11 +16,13 @@ from tradingbot_evaluation.replay import (
     MAX_INPUT_BYTES,
     MAX_PREFIX_EVENTS,
     MAX_PREFIX_SYMBOLS,
+    Replay,
     replay_event_count,
 )
 from tradingbot_evaluation.replay_identity import (
     DisplaySymbol,
     Reference,
+    ReplayIdentity,
     SecurityBinding,
 )
 from tradingbot_evaluation.research_replay import (
@@ -28,17 +31,16 @@ from tradingbot_evaluation.research_replay import (
     _ID,
     _NATIVE_SYMBOL,
     _RECEIPT_TIME,
+    PreparedResearchReplay,
     _at,
     _decode,
     _floor_microseconds,
+    _index_tape,
     _Manifest,
     _midpoint,
     _pinned,
-    _prepare_records,
     _Record,
-    _reference_quote,
-    _Result,
-    _tape_timeline,
+    _ResearchReplayProjection,
     _time_ns,
     load_research_tape,
     replay_account_at,
@@ -221,11 +223,29 @@ def run_walk_forward(
     plan = load_walk_forward_plan(plan_raw, expected_plan_sha256)
     if len(tape_raw) > MAX_INPUT_BYTES:
         raise ValueError("Walk-forward tape exceeds the input limit")
-    plan_hash = expected_plan_sha256
     tape_hash = _pinned(tape_raw, expected_tape_sha256, "tape")
     tape, identity = load_research_tape(
         tape_raw, identity_registry_raw, expected_identity_registry_sha256
     )
+    prepared, report = _run_walk_forward(
+        plan, tape, identity, plan_hash=expected_plan_sha256, tape_hash=tape_hash, infer=infer,
+    )
+    if include_replay_input:
+        report["native_replay_input"] = (
+            prepared.native_input() if identity is not None else msgspec.to_builtins(prepared.replay)
+        )
+    return report
+
+
+def _run_walk_forward(
+    plan: WalkForwardPlan,
+    tape: Replay,
+    identity: ReplayIdentity | None,
+    *,
+    plan_hash: str,
+    tape_hash: str,
+    infer: Callable[[bytes], bytes],
+) -> tuple[PreparedResearchReplay, dict]:
     if (identity is None) != (plan.schema_version == "0.1") or (
         identity is not None and identity.registry != plan.identity_registry
     ):
@@ -235,7 +255,7 @@ def run_walk_forward(
             cutoff = _floor_microseconds(_time_ns(step.as_of))
             for binding in step.security_bindings:
                 identity.resolve(binding, cutoff)
-    timeline, splits = _tape_timeline(tape)
+    quote_index = _index_tape(tape)
     event_bound = replay_event_count(tape) + sum(len(step.requested_symbols) for step in plan.steps)
     if (
         event_bound > MAX_PREFIX_EVENTS
@@ -243,7 +263,8 @@ def run_walk_forward(
     ):
         raise ValueError("Walk-forward tape and planned orders exceed the replay bounds")
 
-    records: list[_Record] = []
+    projection = _ResearchReplayProjection(tape, identity, quote_index)
+    account_states: dict[datetime, tuple[str, dict[str, str]]] = {}
     portfolios = []
     replay = tape
     calls_used = 0
@@ -251,6 +272,7 @@ def run_walk_forward(
     for index, step in enumerate(plan.steps):
         as_of = _floor_microseconds(_time_ns(step.as_of))
         cash, held = replay_account_at(replay, as_of)
+        account_states[as_of] = cash, held
         positions = []
         for native_key, quantity in sorted(held.items()):
             symbol, instrument_id, mark_floor = native_key, f"fixture:{native_key}", None
@@ -260,9 +282,7 @@ def run_walk_forward(
                     active.mapping.instrument.instrument_id,
                     active.effective_at,
                 )
-            mark = _reference_quote(
-                timeline[native_key], splits[native_key], as_of, mark_floor=mark_floor
-            )
+            mark = quote_index[native_key].reference_at(as_of, mark_floor=mark_floor)
             if mark is None:
                 raise ValueError(f"Walk-forward held position {symbol} lacks a point-in-time mark")
             positions.append(
@@ -298,14 +318,8 @@ def run_walk_forward(
         result_raw = infer(msgspec.json.encode({"job": job, "completed_at": step.completed_at}))
         if len(result_raw) > MAX_STEP_RESULT_BYTES:
             raise ValueError("Walk-forward research result exceeds the per-step input limit")
-        result = _decode(result_raw, _Result)
-        result_version = "0.3" if identity is not None else "0.2"
-        if result.result_schema_version != result_version or (
-            _time_ns(result.batch.created_at) != _time_ns(step.completed_at)
-        ):
-            raise ValueError("Walk-forward requires an offline graph result on the simulated clock")
         request_raw = msgspec.json.encode(job)
-        records.append(
+        result = projection.append(
             _Record(
                 job["job_id"],
                 1,
@@ -315,22 +329,20 @@ def run_walk_forward(
                 sha256(request_raw).hexdigest(),
                 result_raw,
                 sha256(result_raw).hexdigest(),
-            )
+            ),
+            expected_completion=step.completed_at,
         )
         portfolios.append(portfolio)
         calls_used += result.metadata.llm_calls
-        # Reuse the stored-decision validator and sizing path. Keep the
-        # in-memory simulated timestamps outside the durable export protocol.
-        prepared = _prepare_records(
-            tuple(records),
-            tape,
-            plan_hash,
-            tape_hash,
-            require_snapshot_continuity=identity is not None or index == len(plan.steps) - 1,
-            identity=identity,
-        )
-        replay = prepared.replay
+        if index == len(plan.steps) - 1:
+            break
+        replay = projection.replay()
+        if identity is not None:
+            # The next step cannot introduce fills at an earlier snapshot cutoff.
+            # Check order effects now and verify all account states independently at the end.
+            projection.verify_continuity(replay, account_states=account_states)
 
+    prepared = projection.prepare(plan_hash, tape_hash, require_snapshot_continuity=True)
     evaluation = prepared.validated_evaluation
     if evaluation is None:
         raise RuntimeError("Walk-forward continuity was not verified")
@@ -344,9 +356,7 @@ def run_walk_forward(
                     f"Walk-forward terminal valuation has an ineligible holding {key}"
                 ) from exc
             if (
-                _reference_quote(
-                    timeline[key], splits[key], horizon, mark_floor=active.effective_at
-                )
+                quote_index[key].reference_at(horizon, mark_floor=active.effective_at)
                 is None
             ):
                 raise ValueError(
@@ -374,8 +384,4 @@ def run_walk_forward(
     if identity is not None:
         report["identity_registry"] = msgspec.to_builtins(identity.registry)
         report["replay_instruments"] = msgspec.to_builtins(identity.instruments)
-    if include_replay_input:
-        report["native_replay_input"] = (
-            prepared.native_input() if identity else msgspec.to_builtins(prepared.replay)
-        )
-    return report
+    return prepared, report

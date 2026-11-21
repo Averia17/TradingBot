@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"net/http"
-	"strings"
 
 	"tradingbot/control/internal/contract"
 	"tradingbot/control/internal/jobs"
@@ -18,12 +17,7 @@ type callUsageHTTP struct {
 	store researchCallUsageStore
 }
 
-func (h callUsageHTTP) record(w http.ResponseWriter, r *http.Request) {
-	jobID := strings.ToLower(r.PathValue("id"))
-	if !jobUUID.MatchString(jobID) {
-		writeError(w, http.StatusBadRequest, "invalid_job_id")
-		return
-	}
+func (h callUsageHTTP) record(w http.ResponseWriter, r *http.Request, jobID string) {
 	body, ok := readJSONBody(w, r)
 	if !ok {
 		return
@@ -57,9 +51,7 @@ func (h callUsageHTTP) record(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnprocessableEntity, "invalid_call_usage")
 	case err != nil:
 		writeError(w, http.StatusServiceUnavailable, "storage_unavailable")
-	case created:
-		writeJSON(w, http.StatusCreated, receipt)
 	default:
-		writeJSON(w, http.StatusOK, receipt)
+		writeJSON(w, createStatus(created), receipt)
 	}
 }

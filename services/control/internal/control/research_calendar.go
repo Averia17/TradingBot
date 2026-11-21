@@ -40,10 +40,8 @@ func (h researchCalendarHTTP) record(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "calendar_occurrence_conflict")
 	case err != nil:
 		writeError(w, http.StatusServiceUnavailable, "storage_unavailable")
-	case created:
-		writeJSON(w, http.StatusCreated, receipt)
 	default:
-		writeJSON(w, http.StatusOK, receipt)
+		writeJSON(w, createStatus(created), receipt)
 	}
 }
 

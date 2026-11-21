@@ -111,6 +111,9 @@ go -C services/control run ./cmd/paper-check --account $paperAccountId --job $re
 завершённой попытке. Выданное разрешение без подтверждённого результата
 помечается как неподтверждённый расход. Вывод содержит подтверждённое число
 вызовов и число вызовов с неполной токеновой телеметрией.
+Для задания с устойчивым ID `--pipeline` сверяет реестр, снимок, привязку
+к бумажному счёту и происхождение результата. Ошибка проверки результата
+помечает выданные вызовы как неподтверждённые, сохраняя их списание из лимита.
 
 Для автоматизации соберите команду через `go build`. Код выхода `0` означает
 `ok`, `1` сопровождает результат `attention` со списком проблем и ID,
@@ -161,7 +164,7 @@ PostgreSQL. Наличие локальной котировки, доступн
 [Контракт](../../contracts/paper-reconciliation.schema.json) · [Пример](../../contracts/valid-paper-reconciliation.json).
 
 ```powershell
-go -C services/control run ./cmd/paper-apply reconcile --observation $observationPath --sha256 $observationSha256
+go -C services/control run ./cmd/paper reconcile --observation $observationPath --sha256 $observationSha256
 ```
 
 Команда работает с виртуальными заявками в статусе `UNKNOWN` или
@@ -170,16 +173,16 @@ go -C services/control run ./cmd/paper-apply reconcile --observation $observatio
 резерв. Идентификатор наблюдения становится ID события, SHA-256 сохраняется
 в журнале. Для повторной доставки используйте исходный файл и хеш. При
 выдаче нового статуса смотрите текущую запись ордера. Первоначальная
-квитанция `paper-apply follow` сохраняет результат своего запуска.
+квитанция `paper follow` сохраняет результат своего запуска.
 
 ## Отказы проверки риска до резервирования
 
 ```powershell
-go -C services/control run ./cmd/paper-apply refusals --account $paperAccountId --job $jobId
+go -C services/control run ./cmd/paper refusals --account $paperAccountId --job $jobId
 ```
 
-При проверке привязанных исследования и котировки `paper-apply apply`
-и `paper-apply follow` сохраняют нарушения лимита риска, пока версия
+При проверке привязанных исследования и котировки `paper apply`
+и `paper follow` сохраняют нарушения лимита риска, пока версия
 счёта и сроки применения действуют. Запись связывает код причины и время
 первого наблюдения PostgreSQL с решением, хешами запроса и котировки.
 `candidate_order_id` вычисляется для проверенной заявки до её создания.

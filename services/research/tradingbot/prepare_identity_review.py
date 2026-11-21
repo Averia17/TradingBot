@@ -2,9 +2,7 @@
 
 import json
 import subprocess
-import tempfile
 from argparse import Namespace
-from collections.abc import Callable
 from datetime import datetime, timedelta
 from decimal import Decimal
 from fractions import Fraction
@@ -14,6 +12,13 @@ from typing import Annotated, Literal
 from pydantic import Field, JsonValue, TypeAdapter
 
 from tradingbot.contracts import DECIMAL_PATTERN, Contract, Horizon, PortfolioSnapshot, Symbol
+from tradingbot.paper_cli import (
+    MAX_DOCUMENT_BYTES,
+    GoRunner,
+    check_owner_quote_tape,
+    invoke_paper_cli,
+    read_paper_snapshot,
+)
 from tradingbot.paper_memory import USD, LedgerID, PaperInstrument, RawQuantity
 from tradingbot.security_identity import (
     SecurityBinding,
@@ -26,11 +31,8 @@ from tradingbot.snapshots import (
     ArchiveReference,
     CaptureTime,
     decode_pinned_json,
-    read_pinned_bytes,
 )
 
-MAX_DOCUMENT_BYTES = 256 * 1024
-MAX_QUOTE_TAPE_BYTES = 2 * 1024 * 1024
 _Clock = TypeAdapter(CaptureTime)
 _UUID = TypeAdapter(LedgerID)
 _Budget = TypeAdapter(Annotated[int, Field(strict=True, ge=1, le=64)])
@@ -110,41 +112,17 @@ class _Snapshot(Contract):
     portfolio: dict[str, JsonValue]
 
 
-class _Tape(Contract):
-    paper_quote_tape_schema_version: Literal["0.3"]
-    source_mode: Literal["synthetic_fixture"]
-    account_id: LedgerID
-    identity_registry_sha256: SHA256
-    observations: Annotated[list[dict[str, JsonValue]], Field(max_length=2048)]
-
-
-def _read_document(path: Path) -> bytes:
-    if not path.is_file():
-        raise ValueError("review inputs must be local regular files")
-    with path.open("rb") as stream:
-        raw = stream.read(MAX_DOCUMENT_BYTES + 1)
+def _read_document(source: Path | bytes) -> bytes:
+    if isinstance(source, bytes):
+        raw = source
+    else:
+        if not source.is_file():
+            raise ValueError("review inputs must be local regular files")
+        with source.open("rb") as stream:
+            raw = stream.read(MAX_DOCUMENT_BYTES + 1)
     if len(raw) > MAX_DOCUMENT_BYTES:
         raise ValueError("review input exceeds the document limit")
     return raw
-
-
-def _check_tape(
-    root: Path, pin: ArchiveReference, account: str, registry: ArchiveReference
-) -> None:
-    raw = read_pinned_bytes(root, pin)
-    if len(raw) > MAX_QUOTE_TAPE_BYTES:
-        raise ValueError("paper review quote tape exceeds the document limit")
-    tape = _Tape.model_validate(decode_pinned_json(raw))
-    if tape.account_id != account or tape.identity_registry_sha256 != registry.sha256:
-        raise ValueError("paper review quote tape differs from the owner account or registry")
-    for observation in tape.observations:
-        quote = observation.get("quote")
-        if (
-            not isinstance(quote, dict)
-            or quote.get("paper_quote_schema_version") != "0.3"
-            or quote.get("identity_registry_sha256") != registry.sha256
-        ):
-            raise ValueError("paper review quote differs from its tape's identity registry")
 
 
 def _check_review(raw: dict, account: str, order: str, cutoff: datetime) -> _Review:
@@ -249,13 +227,13 @@ def _canonical_portfolio(
 
 def prepare_identity_review(
     *,
-    invoke: Callable[..., dict],
+    invoke: GoRunner,
     archive_root: Path,
     account: str,
     order: str,
     as_of: str,
-    policy: Path,
-    marks: Path,
+    policy: Path | bytes,
+    marks: Path | bytes,
     data_manifest: ArchiveReference | dict,
     identity_registry: ArchiveReference | dict,
     quote_tape: ArchiveReference | dict,
@@ -276,7 +254,7 @@ def prepare_identity_review(
     ):
         raise ValueError("paper review requires independent archive, registry and quote tape pins")
     owner_registry = load_identity_registry(archive_root, registry)
-    _check_tape(archive_root, tape, account, registry)
+    check_owner_quote_tape(archive_root, tape, account, registry)
     owner_policy, owner_marks = _read_document(policy), _read_document(marks)
     parsed_policy = decode_pinned_json(owner_policy)
     if not isinstance(parsed_policy, dict):
@@ -294,23 +272,9 @@ def prepare_identity_review(
     if _resolve_entry(owner_registry.entries, security, cutoff).instrument != opening.instrument:
         raise ValueError("current owner registry replaces the opening instrument")
 
-    # Send the same bytes we checked even if an owner updates files during preparation.
-    with tempfile.TemporaryDirectory() as directory:
-        policy_copy = Path(directory) / "policy.json"
-        marks_copy = Path(directory) / "marks.json"
-        policy_copy.write_bytes(owner_policy)
-        marks_copy.write_bytes(owner_marks)
-        snapshot = invoke(
-            "snapshot",
-            "--account",
-            account,
-            "--policy",
-            str(policy_copy),
-            "--marks",
-            str(marks_copy),
-            "--as-of",
-            as_of,
-        )
+    snapshot = read_paper_snapshot(
+        invoke, account=account, as_of=as_of, policy=owner_policy, marks=owner_marks
+    )
     portfolio = _canonical_portfolio(snapshot, view, parsed_policy, parsed_marks)
     projection = load_identity_snapshot(
         archive_root,
@@ -339,26 +303,15 @@ def prepare_identity_review(
 
 
 def prepare_from_args(args: Namespace) -> dict:
-    binary = args.paper_apply.resolve(strict=True)
+    binary = args.paper_cli.resolve(strict=True)
     if not binary.is_file():
-        raise ValueError("paper-apply must be an explicit local binary")
+        raise ValueError("paper must be an explicit local binary")
 
     def invoke(*arguments: str) -> dict:
         try:
-            completed = subprocess.run(
-                [str(binary), *arguments],
-                check=True,
-                capture_output=True,
-                timeout=30,
-            )
+            return invoke_paper_cli(binary, *arguments, timeout=30)
         except subprocess.SubprocessError as exc:
-            raise ValueError(f"paper-apply {arguments[0]} read failed") from exc
-        if len(completed.stdout) > MAX_DOCUMENT_BYTES:
-            raise ValueError("Go review receipt exceeds the document limit")
-        output = decode_pinned_json(completed.stdout)
-        if not isinstance(output, dict):
-            raise ValueError("Go review receipts must be JSON objects")
-        return output
+            raise ValueError(f"paper {arguments[0]} read failed") from exc
 
     return prepare_identity_review(
         invoke=invoke,

@@ -18,7 +18,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/santhosh-tekuri/jsonschema/v6"
 	"tradingbot/control/internal/ledger"
-	"tradingbot/control/internal/paperrisk"
+	"tradingbot/control/internal/paper_risk"
 )
 
 func TestLessonCommandsUsePostgreSQL(t *testing.T) {
@@ -124,11 +124,11 @@ func assertDurableArchive(t *testing.T, invoke func(...string) ([]byte, error), 
 	if err := os.WriteFile(marketPath, market, 0600); err != nil {
 		t.Fatal(err)
 	}
-	policy := paperrisk.Policy{
+	policy := paper_risk.Policy{
 		Version: "paper-v1", MaxOrderUSD: "500", MinFreeCashUSD: "10",
 		MaxPositionBPS: 5000, MaxGroupBPS: 8000, MaxGrossBPS: 9000,
 		MaxFeeBPS: 100, MaxMarkAgeSeconds: 60,
-		Instruments: []paperrisk.InstrumentRule{{Instrument: recorded.Fact.Instrument, Symbol: "ABC", Group: "fixture-tech"}},
+		Instruments: []paper_risk.InstrumentRule{{Instrument: recorded.Fact.Instrument, Symbol: "ABC", Group: "fixture-tech"}},
 	}
 	policyRaw, err := json.Marshal(policy)
 	if err != nil {

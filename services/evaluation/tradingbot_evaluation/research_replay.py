@@ -2,12 +2,14 @@
 
 import json
 import re
+from bisect import bisect_right
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import ROUND_CEILING, Decimal, localcontext
 from hashlib import sha256
 from math import isfinite
+from operator import attrgetter
 from typing import Annotated, Literal
 
 import msgspec
@@ -17,16 +19,18 @@ from tradingbot_evaluation.replay import (
     MAX_INPUT_BYTES,
     MAX_PREFIX_EVENTS,
     MAX_PREFIX_SYMBOLS,
+    NativeAccountState,
     Order,
     Quote,
     Replay,
+    _decode_replay,
     _nanoseconds,
     _unique_fields,
     executable_quotes,
-    load_replay,
     replay_event_count,
     replay_prefix,
     run_replay,
+    run_replay_with_account_checkpoints,
 )
 from tradingbot_evaluation.replay_identity import (
     ActiveInstrument,
@@ -368,19 +372,18 @@ def _validate_record(record: _Record, request: _Request, result: _Result) -> tup
     return cutoff, completed, expiry
 
 
-def _load_tape(raw: bytes) -> Replay:
-    tape = load_replay(raw)
+def _load_tape(document: dict) -> Replay:
+    tape = _decode_replay(document)
     if tape.orders:
         raise ValueError("A research replay tape must have empty orders")
     # Nautilus adapter accepts Python datetimes. Ensure that decoding the tape
     # did not round a quote or corporate event onto either side of a boundary.
-    wire = json.loads(raw)
     for name, time_fields in (
         ("quotes", ("observed_at", "available_at")),
         ("cash_dividends", ("available_at", "entitlement_at", "paid_at")),
         ("stock_splits", ("available_at", "effective_at")),
     ):
-        for row in wire.get(name, ()):
+        for row in document.get(name, ()):
             if any(_time_ns(row[field]) % 1000 for field in time_fields):
                 raise ValueError("Synthetic replay tape timestamps require microsecond precision")
     return tape
@@ -401,21 +404,31 @@ class _Snapshot:
     mark_floors: dict[str, datetime]
 
 
-def _reference_quote(
-    quotes: list[Quote], splits: list[datetime], cutoff: datetime,
-    *, mark_floor: datetime | None = None,
-) -> Quote | None:
-    mark = max(
-        (
-            q for q in quotes if q.available_at <= cutoff
-            and (mark_floor is None or q.observed_at >= mark_floor)
-        ),
-        default=None,
-        key=lambda q: (q.observed_at, q.available_at),
-    )
-    if mark is None or any(mark.observed_at < at <= cutoff for at in splits):
-        return None
-    return mark
+@dataclass(frozen=True, slots=True)
+class _QuoteTimeline:
+    # These quotes become the newest observation at their availability time.
+    # Both clocks are monotonic here, even when the input arrives out of order.
+    latest_quotes: tuple[Quote, ...] = ()
+    split_times: tuple[datetime, ...] = ()
+
+    def execution_after(self, completed_at: datetime) -> Quote | None:
+        index = bisect_right(self.latest_quotes, completed_at, key=attrgetter("observed_at"))
+        return self.latest_quotes[index] if index < len(self.latest_quotes) else None
+
+    def reference_at(self, cutoff: datetime, *, mark_floor: datetime | None = None) -> Quote | None:
+        index = bisect_right(self.latest_quotes, cutoff, key=attrgetter("available_at"))
+        if not index:
+            return None
+        mark = self.latest_quotes[index - 1]
+        if (mark_floor is not None and mark.observed_at < mark_floor) or self.crosses_split(
+            mark.observed_at, cutoff
+        ):
+            return None
+        return mark
+
+    def crosses_split(self, start: datetime, end: datetime) -> bool:
+        index = bisect_right(self.split_times, start)
+        return index < len(self.split_times) and self.split_times[index] <= end
 
 
 def _midpoint(quote: Quote) -> Decimal:
@@ -425,8 +438,7 @@ def _midpoint(quote: Quote) -> Decimal:
 def _matching_order(
     intent: _Intent,
     held: _Position | None,
-    quotes: list[Quote],
-    splits: list[datetime],
+    quotes: _QuoteTimeline,
     window: _Window,
     commission_bps: int,
     audit: dict,
@@ -448,7 +460,7 @@ def _matching_order(
         return None, "position_already_held"
     if window.expiry <= window.completed:
         return None, "expired"
-    execution = next((q for q in quotes if window.completed < q.observed_at), None)
+    execution = quotes.execution_after(window.completed)
     if execution is None:
         status = (
             "expired"
@@ -460,11 +472,11 @@ def _matching_order(
         return None, "expired"
     audit["execution_quote_observed_at"] = _at(execution.observed_at)
     audit["execution_quote_available_at"] = _at(execution.available_at)
-    if any(window.cutoff < at <= execution.available_at for at in splits):
+    if quotes.crosses_split(window.cutoff, execution.available_at):
         return None, "cancelled_stock_split"
 
     if held is None:
-        mark = _reference_quote(quotes, splits, window.cutoff, mark_floor=mark_floor)
+        mark = quotes.reference_at(window.cutoff, mark_floor=mark_floor)
         if mark is None:
             return None, "unavailable_reference_mark"
         reference = _midpoint(mark)
@@ -511,33 +523,18 @@ def _matching_order(
 
 
 def _verify_snapshots(
-    replay: Replay,
     snapshots: list[_Snapshot],
     jobs: list[dict],
-    timeline: dict[str, list[Quote]],
-    splits: dict[str, list[datetime]],
+    quote_index: dict[str, _QuoteTimeline],
+    states: dict[datetime, NativeAccountState],
     *,
     bound: bool,
 ) -> None:
-    if (
-        len({quote.symbol for quote in replay.quotes} | timeline.keys()) > MAX_PREFIX_SYMBOLS
-        or replay_event_count(replay) > MAX_PREFIX_EVENTS
-    ):
-        raise ValueError(
-            f"Snapshot continuity is bounded to {MAX_PREFIX_SYMBOLS} symbols "
-            f"and {MAX_PREFIX_EVENTS} replay events"
-        )
-    if len({snapshot.portfolio.cash_asset for snapshot in snapshots}) != 1:
-        raise ValueError("Snapshot continuity requires a consistent cash asset")
-
-    states = {}
     for snapshot, job in zip(snapshots, jobs, strict=True):
         portfolio, cutoff, held = snapshot.portfolio, snapshot.cutoff, snapshot.held
         description = f"Job {job['job_id']} snapshot"
         if Decimal(portfolio.reserved_cash_usd):
             raise ValueError(f"{description} has reserved cash outside the synthetic account")
-        if cutoff not in states:
-            states[cutoff] = replay_account_at(replay, cutoff)
         cash, positions = states[cutoff]
         if Decimal(portfolio.cash_usd) != Decimal(cash):
             raise ValueError(f"{description} cash differs from the native replay at its cutoff")
@@ -550,9 +547,7 @@ def _verify_snapshots(
         }:
             raise ValueError(f"{description} positions differ from the native replay at its cutoff")
         for key, position in held.items():
-            quote = _reference_quote(
-                timeline[key], splits[key], cutoff, mark_floor=snapshot.mark_floors.get(key),
-            )
+            quote = quote_index[key].reference_at(cutoff, mark_floor=snapshot.mark_floors.get(key))
             if quote is None or Decimal(position.mark_price_usd) != _midpoint(quote):
                 raise ValueError(
                     f"{description} held mark differs from the pinned point-in-time quote"
@@ -560,7 +555,7 @@ def _verify_snapshots(
         job["snapshot_continuity"] = {"cash_usd": cash, "positions": positions}
 
 
-def replay_account_at(replay: Replay, cutoff: datetime) -> tuple[str, dict[str, str]]:
+def replay_account_at(replay: Replay, cutoff: datetime) -> NativeAccountState:
     prefix = replay_prefix(replay, cutoff)
     if not prefix.quotes:
         return format(Decimal(replay.starting_cash_usd), ".2f"), {}
@@ -609,12 +604,12 @@ def load_research_tape(
         identity = identity_profile(
             identity_tape, identity_registry_raw, expected_identity_registry_sha256,
         )
-        tape = _load_tape(msgspec.json.encode(identity_tape.replay))
+        tape = _load_tape(identity_tape.replay)
         identity.validate_tape_keys(tape)
         return tape, identity
     if identity_registry_raw is not None or expected_identity_registry_sha256 is not None:
         raise ValueError("Legacy research tape does not accept an identity registry")
-    return _load_tape(tape_raw), None
+    return _load_tape(wire), None
 
 
 def _prepare_records(
@@ -626,36 +621,67 @@ def _prepare_records(
     require_snapshot_continuity: bool = False,
     identity: ReplayIdentity | None = None,
 ) -> PreparedResearchReplay:
-    decoded_bytes = sum(len(row.request_base64) + len(row.result_base64) for row in records)
-    if decoded_bytes > _MAX_RESEARCH_RECORD_BYTES:
+    if sum(_record_size(row) for row in records) > _MAX_RESEARCH_RECORD_BYTES:
         raise ValueError("Decoded research export records exceed the input limit")
-    timeline, splits = _tape_timeline(tape)
-    latest_quote = max(quote.available_at for quote in tape.quotes)
-    calendar_horizon = latest_quote if tape.execution_calendar is not msgspec.UNSET else None
-
-    issued_orders = []
-    jobs = []
-    snapshots = []
-    decisions = []
-    seen_jobs = set()
-    seen_decisions = set()
-    previous_key = None
+    projection = _ResearchReplayProjection(tape, identity, _index_tape(tape))
     for record in records:
-        if record.job_id.lower() in seen_jobs:
+        projection.append(record)
+    return projection.prepare(
+        export_hash, tape_hash, require_snapshot_continuity=require_snapshot_continuity,
+    )
+
+
+def _record_size(record: _Record) -> int:
+    return len(record.request_base64) + len(record.result_base64)
+
+
+class _ResearchReplayProjection:
+    """Validate and size each accepted result once against its pinned tape."""
+
+    def __init__(
+        self, tape: Replay, identity: ReplayIdentity | None,
+        quote_index: dict[str, _QuoteTimeline],
+    ):
+        self.tape = tape
+        self.identity = identity
+        self.quote_index = quote_index
+        self.latest_quote = max(quote.available_at for quote in tape.quotes)
+        self.calendar_horizon = (
+            self.latest_quote if tape.execution_calendar is not msgspec.UNSET else None
+        )
+        self.orders: list[Order] = []
+        self.jobs: list[dict] = []
+        self.snapshots: list[_Snapshot] = []
+        self.decisions: list[dict] = []
+        self.seen_jobs: set[str] = set()
+        self.seen_decisions: set[str] = set()
+        self.last_completion_key: tuple[int, str] | None = None
+        self.decoded_bytes = 0
+
+    def append(self, record: _Record, *, expected_completion: str | None = None) -> _Result:
+        self.decoded_bytes += _record_size(record)
+        if self.decoded_bytes > _MAX_RESEARCH_RECORD_BYTES:
+            raise ValueError("Decoded research export records exceed the input limit")
+        if record.job_id.lower() in self.seen_jobs:
             raise ValueError("Research export contains a duplicate job")
-        seen_jobs.add(record.job_id.lower())
+        self.seen_jobs.add(record.job_id.lower())
         _pinned(record.request_base64, record.request_sha256, "request")
         _pinned(record.result_base64, record.result_sha256, "result")
         request = _decode(record.request_base64, _Request)
         result = _decode(record.result_base64, _Result)
-        if (request.job_schema_version == "0.2") != (identity is not None):
+        if expected_completion is not None and (
+            result.result_schema_version != ("0.3" if self.identity is not None else "0.2")
+            or _time_ns(result.batch.created_at) != _time_ns(expected_completion)
+        ):
+            raise ValueError("Walk-forward requires an offline graph result on the simulated clock")
+        if (request.job_schema_version == "0.2") != (self.identity is not None):
             raise ValueError("Research job and synthetic tape identity versions differ")
         cutoff, completed, expiry = _validate_record(record, request, result)
         window = _Window(*map(_floor_microseconds, (cutoff, completed, expiry)))
         job_key = (completed, record.job_id)
-        if previous_key is not None and job_key <= previous_key:
+        if self.last_completion_key is not None and job_key <= self.last_completion_key:
             raise ValueError("Research export jobs must be in completion order")
-        previous_key = job_key
+        self.last_completion_key = job_key
         portfolio = request.portfolio
         held = {position.symbol: position for position in portfolio.positions}
         if len(held) != len(portfolio.positions):
@@ -672,14 +698,14 @@ def _prepare_records(
         native_holdings = held
         mark_floors = {}
         resolved = {}
-        if identity is not None:
+        if self.identity is not None:
             if cutoff % 1000:
                 raise ValueError("Identity replay portfolio requires a microsecond-precise cutoff")
             resolved, native_holdings, mark_floors = _resolve_identity(
-                request, identity, held, window.cutoff,
+                request, self.identity, held, window.cutoff,
             )
 
-        jobs.append(
+        self.jobs.append(
             {
                 "job_id": record.job_id,
                 "attempt": record.attempt,
@@ -698,12 +724,12 @@ def _prepare_records(
                 "research_metadata": msgspec.to_builtins(result.metadata),
             }
         )
-        snapshots.append(_Snapshot(portfolio, window.cutoff, native_holdings, mark_floors))
+        self.snapshots.append(_Snapshot(portfolio, window.cutoff, native_holdings, mark_floors))
         for intent in result.batch.intents:
             decision_id = intent.decision_id.lower()
-            if decision_id in seen_decisions:
+            if decision_id in self.seen_decisions:
                 raise ValueError("Research export contains a duplicate decision")
-            seen_decisions.add(decision_id)
+            self.seen_decisions.add(decision_id)
             audit = {
                 "job_id": record.job_id,
                 "decision_id": decision_id,
@@ -715,7 +741,7 @@ def _prepare_records(
             replay_key = None
             mark_floor = None
             decision_window = window
-            if identity is not None:
+            if self.identity is not None:
                 active = resolved[intent.symbol]
                 instrument, expires_at = active.mapping, active.expires_at
                 replay_key = instrument.key
@@ -733,41 +759,69 @@ def _prepare_records(
                 order, status = _matching_order(
                     intent,
                     held.get(intent.symbol),
-                    timeline[replay_key or intent.symbol],
-                    splits[replay_key or intent.symbol],
+                    self.quote_index[replay_key or intent.symbol],
                     decision_window,
-                    tape.commission_bps,
+                    self.tape.commission_bps,
                     audit,
-                    calendar_horizon=calendar_horizon,
+                    calendar_horizon=self.calendar_horizon,
                     replay_key=replay_key,
                     mark_floor=mark_floor,
                 )
             if order is not None:
-                issued_orders.append(order)
-            decisions.append(audit | {"status": status})
+                self.orders.append(order)
+            self.decisions.append(audit | {"status": status})
 
-    replay = msgspec.structs.replace(tape, orders=tuple(issued_orders))
-    evaluation = None
-    if require_snapshot_continuity:
-        # An order cannot execute before the cutoff of its own research job.
-        # Running each prefix also handles analyses with overlapping clocks.
-        _verify_snapshots(replay, snapshots, jobs, timeline, splits, bound=identity is not None)
-        horizon = max(
-            latest_quote,
-            max(snapshot.cutoff for snapshot in snapshots),
+        return result
+
+    def replay(self) -> Replay:
+        return msgspec.structs.replace(self.tape, orders=tuple(self.orders))
+
+    def verify_continuity(
+        self, replay: Replay, *, account_states: dict[datetime, NativeAccountState] | None = None,
+    ) -> dict:
+        if (
+            len({quote.symbol for quote in replay.quotes} | self.quote_index.keys()) > MAX_PREFIX_SYMBOLS
+            or replay_event_count(replay) > MAX_PREFIX_EVENTS
+        ):
+            raise ValueError(
+                f"Snapshot continuity is bounded to {MAX_PREFIX_SYMBOLS} symbols "
+                f"and {MAX_PREFIX_EVENTS} replay events"
+            )
+        if len({snapshot.portfolio.cash_asset for snapshot in self.snapshots}) != 1:
+            raise ValueError("Snapshot continuity requires a consistent cash asset")
+
+        states = {} if account_states is None else account_states.copy()
+        cutoffs = {snapshot.cutoff for snapshot in self.snapshots}
+        horizon = max(self.latest_quote, max(cutoffs))
+        evaluation, checkpoints = run_replay_with_account_checkpoints(
+            replay, through=horizon, cutoffs=tuple(sorted(cutoffs.difference(states))),
         )
-        evaluation = run_replay(replay, through=horizon)
-        _verify_execution_quotes(evaluation["fills"], tuple(decisions))
-        _verify_execution_state(evaluation, jobs, decisions)
-    return PreparedResearchReplay(
-        replay,
-        export_hash,
-        tape_hash,
-        tuple(jobs),
-        tuple(decisions),
-        evaluation,
-        identity,
-    )
+        states.update(checkpoints)
+        _verify_snapshots(
+            self.snapshots, self.jobs, self.quote_index, states, bound=self.identity is not None,
+        )
+        _verify_execution_quotes(evaluation["fills"], tuple(self.decisions))
+        _verify_execution_state(evaluation, self.jobs, self.decisions)
+        return evaluation
+
+    def prepare(
+        self,
+        export_hash: str,
+        tape_hash: str,
+        *,
+        require_snapshot_continuity: bool,
+    ) -> PreparedResearchReplay:
+        replay = self.replay()
+        evaluation = self.verify_continuity(replay) if require_snapshot_continuity else None
+        return PreparedResearchReplay(
+            replay,
+            export_hash,
+            tape_hash,
+            tuple(self.jobs),
+            tuple(self.decisions),
+            evaluation,
+            self.identity,
+        )
 
 
 def _resolve_identity(
@@ -792,14 +846,19 @@ def _identity_instruments(identity: ReplayIdentity) -> list[dict]:
     return [msgspec.to_builtins(item) for item in identity.instruments]
 
 
-def _tape_timeline(tape: Replay) -> tuple[dict[str, list[Quote]], dict[str, list[datetime]]]:
-    timeline = defaultdict(list)
+def _index_tape(tape: Replay) -> dict[str, _QuoteTimeline]:
+    latest_quotes = defaultdict(list)
     for quote in sorted(executable_quotes(tape), key=lambda q: q.available_at):
-        timeline[quote.symbol].append(quote)
-    splits = defaultdict(list)
+        history = latest_quotes[quote.symbol]
+        if not history or history[-1].observed_at <= quote.observed_at:
+            history.append(quote)
+    split_times = defaultdict(list)
     for action in tape.stock_splits:
-        splits[action.symbol].append(action.effective_at)
-    return timeline, splits
+        split_times[action.symbol].append(action.effective_at)
+    return defaultdict(_QuoteTimeline, {
+        key: _QuoteTimeline(tuple(latest_quotes[key]), tuple(sorted(split_times[key])))
+        for key in latest_quotes.keys() | split_times.keys()
+    })
 
 
 def run_research_replay(
@@ -852,28 +911,35 @@ def run_research_replay(
 def _verify_execution_state(evaluation: dict, jobs: list[dict], decisions: list[dict]) -> None:
     cutoffs = {job["job_id"]: _time_ns(job["snapshot_as_of"]) for job in jobs}
     owners = {row["decision_id"]: row["job_id"] for row in decisions}
-    changes = [
-        (int(fill["quote_available_at_ns"]), owners[fill["intent_id"]])
-        for fill in evaluation["fills"]
-    ]
-    changes.extend(
+    # None marks a corporate action or fills from multiple jobs at one instant.
+    changes: dict[int, str | None] = {}
+    for fill in evaluation["fills"]:
+        instant = int(fill["quote_available_at_ns"])
+        owner = owners[fill["intent_id"]]
+        if changes.setdefault(instant, owner) != owner:
+            changes[instant] = None
+    changes.update(
         (int(row["paid_at_ns"]), None)
         for row in evaluation.get("cash_dividend_events", ())
         if row["status"] == "paid" and Decimal(row["cash_credited_usd"])
     )
-    changes.extend(
+    changes.update(
         (int(row["effective_at_ns"]), None)
         for row in evaluation.get("stock_split_events", ())
         if row["shares_before"] != row["shares_after"]
     )
+    instants = sorted(changes)
     for row in decisions:
         if row["status"] != "submitted_to_replay":
             continue
         job = row["job_id"]
         execution = _time_ns(row["execution_quote_available_at"])
-        if any(
-            cutoffs[job] < instant <= execution and (owner != job or instant != execution)
-            for instant, owner in changes
+        index = bisect_right(instants, cutoffs[job])
+        if index == len(instants):
+            continue
+        first_change = instants[index]
+        if first_change < execution or (
+            first_change == execution and changes[first_change] != job
         ):
             raise ValueError(f"Job {job} snapshot became stale before execution")
 

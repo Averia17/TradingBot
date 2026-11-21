@@ -228,20 +228,25 @@ def build_contexts(
     policy_version: str,
     *,
     include_reflections: bool = False,
+    snapshot_sha256: str | None = None,
 ) -> dict[str, str]:
+    """Build bounded memory prompts from the exact snapshot used by research."""
     from tradingbot.security_identity import StablePointInTimeSnapshot
 
     stable = isinstance(snapshot, StablePointInTimeSnapshot)
     bindings = {binding.symbol: binding for binding in snapshot.security_bindings} if stable else {}
+    requested_symbols = set(symbols)
     eligible = [
         record
         for record in snapshot.records
         if record.kind == PAPER_KIND
         and record.ingested_at <= snapshot.as_of
-        and record.symbol in symbols
+        and record.symbol in requested_symbols
         and (not stable or record.symbol in bindings)
         and record.payload["policy_version"] == policy_version
     ]
+    if not eligible:
+        return {}
     eligible.sort(
         key=lambda item: (item.available_at, item.payload["account_version"]), reverse=True
     )
@@ -253,7 +258,10 @@ def build_contexts(
     if include_reflections:
         prefix += " Derived accounting facts apply only to the linked realized sale."
     prefix += "\n"
-    provenance = {"snapshot_sha256": snapshot.sha256, "as_of": snapshot.as_of.isoformat()}
+    provenance = {
+        "snapshot_sha256": snapshot.sha256 if snapshot_sha256 is None else snapshot_sha256,
+        "as_of": snapshot.as_of.isoformat(),
+    }
     contexts = {}
     for symbol in symbols:
         own = [record for record in eligible if record.symbol == symbol]

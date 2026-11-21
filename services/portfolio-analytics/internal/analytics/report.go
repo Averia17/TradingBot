@@ -98,14 +98,14 @@ func buildReport(in reportInput, policy Policy, period string) (Report, error) {
 	accountStatus := in.accountStatus(policy.HeadMaxAge)
 	index := indexValuations(in.valuations, policy.BenchmarkID)
 	state := in.state
-	priced := evaluate(state, index, in.now, policy.MarkMaxAge, true)
+	priced := valuePortfolioAt(state, index, in.now, policy.MarkMaxAge, true)
 	free := usdAmount(state.CashUSD)
 	free.Sub(free, usdAmount(state.ReservedCashUSD))
 	report := Report{
 		SchemaVersion: WireVersion, AccountID: in.accountID, Mode: "paper", Currency: "USD",
 		Status: "complete", AccountStatus: accountStatus, AccountVersion: state.Version, AsOf: state.KnownAt,
 		CashUSD: state.CashUSD, ReservedCashUSD: state.ReservedCashUSD,
-		FreeCashUSD:    amountString(free),
+		FreeCashUSD:    formatUSDUnits(free),
 		RealizedPnLUSD: &state.RealizedUSD, Positions: priced.positions, Performance: pendingPerformance(period, policy.BenchmarkID),
 	}
 	if !verified.IsZero() {
@@ -164,37 +164,34 @@ type valuedState struct {
 	positions      []PositionReport
 }
 
-func evaluate(state ledgerState, index valuationIndex, cutoff time.Time, maxAge time.Duration, includePositions bool) valuedState {
+func valuePortfolioAt(state ledgerState, index valuationIndex, cutoff time.Time, maxAge time.Duration, includePositions bool) valuedState {
 	result := valuedState{positions: []PositionReport{}}
 	positionsValue, openBasis := new(big.Rat), new(big.Int)
-	var marketValues map[string]*big.Rat
+	var marketValues []*big.Rat
 	if includePositions {
-		marketValues = make(map[string]*big.Rat, len(state.Positions))
+		result.positions = make([]PositionReport, 0, len(state.Positions))
+		marketValues = make([]*big.Rat, 0, len(state.Positions))
 	}
 	complete := true
 	for _, position := range state.Positions {
-		mark := latestAt(index.marks[position.Instrument], cutoff)
-		basis := position.basis()
-		row := PositionReport{Balance: position.Balance, BasisUSD: amountString(basis), Status: "mark_missing"}
-		var value *big.Rat
-		if mark != nil {
-			row.Status, row.PriceUSD = "mark_stale", &mark.Mark.PriceUSD
-			row.MarkObservedAt, row.MarkAvailableAt = &mark.ObservedAt, &mark.AvailableAt
-			row.MarkSourceID, row.MarkSourceKind = mark.SourceID, mark.SourceKind
-			if cutoff.Sub(mark.ObservedAt) <= maxAge {
-				denom := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(position.Decimals)), nil)
-				quantity := new(big.Rat).SetFrac(rawAmount(position.QuantityRaw), denom)
-				value = quantity.Mul(quantity, dollars(mark.Mark.PriceUSD))
-				positionsValue.Add(positionsValue, value)
-				openBasis.Add(openBasis, basis)
-				row.Status, row.MarketValueUSD = "priced", ratText(value)
-				row.UnrealizedPnLUSD = ratText(new(big.Rat).Sub(value, new(big.Rat).SetFrac(basis, usdScale)))
-			}
+		mark := index.marks[position.Instrument].latestVisibleAt(cutoff)
+		priced := mark != nil && cutoff.Sub(mark.ObservedAt) <= maxAge
+		if !priced && !includePositions {
+			return result
 		}
-		complete = complete && value != nil
+		basis := position.remainingCostBasis()
+		var value *big.Rat
+		if priced {
+			denom := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(position.Decimals)), nil)
+			quantity := new(big.Rat).SetFrac(rawAmount(position.QuantityRaw), denom)
+			value = quantity.Mul(quantity, dollars(mark.Mark.PriceUSD))
+			positionsValue.Add(positionsValue, value)
+			openBasis.Add(openBasis, basis)
+		}
+		complete = complete && priced
 		if includePositions {
-			marketValues[position.InstrumentID] = value
-			result.positions = append(result.positions, row)
+			marketValues = append(marketValues, value)
+			result.positions = append(result.positions, positionReport(position, mark, basis, value))
 		}
 	}
 	if complete {
@@ -202,9 +199,8 @@ func evaluate(state ledgerState, index valuationIndex, cutoff time.Time, maxAge 
 		result.nav = new(big.Rat).Add(positionsValue, dollars(state.CashUSD))
 		result.unrealized = new(big.Rat).Sub(positionsValue, new(big.Rat).SetFrac(openBasis, usdScale))
 		if result.nav.Sign() > 0 {
-			for i := range result.positions {
-				row := &result.positions[i]
-				row.WeightPct = ratText(percent(marketValues[row.InstrumentID], result.nav))
+			for i, value := range marketValues {
+				result.positions[i].WeightPct = ratText(percent(value, result.nav))
 			}
 		}
 	}
@@ -221,6 +217,21 @@ func evaluate(state ledgerState, index valuationIndex, cutoff time.Time, maxAge 
 		return strings.Compare(a.InstrumentID, b.InstrumentID)
 	})
 	return result
+}
+
+func positionReport(position holding, mark *Valuation, basis *big.Int, value *big.Rat) PositionReport {
+	row := PositionReport{Balance: position.Balance, BasisUSD: formatUSDUnits(basis), Status: "mark_missing"}
+	if mark == nil {
+		return row
+	}
+	row.Status, row.PriceUSD = "mark_stale", &mark.Mark.PriceUSD
+	row.MarkObservedAt, row.MarkAvailableAt = &mark.ObservedAt, &mark.AvailableAt
+	row.MarkSourceID, row.MarkSourceKind = mark.SourceID, mark.SourceKind
+	if value != nil {
+		row.Status, row.MarketValueUSD = "priced", ratText(value)
+		row.UnrealizedPnLUSD = ratText(new(big.Rat).Sub(value, new(big.Rat).SetFrac(basis, usdScale)))
+	}
+	return row
 }
 
 func dollars(value string) *big.Rat { return new(big.Rat).SetFrac(usdAmount(value), usdScale) }

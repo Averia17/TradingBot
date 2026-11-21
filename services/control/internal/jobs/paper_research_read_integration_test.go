@@ -66,7 +66,7 @@ func TestReadCompletedPaperResearchVerifiesExactDurableDispatch(t *testing.T) {
 
 	bound := newJob(2, true)
 	bound.PaperDispatch = &PaperDispatchInput{AccountID: testIdentity(900), Request: json.RawMessage(`{"approved":true}`)}
-	if _, created, err := store.CreateBoundPaperEntry(ctx, BoundPaperEntry{Job: bound, OwnerRegistrySHA256: registry}, nil); err != nil || !created {
+	if _, created, err := store.CreateBoundPaperJob(ctx, BoundPaperJob{Job: bound, OwnerRegistrySHA256: registry}, nil); err != nil || !created {
 		t.Fatalf("create bound fixture: %t %v", created, err)
 	}
 	result := complete(bound, registry, 101)

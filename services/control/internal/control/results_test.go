@@ -161,6 +161,20 @@ func TestCompletionRejectsTamperedEvidenceAndMetadata(t *testing.T) {
 	}
 }
 
+func TestInvalidBatchDoesNotBypassLeaseAuthority(t *testing.T) {
+	input := fixture(t, "valid-result-request.json")
+	input = bytes.Replace(input, []byte(`"execution_mode": "research"`), []byte(`"execution_mode": "live"`), 1)
+	if !bytes.Contains(input, []byte(`"execution_mode": "live"`)) {
+		t.Fatal("batch mutation did not apply")
+	}
+	store := stubJobStore{complete: func(_ context.Context, _ jobs.CompleteJob, _ func(jobs.Job, time.Time) error) (jobs.Result, bool, error) {
+		return jobs.Result{}, false, jobs.ErrLeaseConflict
+	}}
+	response := callJobAPI(NewHandler(time.Hour, time.Now, store), http.MethodPost, completePath, input)
+	defer response.Body.Close()
+	assertResponse(t, response, http.StatusConflict, `{"error":"lease_conflict"}`)
+}
+
 func TestResultTransportMapsStoreErrorsWithoutLeakingTokens(t *testing.T) {
 	input := fixture(t, "valid-result-request.json")
 	for _, test := range []struct {

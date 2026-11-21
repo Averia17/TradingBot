@@ -8,14 +8,31 @@ import subprocess
 import tempfile
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from functools import cached_property, partial
 from pathlib import Path
 from typing import Annotated, Literal
 from uuid import NAMESPACE_URL, uuid5
 
-from pydantic import Field, TypeAdapter, ValidationError, model_validator
+from pydantic import Field, JsonValue, TypeAdapter, ValidationError, model_validator
 
 from tradingbot.contracts import Contract, PortfolioSnapshot
+from tradingbot.paper_cli import (
+    MAX_DOCUMENT_BYTES,
+    AdmissionReceipt,
+    AdmissionState,
+    AdmissionStop,
+    AdmissionWindow,
+    GoRunner,
+    admit_occurrence,
+    check_owner_quote_tape,
+    execute_cycle_command,
+    invoke_paper_cli,
+    parse_cycle_args,
+    poll_admissions,
+    read_paper_snapshot,
+)
 from tradingbot.security_identity import load_identity_registry
 from tradingbot.selection import plan_research
 from tradingbot.snapshots import (
@@ -24,13 +41,8 @@ from tradingbot.snapshots import (
     CaptureTime,
     Identifier,
     decode_pinned_json,
-    read_pinned_bytes,
     read_pinned_json,
 )
-
-MAX_DOCUMENT_BYTES = 256 * 1024
-MAX_QUOTE_TAPE_BYTES = 2 * 1024 * 1024
-GoRunner = Callable[..., dict]
 
 
 class Occurrence(Contract):
@@ -84,27 +96,12 @@ _STAGED_ENTRY = TypeAdapter(
 )
 
 
-class EntryReceipt(Contract):
+class EntryReceipt(AdmissionReceipt):
+    unadmitted = frozenset({"not_due", "missed", "not_selected"})
     entry_schedule_schema_version: Literal["0.1", "0.2"]
     status: Literal[
         "not_due", "missed", "not_selected", "queued", "leased", "completed", "failed", "expired"
     ]
-    created: Annotated[bool, Field(strict=True)]
-    job_id: (
-        Annotated[str, Field(pattern=r"^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$")] | None
-    ) = None
-    created_at: CaptureTime | None = None
-
-    @model_validator(mode="after")
-    def coherent(self):
-        transient = self.status in {"not_due", "missed", "not_selected"}
-        if (
-            (transient and (self.job_id is not None or self.created_at is not None))
-            or (not transient and (self.job_id is None or self.created_at is None))
-            or (self.created and self.status != "queued")
-        ):
-            raise ValueError("Go entry receipt has an inconsistent acceptance state")
-        return self
 
 
 def _encode(value) -> str:
@@ -123,7 +120,8 @@ def _read_journal(path: Path) -> StagedEntry:
     return _STAGED_ENTRY.validate_python(decode_pinned_json(raw))
 
 
-def _persist(directory: Path, path: Path, staged: StagedEntry) -> StagedEntry:
+def _persist(path: Path, staged: StagedEntry) -> StagedEntry:
+    directory = path.parent
     directory.mkdir(parents=True, exist_ok=True)
     # Publish a fully written file without replacing an existing occurrence.
     # Concurrent runners use the winner's bytes before sending anything to Go.
@@ -133,221 +131,257 @@ def _persist(directory: Path, path: Path, staged: StagedEntry) -> StagedEntry:
             stream.write(staged.model_dump_json().encode())
             stream.flush()
             os.fsync(stream.fileno())
+        # Windows rename refuses an existing destination. POSIX rename would replace it.
+        publish = os.rename if os.name == "nt" else os.link
         try:
-            os.link(draft, path)
+            publish(draft, path)
         except FileExistsError:
             return _read_journal(path)
     return staged
 
 
-def _verify_identity_inputs(root: Path, plan: IdentityEntryCyclePlan) -> None:
-    load_identity_registry(root, plan.identity_registry)
-    raw = read_pinned_bytes(root, plan.quote_tape)
-    if len(raw) > MAX_QUOTE_TAPE_BYTES:
-        raise ValueError("owner quote tape exceeds Go's tape limit")
-    tape = decode_pinned_json(raw)
-    if (
-        not isinstance(tape, dict)
-        or tape.keys()
-        != {
-            "paper_quote_tape_schema_version",
-            "source_mode",
-            "account_id",
-            "identity_registry_sha256",
-            "observations",
-        }
-        or tape["paper_quote_tape_schema_version"] != "0.3"
-        or tape["source_mode"] != "synthetic_fixture"
-        or tape["account_id"] != plan.account_id
-        or tape["identity_registry_sha256"] != plan.identity_registry.sha256
-        or not isinstance(tape["observations"], list)
-        or len(tape["observations"]) > 2048
-    ):
-        raise ValueError("owner quote tape must bind the same account and registry in protocol 0.3")
+@dataclass(frozen=True)
+class _Journal:
+    path: Path
+
+    def load(self) -> AdmissionState[StagedEntry]:
+        try:
+            return AdmissionState(request=_read_journal(self.path))
+        except FileNotFoundError:
+            return AdmissionState()
+
+    def stage(self, request: StagedEntry) -> AdmissionState[StagedEntry]:
+        return AdmissionState(request=_persist(self.path, request))
+
+    def finish(self, receipt: dict, *, submitted: bool) -> AdmissionState[StagedEntry]:
+        # Entry reports query Go for the current status on each one-shot run.
+        return AdmissionState(receipt=receipt)
 
 
-def _stage(
-    root: Path,
-    invoke: GoRunner,
-    account_id: str,
-    identity: str,
-    policy,
-    marks,
-    screening,
-    admission: dict,
-    binding: str,
-) -> StagedEntry:
-    with tempfile.TemporaryDirectory() as temporary:
-        policy_path = Path(temporary) / "policy.json"
-        marks_path = Path(temporary) / "marks.json"
-        policy_path.write_bytes(_encode(policy).encode())
-        marks_path.write_bytes(_encode(marks).encode())
-        bundle = invoke(
-            "snapshot",
-            "--account",
-            account_id,
-            "--policy",
-            str(policy_path),
-            "--marks",
-            str(marks_path),
-            "--as-of",
-            admission["scheduled_at"],
-        )
-    wire_portfolio = bundle.get("portfolio")
-    portfolio = PortfolioSnapshot.model_validate(wire_portfolio)
-    if portfolio.as_of != datetime.fromisoformat(admission["scheduled_at"]):
-        raise ValueError("Go returned a different portfolio cutoff")
-    context = bundle.get("snapshot_context")
-    if not isinstance(context, dict) or context.get("account_id") != account_id:
-        raise ValueError("Go returned a different portfolio account")
-    identity_binding = admission.get("identity_binding")
-    request = screening | {
-        "job_id": identity,
-        "policy_version": policy["policy_version"],
-        "portfolio": portfolio.model_dump(mode="json"),
-    }
-    if identity_binding is None:
-        selected = plan_research(root, request)
-    else:
-        if (
-            wire_portfolio.keys() != PortfolioSnapshot.model_fields.keys()
-            or type(context.get("snapshot_version")) is not int
-            or context["snapshot_version"] < 1
-        ):
-            raise ValueError("Go returned an incomplete portfolio snapshot")
-        selected = plan_research(
-            root,
-            request,
-            trusted_identity_registry=identity_binding["identity_registry"],
-        )
-        if selected["job"] is not None:
-            # Preserve Go's original amount and timestamp encodings in the receipt.
-            selected["job"]["portfolio"] = wire_portfolio
-    selection = _encode(selected)
-    raw = _encode(
-        admission
-        | {
-            "snapshot_context": {
-                "account_id": account_id,
-                "snapshot_version": context.get("snapshot_version"),
-                "policy": policy,
-                "marks": marks,
-            },
-            "selection_sha256": _sha(selection),
-        }
-    )
-    if max(len(raw.encode()), len(selection.encode())) > MAX_DOCUMENT_BYTES:
-        raise ValueError("entry admission exceeds Go's document limit")
-    fields = dict(
-        owner_binding_sha256=binding,
-        admission_sha256=_sha(raw),
-        admission=raw,
-        selection=selection,
-    )
-    if identity_binding is not None:
-        return IdentityStagedEntry(
-            schema_version="0.2", portfolio_sha256=_sha(_encode(wire_portfolio)), **fields
-        )
-    return StagedEntry(schema_version="0.1", **fields)
+@dataclass(frozen=True)
+class _EntryAdmission:
+    root: Path
+    plan: EntryCyclePlan
+    occurrence: Occurrence
+    policy: dict
+    invoke: GoRunner
 
+    @property
+    def scheduled_at(self) -> str:
+        return self.occurrence.scheduled_at.isoformat()
 
-def _submit(
-    root: Path,
-    invoke: GoRunner,
-    staged: StagedEntry,
-    binding: str,
-    admission: dict,
-    identity: str,
-    account_id: str,
-    policy,
-    marks,
-    screening,
-) -> dict:
-    version = admission["entry_schedule_schema_version"]
-    if (
-        staged.schema_version != version
-        or staged.owner_binding_sha256 != binding
-        or staged.admission_sha256 != _sha(staged.admission)
-    ):
-        raise ValueError("entry journal owner binding or admission SHA-256 differs")
-    document = decode_pinned_json(staged.admission.encode())
-    context = document.get("snapshot_context") if isinstance(document, dict) else None
-    if (
-        not isinstance(context, dict)
-        or context.get("account_id") != account_id
-        or context.get("policy") != policy
-        or context.get("marks") != marks
-        or any(document.get(key) != value for key, value in admission.items())
-        or document.get("selection_sha256") != _sha(staged.selection)
-    ):
-        raise ValueError("entry journal does not match its pinned inputs")
-    selected = decode_pinned_json(staged.selection.encode())
-    if (
-        not isinstance(selected, dict)
-        or selected.get("selection_schema_version") != version
-        or "job" not in selected
-    ):
-        raise ValueError("entry journal has no screening receipt")
-    job = selected["job"]
-    if job is not None:
-        eligible = {item["symbol"] for item in screening["candidates"] if item["allowed"] is True}
-        if (
-            not isinstance(job, dict)
-            or job.get("data_manifest") != screening["data_manifest"]
-            or job.get("policy_version") != policy["policy_version"]
-            or not isinstance(job.get("requested_symbols"), list)
-            or not set(job["requested_symbols"]) <= eligible
-        ):
-            raise ValueError("entry journal job differs from pinned screening inputs")
-        if isinstance(staged, IdentityStagedEntry):
-            candidate_ids = {
-                item["symbol"]: item["security_id"]
-                for item in screening["candidates"]
-                if item["allowed"] is True
+    @cached_property
+    def identity(self) -> str:
+        name = _encode([self.plan.account_id, self.plan.schedule_id, self.scheduled_at])
+        return str(uuid5(NAMESPACE_URL, name))
+
+    @cached_property
+    def identity_binding(self) -> dict | None:
+        if isinstance(self.plan, IdentityEntryCyclePlan):
+            return {
+                "identity_registry": self.plan.identity_registry.model_dump(mode="json"),
+                "quote_tape": self.plan.quote_tape.model_dump(mode="json"),
             }
-            expected_bindings = [
-                {"symbol": symbol, "security_id": candidate_ids[symbol]}
-                for symbol in job["requested_symbols"]
-            ]
-            if (
-                job.get("job_schema_version") != "0.2"
-                or job.get("job_id") != identity
-                or job.get("identity_registry")
-                != admission["identity_binding"]["identity_registry"]
-                or not expected_bindings
-                or len({item["security_id"] for item in expected_bindings})
-                != len(expected_bindings)
-                or job.get("security_bindings") != expected_bindings
-                or _sha(_encode(job.get("portfolio"))) != staged.portfolio_sha256
+        return None
+
+    @cached_property
+    def materials(self) -> tuple[dict, JsonValue]:
+        screening = read_pinned_json(self.root, self.occurrence.screening)
+        marks = read_pinned_json(self.root, self.occurrence.marks)
+        if (
+            not isinstance(screening, dict)
+            or {"job_id", "policy_version", "portfolio"} & screening.keys()
+        ):
+            raise ValueError("screening must omit runner-owned job and portfolio fields")
+        if self.identity_binding is not None:
+            registry = self.identity_binding["identity_registry"]
+            if screening.get("schema_version") != "0.3" or (
+                screening.get("identity_registry", registry) != registry
             ):
                 raise ValueError(
-                    "entry journal job differs from its stable identity or Go snapshot"
+                    "bound entry requires screening version 0.3 and the exact owner registry pin"
                 )
-    with tempfile.TemporaryDirectory() as temporary:
-        config = Path(temporary) / "config.json"
-        selection = Path(temporary) / "selection.json"
-        config.write_bytes(staged.admission.encode())
-        selection.write_bytes(staged.selection.encode())
-        command = [
-            "schedule-entry",
-            "--config",
-            str(config),
-            "--selection",
-            str(selection),
-            "--archive-root",
-            str(root),
-        ]
-        if version == "0.2":
-            command.extend(
-                [
-                    "--identity-registry-sha256",
-                    admission["identity_binding"]["identity_registry"]["sha256"],
-                ]
+            screening = screening | {"identity_registry": registry}
+        elif screening.get("schema_version") == "0.3":
+            raise ValueError("identity screening requires owner entry plan version 0.2")
+        return screening, marks
+
+    @cached_property
+    def admission(self) -> dict:
+        screening, _ = self.materials
+        body = {
+            "entry_schedule_schema_version": self.plan.schema_version,
+            "schedule_id": self.plan.schedule_id,
+            "scheduled_at": self.scheduled_at,
+            "max_lateness_seconds": self.occurrence.max_lateness_seconds,
+            "max_job_llm_calls": screening.get("max_llm_calls"),
+        }
+        if self.identity_binding is not None:
+            body["identity_binding"] = self.identity_binding
+        return body
+
+    @cached_property
+    def owner_binding_sha256(self) -> str:
+        scope = {
+            "account_id": self.plan.account_id,
+            "schedule_id": self.plan.schedule_id,
+            "policy": self.plan.policy.model_dump(mode="json"),
+            "occurrence": self.occurrence.model_dump(mode="json"),
+        }
+        if self.identity_binding is not None:
+            scope["identity_binding"] = self.identity_binding
+        return _sha(_encode(scope))
+
+    def prepare(self) -> StagedEntry:
+        screening, marks = self.materials
+        bundle = read_paper_snapshot(
+            self.invoke,
+            account=self.plan.account_id,
+            as_of=self.scheduled_at,
+            policy=_encode(self.policy).encode(),
+            marks=_encode(marks).encode(),
+        )
+        wire_portfolio = bundle.get("portfolio")
+        portfolio = PortfolioSnapshot.model_validate(wire_portfolio)
+        if portfolio.as_of != self.occurrence.scheduled_at:
+            raise ValueError("Go returned a different portfolio cutoff")
+        context = bundle.get("snapshot_context")
+        if not isinstance(context, dict) or context.get("account_id") != self.plan.account_id:
+            raise ValueError("Go returned a different portfolio account")
+        request = screening | {
+            "job_id": self.identity,
+            "policy_version": self.policy["policy_version"],
+            "portfolio": portfolio.model_dump(mode="json"),
+        }
+        if self.identity_binding is None:
+            selected = plan_research(self.root, request)
+        else:
+            if (
+                wire_portfolio.keys() != PortfolioSnapshot.model_fields.keys()
+                or type(context.get("snapshot_version")) is not int
+                or context["snapshot_version"] < 1
+            ):
+                raise ValueError("Go returned an incomplete portfolio snapshot")
+            selected = plan_research(
+                self.root,
+                request,
+                trusted_identity_registry=self.identity_binding["identity_registry"],
             )
-        receipt = invoke(*command)
-    if EntryReceipt.model_validate(receipt).entry_schedule_schema_version != version:
-        raise ValueError("Go entry receipt uses a different protocol version")
-    return receipt
+            if selected["job"] is not None:
+                # Preserve Go's original amount and timestamp encodings in the receipt.
+                selected["job"]["portfolio"] = wire_portfolio
+        selection = _encode(selected)
+        raw = _encode(
+            self.admission
+            | {
+                "snapshot_context": {
+                    "account_id": self.plan.account_id,
+                    "snapshot_version": context.get("snapshot_version"),
+                    "policy": self.policy,
+                    "marks": marks,
+                },
+                "selection_sha256": _sha(selection),
+            }
+        )
+        if max(len(raw.encode()), len(selection.encode())) > MAX_DOCUMENT_BYTES:
+            raise ValueError("entry admission exceeds Go's document limit")
+        fields = dict(
+            owner_binding_sha256=self.owner_binding_sha256,
+            admission_sha256=_sha(raw),
+            admission=raw,
+            selection=selection,
+        )
+        if self.identity_binding is not None:
+            return IdentityStagedEntry(
+                schema_version="0.2", portfolio_sha256=_sha(_encode(wire_portfolio)), **fields
+            )
+        return StagedEntry(schema_version="0.1", **fields)
+
+    def submit(self, staged: StagedEntry) -> dict:
+        screening, marks = self.materials
+        version = self.plan.schema_version
+        if (
+            staged.schema_version != version
+            or staged.owner_binding_sha256 != self.owner_binding_sha256
+            or staged.admission_sha256 != _sha(staged.admission)
+        ):
+            raise ValueError("entry journal owner binding or admission SHA-256 differs")
+        document = decode_pinned_json(staged.admission.encode())
+        context = document.get("snapshot_context") if isinstance(document, dict) else None
+        if (
+            not isinstance(context, dict)
+            or context.get("account_id") != self.plan.account_id
+            or context.get("policy") != self.policy
+            or context.get("marks") != marks
+            or any(document.get(key) != value for key, value in self.admission.items())
+            or document.get("selection_sha256") != _sha(staged.selection)
+        ):
+            raise ValueError("entry journal does not match its pinned inputs")
+        selected = decode_pinned_json(staged.selection.encode())
+        if (
+            not isinstance(selected, dict)
+            or selected.get("selection_schema_version") != version
+            or "job" not in selected
+        ):
+            raise ValueError("entry journal has no screening receipt")
+        job = selected["job"]
+        if job is not None:
+            eligible = {
+                item["symbol"]: item for item in screening["candidates"] if item["allowed"] is True
+            }
+            if (
+                not isinstance(job, dict)
+                or job.get("data_manifest") != screening["data_manifest"]
+                or job.get("policy_version") != self.policy["policy_version"]
+                or not isinstance(job.get("requested_symbols"), list)
+                or any(
+                    not isinstance(symbol, str) or symbol not in eligible
+                    for symbol in job["requested_symbols"]
+                )
+            ):
+                raise ValueError("entry journal job differs from pinned screening inputs")
+            if isinstance(staged, IdentityStagedEntry):
+                candidate_ids = {symbol: item["security_id"] for symbol, item in eligible.items()}
+                expected_bindings = [
+                    {"symbol": symbol, "security_id": candidate_ids[symbol]}
+                    for symbol in job["requested_symbols"]
+                ]
+                if (
+                    job.get("job_schema_version") != "0.2"
+                    or job.get("job_id") != self.identity
+                    or job.get("identity_registry") != self.identity_binding["identity_registry"]
+                    or not expected_bindings
+                    or len({item["security_id"] for item in expected_bindings})
+                    != len(expected_bindings)
+                    or job.get("security_bindings") != expected_bindings
+                    or _sha(_encode(job.get("portfolio"))) != staged.portfolio_sha256
+                ):
+                    raise ValueError("entry journal job differs from its stable identity or Go snapshot")
+        with tempfile.TemporaryDirectory() as temporary:
+            config = Path(temporary) / "config.json"
+            selection = Path(temporary) / "selection.json"
+            config.write_bytes(staged.admission.encode())
+            selection.write_bytes(staged.selection.encode())
+            command = [
+                "schedule-entry",
+                "--config",
+                str(config),
+                "--selection",
+                str(selection),
+                "--archive-root",
+                str(self.root),
+            ]
+            if self.identity_binding is not None:
+                command.extend(
+                    [
+                        "--identity-registry-sha256",
+                        self.identity_binding["identity_registry"]["sha256"],
+                    ]
+                )
+            receipt = self.invoke(*command)
+        if EntryReceipt.model_validate(receipt).entry_schedule_schema_version != version:
+            raise ValueError("Go entry receipt uses a different protocol version")
+        return receipt
 
 
 def run_cycles(
@@ -362,118 +396,48 @@ def run_cycles(
 ) -> dict:
     reference = ArchiveReference.model_validate(plan_ref)
     plan = ENTRY_CYCLE_PLAN.validate_python(read_pinned_json(root, reference))
-    identity_options = {}
-    if isinstance(plan, IdentityEntryCyclePlan):
-        if trusted_identity_registry_sha256 != plan.identity_registry.sha256:
-            raise ValueError("bound entry cycle requires the matching owner registry SHA-256")
-        identity_options["identity_binding"] = {
-            "identity_registry": plan.identity_registry.model_dump(mode="json"),
-            "quote_tape": plan.quote_tape.model_dump(mode="json"),
-        }
+    if isinstance(plan, IdentityEntryCyclePlan) and (
+        trusted_identity_registry_sha256 != plan.identity_registry.sha256
+    ):
+        raise ValueError("bound entry cycle requires the matching owner registry SHA-256")
     policy = read_pinned_json(root, plan.policy)
     if not isinstance(policy, dict) or not isinstance(policy.get("policy_version"), str):
         raise ValueError("owner policy requires a policy version")
-    outcomes = []
+
     identity_inputs_checked = False
+
+    def prepare(entry: _EntryAdmission) -> StagedEntry:
+        nonlocal identity_inputs_checked
+        if isinstance(plan, IdentityEntryCyclePlan) and not identity_inputs_checked:
+            load_identity_registry(root, plan.identity_registry)
+            check_owner_quote_tape(root, plan.quote_tape, plan.account_id, plan.identity_registry)
+            identity_inputs_checked = True
+        return entry.prepare()
+
+    outcomes = []
     for occurrence in plan.occurrences:
-        scheduled = occurrence.scheduled_at.isoformat()
-        if settled is not None and scheduled in settled:
-            outcomes.append(settled[scheduled])
+        entry = _EntryAdmission(root, plan, occurrence, policy, invoke)
+        if settled is not None and entry.scheduled_at in settled:
+            outcomes.append(settled[entry.scheduled_at])
             continue
-        identity = str(
-            uuid5(NAMESPACE_URL, _encode([plan.account_id, plan.schedule_id, scheduled]))
-        )
-        path = journal / f"{identity}.json"
-        now = clock()
-        if not path.exists() and (
-            now < occurrence.scheduled_at
-            or now > occurrence.scheduled_at + timedelta(seconds=occurrence.max_lateness_seconds)
-        ):
-            outcomes.append(
-                {
-                    "scheduled_at": scheduled,
-                    "status": "not_due" if now < occurrence.scheduled_at else "missed",
-                    "created": False,
-                }
-            )
-            continue
-        screening = read_pinned_json(root, occurrence.screening)
-        marks = read_pinned_json(root, occurrence.marks)
-        if (
-            not isinstance(screening, dict)
-            or {"job_id", "policy_version", "portfolio"} & screening.keys()
-        ):
-            raise ValueError("screening must omit runner-owned job and portfolio fields")
-        if isinstance(plan, IdentityEntryCyclePlan):
-            identity_registry = identity_options["identity_binding"]["identity_registry"]
-            if (
-                screening.get("schema_version") != "0.3"
-                or screening.get("identity_registry", identity_registry) != identity_registry
-            ):
-                raise ValueError(
-                    "bound entry requires screening version 0.3 and the exact owner registry pin"
-                )
-            screening = screening | {"identity_registry": identity_registry}
-        elif screening.get("schema_version") == "0.3":
-            raise ValueError("identity screening requires owner entry plan version 0.2")
-        admission = {
-            "entry_schedule_schema_version": plan.schema_version,
-            "schedule_id": plan.schedule_id,
-            "scheduled_at": scheduled,
-            "max_lateness_seconds": occurrence.max_lateness_seconds,
-            "max_job_llm_calls": screening.get("max_llm_calls"),
-            **identity_options,
-        }
-        binding = _sha(
-            _encode(
-                {
-                    "account_id": plan.account_id,
-                    "schedule_id": plan.schedule_id,
-                    "policy": plan.policy.model_dump(mode="json"),
-                    "occurrence": occurrence.model_dump(mode="json"),
-                    **identity_options,
-                }
-            )
+        window = AdmissionWindow(
+            occurrence.scheduled_at,
+            occurrence.scheduled_at + timedelta(seconds=occurrence.max_lateness_seconds),
+            "not_due",
         )
         try:
-            try:
-                staged = _read_journal(path)
-            except FileNotFoundError:
-                if isinstance(plan, IdentityEntryCyclePlan) and not identity_inputs_checked:
-                    _verify_identity_inputs(root, plan)
-                    identity_inputs_checked = True
-                staged = _persist(
-                    journal,
-                    path,
-                    _stage(
-                        root,
-                        invoke,
-                        plan.account_id,
-                        identity,
-                        policy,
-                        marks,
-                        screening,
-                        admission,
-                        binding,
-                    ),
-                )
-            outcome = _submit(
-                root,
-                invoke,
-                staged,
-                binding,
-                admission,
-                identity,
-                plan.account_id,
-                policy,
-                marks,
-                screening,
+            outcome = admit_occurrence(
+                window,
+                _Journal(journal / f"{entry.identity}.json"),
+                partial(prepare, entry),
+                entry.submit,
+                clock,
             )
         except subprocess.SubprocessError as exc:
             if settled is None:
                 raise
-            outcome = {"status": "pending_go", "created": False, "error": type(exc).__name__}
-        outcomes.append(outcome | {"scheduled_at": scheduled})
+            outcome = AdmissionStop("pending_go", exc).report()
+        outcomes.append(outcome | {"scheduled_at": entry.scheduled_at})
     return {
         "entry_cycle_report_schema_version": plan.schema_version,
         "owner_plan_sha256": reference.sha256,
@@ -494,9 +458,12 @@ def poll_cycles(
     trusted_identity_registry_sha256: str | None = None,
 ) -> None:
     settled: dict[str, dict] = {}
-    previous = None
-    while True:
-        report = run_cycles(
+
+    def remember(row: dict) -> None:
+        settled[row["scheduled_at"]] = row
+
+    poll_admissions(
+        lambda: run_cycles(
             root,
             plan_ref,
             journal,
@@ -504,97 +471,29 @@ def poll_cycles(
             clock=clock,
             settled=settled,
             trusted_identity_registry_sha256=trusted_identity_registry_sha256,
-        )
-        if report != previous:
-            emit(report)
-            previous = report
-        settled.update(
-            (row["scheduled_at"], row)
-            for row in report["occurrences"]
-            if row["status"] not in {"not_due", "pending_go"}
-        )
-        if len(settled) == len(report["occurrences"]):
-            return
-        due_times = (
-            datetime.fromisoformat(row["scheduled_at"])
-            for row in report["occurrences"]
-            if row["status"] == "not_due"
-        )
-        now = clock()
-        until_due = min(
-            ((due - now).total_seconds() for due in due_times if due > now),
-            default=interval_seconds,
-        )
-        wait(min(interval_seconds, until_due))
+        ),
+        emit,
+        interval_seconds,
+        waiting_status="not_due",
+        release_field="scheduled_at",
+        retry_statuses={"pending_go"},
+        clock=clock,
+        wait=wait,
+        remember=remember,
+    )
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--schema", action="store_true", help="Print the owner-plan schema")
-    parser.add_argument("--root", type=Path)
-    parser.add_argument("--plan-ref")
-    parser.add_argument("--plan-sha256")
-    parser.add_argument("--journal", type=Path)
-    parser.add_argument("--paper-apply", type=Path)
-    parser.add_argument(
-        "--identity-registry-sha256",
-        default=os.getenv("TRADINGBOT_RESEARCH_IDENTITY_REGISTRY_SHA256"),
-    )
-    parser.add_argument(
-        "--poll-interval-seconds",
-        type=int,
-        help="Wait for future occurrences and retry uncertain Go requests every 1 to 60 seconds",
-    )
-    args = parser.parse_args()
+    args = parse_cycle_args(parser)
     if args.schema:
         print(json.dumps(ENTRY_CYCLE_PLAN.json_schema(mode="serialization"), indent=2))
         return 0
-    if not all((args.root, args.plan_ref, args.plan_sha256, args.journal, args.paper_apply)):
-        parser.error("--root, --plan-ref, --plan-sha256, --journal, and --paper-apply are required")
-    if args.poll_interval_seconds is not None and not 1 <= args.poll_interval_seconds <= 60:
-        parser.error("--poll-interval-seconds must be between 1 and 60")
-
-    def invoke(*arguments):
-        response = subprocess.run(
-            [str(executable), *arguments],
-            check=True,
-            capture_output=True,
-            timeout=45,
-        )
-        if len(response.stdout) > MAX_DOCUMENT_BYTES:
-            raise ValueError("Go scheduler receipt exceeds the document limit")
-        result = decode_pinned_json(response.stdout)
-        if not isinstance(result, dict):
-            raise ValueError("Go output must be a receipt object")
-        return result
-
-    def emit(report):
-        print(json.dumps(report), flush=True)
 
     try:
-        executable = args.paper_apply.resolve(strict=True)
-        root = args.root.resolve(strict=True)
-        reference = {"ref": args.plan_ref, "sha256": args.plan_sha256}
-        if args.poll_interval_seconds is None:
-            emit(
-                run_cycles(
-                    root,
-                    reference,
-                    args.journal,
-                    invoke,
-                    trusted_identity_registry_sha256=args.identity_registry_sha256,
-                )
-            )
-        else:
-            poll_cycles(
-                root,
-                reference,
-                args.journal,
-                invoke,
-                args.poll_interval_seconds,
-                emit,
-                trusted_identity_registry_sha256=args.identity_registry_sha256,
-            )
+        invoke = partial(invoke_paper_cli, args.paper_cli.resolve(strict=True))
+        execute_cycle_command(args, invoke, run_cycles, poll_cycles)
     except ValidationError:
         parser.exit(2, "entry cycles rejected: invalid plan, journal or snapshot\n")
     except (OSError, ValueError, subprocess.SubprocessError) as exc:

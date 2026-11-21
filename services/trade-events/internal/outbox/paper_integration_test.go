@@ -1,6 +1,7 @@
 package outbox
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
@@ -116,7 +117,8 @@ func TestPaperLedgerHandoffAndKafkaAcknowledgement(t *testing.T) {
 	}
 	defer reopened.Close()
 	var taskID int64
-	if err := db.QueryRow(ctx, `SELECT id FROM pgqueue_tasks WHERE queue=$1`, paperQueueName).Scan(&taskID); err != nil {
+	var queuedPayload []byte
+	if err := db.QueryRow(ctx, `SELECT id,payload FROM pgqueue_tasks WHERE queue=$1`, paperQueueName).Scan(&taskID, &queuedPayload); err != nil {
 		t.Fatal(err)
 	}
 	const topic = fill_event.PaperTopic
@@ -145,6 +147,9 @@ func TestPaperLedgerHandoffAndKafkaAcknowledgement(t *testing.T) {
 	records := fetches.Records()
 	if len(records) != 1 || string(records[0].Key) != event.ID {
 		t.Fatalf("Kafka did not receive the one paper fill")
+	}
+	if !bytes.Equal(records[0].Value, queuedPayload) {
+		t.Fatal("published paper fill differs from the queued bytes")
 	}
 	decoded, err := fill_event.DecodePaper(records[0].Value)
 	if err != nil || decoded != event {

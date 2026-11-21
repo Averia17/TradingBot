@@ -6,6 +6,8 @@ import json
 import re
 from collections.abc import Iterable
 from datetime import UTC, datetime
+from itertools import pairwise
+from operator import attrgetter
 from pathlib import Path
 from typing import Annotated, Literal, Never, Self
 
@@ -133,10 +135,11 @@ class _Archive(Contract):
 
     @model_validator(mode="after")
     def coherent_revisions(self) -> Self:
-        previous: dict[tuple[str, str, str, str], ArchiveRecord] = {}
+        first_revisions: dict[tuple[str, str, str, str], ArchiveRecord] = {}
+        histories: dict[tuple[str, str, str, str], list[ArchiveRecord]] = {}
         ledger_ids = set()
         paper_account = None
-        for item in sorted(self.records, key=lambda record: (record.key(), record.revision)):
+        for item in self.records:
             if item.kind == PAPER_KIND:
                 if self.schema_version != "0.2":
                     raise ValueError("paper outcomes require archive version 0.2")
@@ -148,13 +151,21 @@ class _Archive(Contract):
                     raise ValueError("duplicate paper outcome")
                 ledger_ids.add(item.record_id)
             key = item.key()
-            older = previous.get(key)
-            if older is not None:
-                if item.revision == older.revision:
+            first = first_revisions.get(key)
+            if first is None:
+                first_revisions[key] = item
+            elif (history := histories.get(key)) is not None:
+                history.append(item)
+            else:
+                histories[key] = [first, item]
+
+        for history in histories.values():
+            history.sort(key=attrgetter("revision"))
+            for older, newer in pairwise(history):
+                if newer.revision == older.revision:
                     raise ValueError("duplicate record revision")
-                if item.available_at < older.available_at:
+                if newer.available_at < older.available_at:
                     raise ValueError("revision timestamps must follow revision order")
-            previous[key] = item
         return self
 
 
@@ -245,14 +256,14 @@ def load_snapshot(
     if visibility not in ("source_published", "locally_ingested"):
         raise ValueError("unknown archive visibility")
     reference = ArchiveReference.model_validate(manifest)
-    universe = None if symbols is None else tuple(sorted(set(_symbols.validate_python(symbols))))
+    requested_symbols = None if symbols is None else set(_symbols.validate_python(symbols))
     archive = _Archive.model_validate(read_pinned_json(root, reference))
     selected: dict[tuple[str, str, str, str], ArchiveRecord] = {}
     for item in archive.records:
         locally_known = visibility == "locally_ingested" or item.kind == PAPER_KIND
         known_at = item.ingested_at if locally_known else item.available_at
         if known_at <= cutoff and (
-            universe is None or item.symbol is None or item.symbol in universe
+            requested_symbols is None or item.symbol is None or item.symbol in requested_symbols
         ):
             key = item.key()
             prior = selected.get(key)
@@ -262,7 +273,7 @@ def load_snapshot(
         source_mode=archive.source_mode,
         archive=reference,
         as_of=cutoff,
-        symbols=universe,
+        symbols=None if requested_symbols is None else tuple(sorted(requested_symbols)),
         records=tuple(item for _, item in sorted(selected.items())),
     )
 

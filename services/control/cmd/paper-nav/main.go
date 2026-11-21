@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"tradingbot/control/internal/ledger"
-	"tradingbot/control/internal/papernav"
+	"tradingbot/control/internal/paper_nav"
 )
 
 var errIncomplete = errors.New("paper NAV has dates without complete marks")
@@ -50,36 +50,36 @@ func run(ctx context.Context, dsn string, args []string, output io.Writer) error
 	if (*verifyPath == "") != (*reportDigest == "") {
 		return errors.New("provide --verify-report and --report-sha256 together")
 	}
-	raw, err := readBounded(*path, "input", papernav.MaxInputBytes)
+	raw, err := readBounded(*path, "input", paper_nav.MaxInputBytes)
 	if err != nil {
 		return err
 	}
-	input, err := papernav.Parse(raw, *digest)
+	input, err := paper_nav.Parse(raw, *digest)
 	if err != nil {
 		return err
 	}
 	var archived []byte
 	if *verifyPath != "" {
-		raw, err := readBounded(*verifyPath, "report", papernav.MaxReportBytes)
+		raw, err := readBounded(*verifyPath, "report", paper_nav.MaxReportBytes)
 		if err != nil {
 			return err
 		}
-		archived, err = papernav.CanonicalReport(raw, *reportDigest)
+		archived, err = paper_nav.CanonicalReport(raw, *reportDigest)
 		if err != nil {
 			return err
 		}
 	}
-	var report papernav.Report
+	var report paper_nav.Report
 	err = ledger.WithReadSnapshot(ctx, dsn, func(snapshot ledger.ReadSnapshot) error {
 		var err error
-		report, err = papernav.Build(ctx, snapshot, input, snapshot.Cutoff())
+		report, err = paper_nav.Build(ctx, snapshot, input, snapshot.Cutoff())
 		return err
 	})
 	if err != nil {
 		return err
 	}
 	if archived != nil {
-		if err := papernav.CompareReport(archived, report); err != nil {
+		if err := paper_nav.CompareReport(archived, report); err != nil {
 			return err
 		}
 	}

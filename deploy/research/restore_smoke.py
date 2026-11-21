@@ -451,14 +451,22 @@ def drill(binary, budget, archive):
 @contextmanager
 def scheduler_project(project, archive_root, service, **settings):
     port = str(free_port())
-    env = os.environ | {
-        "TRADINGBOT_CONTROL_PORT": port,
-        "TRADINGBOT_PAPER_ARCHIVE_DIR": str(archive_root),
-    } | settings
+    env = (
+        os.environ
+        | {
+            "TRADINGBOT_CONTROL_PORT": port,
+            "TRADINGBOT_PAPER_ARCHIVE_DIR": str(archive_root),
+        }
+        | settings
+    )
+    # The review drill uses a one-shot paper entry to create its opening.
+    profiles = (service,) if service == "paper-entry" else (service, "paper-entry")
+    profile_args = [arg for profile in profiles for arg in ("--profile", profile)]
     images_only = archive_root.parent / "images-only.compose.yaml"
     # Running the Python scheduler may otherwise build its additional control context.
     images_only.write_text(
-        f"services:\n  control:\n    build: !reset null\n  {service}:\n    build: !reset null\n",
+        "services:\n"
+        + "".join(f"  {name}:\n    build: !reset null\n" for name in ("control", *profiles)),
         encoding="utf-8",
     )
 
@@ -471,8 +479,7 @@ def scheduler_project(project, archive_root, service, **settings):
             "deploy/research/compose.yaml",
             "-f",
             str(images_only),
-            "--profile",
-            service,
+            *profile_args,
             *args,
             env=env,
             timeout=90,
@@ -589,16 +596,40 @@ def journal_transfer(project, archive, service, *, restore=False):
 
 def dump_scheduler_database(compose, dump):
     compose("stop", "control")
-    compose("exec", "-T", "postgres", "pg_dump", "-U", COMPOSE_ROLE, "-d", DATABASE,
-            "-Fc", "--file", DUMP_PATH)
+    compose(
+        "exec",
+        "-T",
+        "postgres",
+        "pg_dump",
+        "-U",
+        COMPOSE_ROLE,
+        "-d",
+        DATABASE,
+        "-Fc",
+        "--file",
+        DUMP_PATH,
+    )
     compose("cp", f"postgres:{DUMP_PATH}", str(dump))
 
 
 def restore_scheduler_database(compose, dump, service):
     compose(*COMPOSE_START, "postgres")
     compose("cp", str(dump), f"postgres:{DUMP_PATH}")
-    compose("exec", "-T", "postgres", "pg_restore", "-U", COMPOSE_ROLE, "-d", DATABASE,
-            "--single-transaction", "--exit-on-error", "--no-owner", "--no-privileges", DUMP_PATH)
+    compose(
+        "exec",
+        "-T",
+        "postgres",
+        "pg_restore",
+        "-U",
+        COMPOSE_ROLE,
+        "-d",
+        DATABASE,
+        "--single-transaction",
+        "--exit-on-error",
+        "--no-owner",
+        "--no-privileges",
+        DUMP_PATH,
+    )
     compose(*COMPOSE_START, "control")
     # Initialize the empty journal volume under the configured scheduler user.
     compose(*COMPOSE_RUN, "--entrypoint", "/bin/true", service)
@@ -642,7 +673,7 @@ def invoke(*args):
         config = json.loads(Path(args[args.index("--config") + 1]).read_bytes())
         if config["scheduled_at"] == block_at:
             raise subprocess.TimeoutExpired(args[0], 0)
-    return json.loads(subprocess.check_output(["/usr/local/bin/paper-apply", *args], timeout=45))
+    return json.loads(subprocess.check_output(["/usr/local/bin/paper", *args], timeout=45))
 
 result = run_cycles(
     Path("/archive"), {"ref": ref, "sha256": digest}, Path("/journal"), invoke, settled={},
@@ -746,8 +777,8 @@ def entry_journal_drill(directory):
                     *COMPOSE_RUN,
                     "paper-entry",
                     *arguments,
-                    "--paper-apply",
-                    "/usr/local/bin/paper-apply",
+                    "--paper-cli",
+                    "/usr/local/bin/paper",
                     capture=True,
                 )
             )
@@ -786,7 +817,8 @@ def entry_journal_drill(directory):
                     "max_llm_calls",
                 )
             )
-            and restored_request["portfolio"]["snapshot_id"] == selected["portfolio"]["snapshot_id"],
+            and restored_request["portfolio"]["snapshot_id"]
+            == selected["portfolio"]["snapshot_id"],
             "recovery duplicated a durable effect or changed the staged binding",
         )
         checked(
@@ -810,18 +842,334 @@ def entry_journal_drill(directory):
     }
 
 
+# Drop the successful Go response before the Python runner stores it. The
+# same probe checks the first request sent by the restored runner.
+REVIEW_ACK_PROBE = """
+import hashlib
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+from tradingbot import review_cycles
+
+expected = sys.argv.pop(1)
+run = subprocess.run
+
+def observe(command, **options):
+    global expected
+    try:
+        reply = run(command, **options)
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(exc.stderr.decode().strip()) from None
+    if command[1] == "schedule-review" and expected:
+        path = Path(command[command.index("--config") + 1])
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        if expected == "drop":
+            print(json.dumps({"request_sha256": digest, "receipt": json.loads(reply.stdout)}), flush=True)
+            os._exit(70)
+        if digest != expected:
+            raise RuntimeError("first restored submission changed its frozen request bytes")
+        expected = ""
+    return reply
+
+review_cycles.subprocess.run = observe
+status = review_cycles.main()
+if expected:
+    raise RuntimeError("runner did not submit the expected review request")
+raise SystemExit(status)
+"""
+
+
+def review_journal_rows(archive):
+    snapshot = archive.with_suffix(".sqlite3")
+    with tarfile.open(archive) as contents:
+        files = [member for member in contents if member.name != "."]
+        checked(
+            len(files) == 1
+            and files[0].isfile()
+            and files[0].name.removeprefix("./") == "reviews.sqlite3",
+            "expected one quiesced review SQLite database in the journal backup",
+        )
+        with contents.extractfile(files[0]) as database:
+            snapshot.write_bytes(database.read())
+    with closing(sqlite3.connect(snapshot.as_uri() + "?mode=ro", uri=True)) as database:
+        checked(
+            database.execute("PRAGMA integrity_check").fetchone() == ("ok",),
+            "review journal failed SQLite integrity check",
+        )
+        identity = database.execute("SELECT identity FROM owner_plan WHERE singleton=1").fetchone()
+        rows = database.execute(
+            "SELECT position, request, request_sha256, receipt, receipt_sha256 "
+            "FROM reviews ORDER BY position"
+        ).fetchall()
+    checked(identity is not None, "review journal lost its owner plan pin")
+    for _, request_bytes, request_hash, receipt_bytes, receipt_hash in rows:
+        for blob, digest in ((request_bytes, request_hash), (receipt_bytes, receipt_hash)):
+            checked(
+                (blob is None and digest is None)
+                or (blob is not None and hashlib.sha256(blob).hexdigest() == digest),
+                "review journal checksum differs",
+            )
+    return identity[0], rows
+
+
+def review_journal_drill(directory):
+    from review_restore_fixture import review_registry_sha256, seed_review_restore
+
+    prefix = "tradingbot-review-restore-" + uuid4().hex[:10]
+    source, target = prefix + "-source", prefix + "-target"
+    root = directory / "archive"
+    root.mkdir(mode=0o755)
+    (root / "review-ack-probe.py").write_text(REVIEW_ACK_PROBE, encoding="utf-8")
+    dump = directory / "tradingbot.dump"
+    journal = directory / "review-journal.tar"
+    account_id = str(uuid4())
+    account_path = f"/v1/paper/accounts/{account_id}"
+    service, volume = "paper-review-cycles", "paper-review-journal"
+    registry = review_registry_sha256()
+    settings = {"TRADINGBOT_RESEARCH_IDENTITY_REGISTRY_SHA256": registry}
+
+    def probe(compose, expected):
+        return compose(
+            *COMPOSE_RUN,
+            "--entrypoint",
+            "python",
+            service,
+            "/archive/review-ack-probe.py",
+            expected,
+            *arguments,
+            capture=True,
+        )
+
+    with scheduler_project(source, root, service, **settings) as (compose, origin):
+        compose(*COMPOSE_START, "postgres", "control")
+        plan, seed_registry = seed_review_restore(
+            compose,
+            origin,
+            root,
+            account_id,
+            sql=lambda query: compose_sql(compose, query),
+            clock=lambda: compose_clock(compose),
+        )
+        checked(seed_registry == registry, "seeded review registry differs from the owner pin")
+        plan_doc = json.loads((root / plan["ref"]).read_bytes())
+        first, second = plan_doc["occurrences"]
+        checked(
+            first["opening_order_id"] == second["opening_order_id"]
+            and first["event"] == second["event"],
+            "review windows do not share the same catalyst",
+        )
+        first_release = datetime.fromisoformat(first["release_at"])
+        second_release = datetime.fromisoformat(second["release_at"])
+        first_deadline = first_release + timedelta(seconds=first["max_lateness_seconds"])
+        arguments = (
+            "--root",
+            "/archive",
+            "--plan-ref",
+            plan["ref"],
+            "--plan-sha256",
+            plan["sha256"],
+            "--journal",
+            "/journal",
+            "--paper-cli",
+            "/usr/local/bin/paper",
+            "--identity-registry-sha256",
+            registry,
+        )
+        account = request(origin, account_path, 200)
+        baseline = scheduler_state(compose)
+        checked(
+            baseline["orders"]
+            == baseline["fills"]
+            == baseline["jobs"]
+            == baseline["results"]
+            == baseline["queued_events"]
+            == len(baseline["dispatch"])
+            == 1
+            and baseline["dispatch"][0]["status"] == "completed"
+            and baseline["dispatch"][0]["dispatch_status"] == "applied",
+            "review seed must have exactly one completed and filled opening",
+        )
+        wait_until(compose, first_release)
+        try:
+            output = probe(compose, "drop")
+        except subprocess.CalledProcessError as interrupted:
+            if interrupted.returncode != 70:
+                raise
+            lost = json.loads(interrupted.stdout)
+        else:
+            raise RuntimeError(f"scheduler exited without losing an acknowledgement: {output}")
+        receipt, staged_hash = lost["receipt"], lost["request_sha256"]
+        job_id = receipt["job_id"]
+        checked(
+            receipt["created"]
+            and receipt["status"] == "queued"
+            and receipt["trigger"]["reason"] == "catalyst"
+            and receipt["trigger"]["event_record_id"] == first["event"]["record_id"],
+            "lost acknowledgement did not refer to the exact accepted catalyst",
+        )
+        before = scheduler_state(compose)
+        matching = [row for row in before["dispatch"] if row["job_id"] == job_id]
+        checked(len(matching) == 1, "acknowledged review did not commit its dispatch")
+        (admitted,) = matching
+        expected_state = baseline | {
+            "jobs": baseline["jobs"] + 1,
+            "queued_events": baseline["queued_events"] + 1,
+            "dispatch": [*baseline["dispatch"], admitted],
+        }
+        dispatch = json.loads(admitted["dispatch_request"])
+        checked(
+            before == expected_state
+            and admitted["status"] == "queued"
+            and admitted["account_id"] == account_id
+            and dispatch["review_origin"]["opening_order_id"] == first["opening_order_id"]
+            and dispatch["identity_binding"]["identity_registry"]["sha256"] == registry,
+            "lost acknowledgement did not leave exactly one bound review",
+        )
+        for payload, digest in (
+            ("request", "job_sha256"),
+            ("snapshot", "snapshot_sha256"),
+            ("dispatch_request", "dispatch_sha256"),
+        ):
+            checked(
+                hashlib.sha256(admitted[payload].encode()).hexdigest() == admitted[digest],
+                "accepted review payload does not match its PostgreSQL checksum",
+            )
+        dump_scheduler_database(compose, dump)
+        journal_transfer(source, journal, volume)
+        identity, staged = review_journal_rows(journal)
+        checked(
+            json.loads(identity)["plan"] == plan
+            and len(staged) == 1
+            and staged[0][0] == 0
+            and staged[0][2:] == (staged_hash, None, None),
+            "backup lost the staged bytes or recorded an acknowledgement too soon",
+        )
+
+    with scheduler_project(target, root, service, **settings) as (compose, origin):
+        restore_scheduler_database(compose, dump, service)
+        journal_transfer(target, journal, volume, restore=True)
+        checked(
+            scheduler_state(compose) == before, "restored review job, snapshot or dispatch differs"
+        )
+        checked(request(origin, account_path, 200) == account, "restored review holding differs")
+        wait_until(compose, max(first_deadline, second_release))
+        report = json.loads(probe(compose, staged_hash))
+        original, newer = report["occurrences"]
+        checked(report["owner_plan_sha256"] == plan["sha256"], "restored review changed owner plan")
+        for row, status in ((original, "queued"), (newer, "already_scheduled")):
+            checked(
+                row["status"] == status
+                and row["created"] is False
+                and row["job_id"] == job_id
+                and datetime.fromisoformat(row["created_at"])
+                == datetime.fromisoformat(admitted["created_at"]),
+                "restored window did not acknowledge the original durable review",
+            )
+        replay = json.loads(compose(*COMPOSE_RUN, service, *arguments, capture=True))
+        checked(
+            replay == report
+            and scheduler_state(compose) == before
+            and request(origin, account_path, 200) == account,
+            "review retries changed PostgreSQL or returned a duplicate effect",
+        )
+        restored_tar = directory / "restored-review-journal.tar"
+        journal_transfer(target, restored_tar, volume)
+        restored_identity, rows = review_journal_rows(restored_tar)
+        checked(
+            restored_identity == identity
+            and len(rows) == 2
+            and rows[0][:3] == staged[0][:3]
+            and rows[1][0] == 1
+            and rows[1][1] is not None
+            and rows[1][2] != staged_hash
+            and [json.loads(row[3])["job_id"] for row in rows] == [job_id, job_id],
+            "restored journal lost frozen bytes or acknowledged the wrong job",
+        )
+        health = json.loads(
+            compose(
+                "exec",
+                "-T",
+                "control",
+                "/usr/local/bin/paper-check",
+                "--account",
+                account_id,
+                "--job",
+                job_id,
+                "--pipeline",
+                capture=True,
+            )
+        )
+        pipeline, budget = health["pipeline"], health["research"]
+        review = next(stage for stage in pipeline["jobs"] if stage["job_id"] == job_id)
+        checked(
+            health["status"] == "ok"
+            and pipeline["selected_job_registered"] is True
+            and review["stage"] == "queued"
+            and budget["guaranteed_remaining_llm_calls"] == first["max_llm_calls"]
+            and budget["durable_permits"] == 0,
+            "paper-check did not verify the restored review queue and budget",
+        )
+        claim = claim_request() | {"identity_registry_sha256": registry}
+        lease = request(origin, f"{JOBS}/claim", 200, claim)
+        checked(
+            lease["job_id"] == job_id
+            and lease["attempt"] == 1
+            and lease["request"] == json.loads(admitted["request"])
+            and request(origin, f"{JOBS}/claim", 200, claim) == lease,
+            "worker could not acquire and replay the first lease of the restored review",
+        )
+        expected_leased = before | {
+            "attempts": before["attempts"] + 1,
+            "dispatch": [
+                row | {"status": "leased"} if row["job_id"] == job_id else row
+                for row in before["dispatch"]
+            ],
+        }
+        checked(
+            scheduler_state(compose) == expected_leased,
+            "restored worker lease changed state beyond one attempt",
+        )
+
+    return {
+        "source_mode": "synthetic_fixture",
+        "owner_plan_sha256": plan["sha256"],
+        "backup_sha256": hashlib.sha256(dump.read_bytes()).hexdigest(),
+        "review_journal_sha256": hashlib.sha256(journal.read_bytes()).hexdigest(),
+        "staged_request_sha256": staged_hash,
+        "review_job_id": job_id,
+        "dispatch_sha256": admitted["dispatch_sha256"],
+        "window_statuses": [original["status"], newer["status"]],
+        "durable_review_jobs": before["jobs"] - baseline["jobs"],
+        "restored_pipeline_stage": review["stage"],
+        "guaranteed_remaining_llm_calls": budget["guaranteed_remaining_llm_calls"],
+        "restored_review_attempt": lease["attempt"],
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
         "--entry-journal",
         action="store_true",
         help="verify PostgreSQL and the entry journal using cached local Compose images",
+    )
+    mode.add_argument(
+        "--review-journal",
+        action="store_true",
+        help="verify PostgreSQL and the review journal using cached local Compose images",
     )
     args = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix="tradingbot-restore-") as workspace:
         directory = Path(workspace)
         if args.entry_journal:
             print(json.dumps(entry_journal_drill(directory), indent=2))
+            return
+        if args.review_journal:
+            print(json.dumps(review_journal_drill(directory), indent=2))
             return
         extension = ".exe" if os.name == "nt" else ""
         binary = directory / ("control" + extension)

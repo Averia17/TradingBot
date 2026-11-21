@@ -1,0 +1,109 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Equity forecast for one normalized route study",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "source_mode",
+    "study_sha256",
+    "theses"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "0.1"
+    },
+    "source_mode": {
+      "enum": [
+        "synthetic_fixture",
+        "observed_market"
+      ]
+    },
+    "study_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "theses": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 8,
+      "items": {
+        "$ref": "#/$defs/Thesis"
+      }
+    }
+  },
+  "$defs": {
+    "Id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$"
+    },
+    "Symbol": {
+      "type": "string",
+      "pattern": "^[A-Z][A-Z0-9.\\-]{0,15}$"
+    },
+    "BPS": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 10000
+    },
+    "Thesis": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "security_id",
+        "symbol",
+        "expected_price_return_bps",
+        "uncertainty_bps",
+        "review_in_hours",
+        "thesis",
+        "invalidation_conditions",
+        "evidence_sha256"
+      ],
+      "properties": {
+        "security_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "symbol": {
+          "$ref": "#/$defs/Symbol"
+        },
+        "expected_price_return_bps": {
+          "type": "integer",
+          "minimum": -10000,
+          "maximum": 30000
+        },
+        "uncertainty_bps": {
+          "$ref": "#/$defs/BPS"
+        },
+        "review_in_hours": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 720
+        },
+        "thesis": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 3000
+        },
+        "invalidation_conditions": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 5,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          }
+        },
+        "evidence_sha256": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 12,
+          "items": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        }
+      }
+    }
+  }
+}

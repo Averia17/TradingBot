@@ -8,6 +8,7 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -132,10 +133,10 @@ func newHandler(maxResearchAge time.Duration, now func() time.Time, store jobSto
 		mux.HandleFunc("POST /v1/research/jobs", bounded("job_api_busy", h.create))
 		mux.HandleFunc("GET /v1/research/jobs/{id}", h.get)
 		mux.HandleFunc("POST /v1/research/jobs/claim", bounded("job_api_busy", h.claim))
-		mux.HandleFunc("POST /v1/research/jobs/{id}/heartbeat", bounded("job_api_busy", h.heartbeat))
-		mux.HandleFunc("POST /v1/research/jobs/{id}/authorize-call", bounded("job_api_busy", h.authorizeCall))
-		mux.HandleFunc("POST /v1/research/jobs/{id}/complete", bounded("job_api_busy", h.complete))
-		mux.HandleFunc("GET /v1/research/jobs/{id}/result", h.getResult)
+		mux.HandleFunc("POST /v1/research/jobs/{id}/heartbeat", bounded("job_api_busy", withJobID(h.heartbeat)))
+		mux.HandleFunc("POST /v1/research/jobs/{id}/authorize-call", bounded("job_api_busy", withJobID(h.authorizeCall)))
+		mux.HandleFunc("POST /v1/research/jobs/{id}/complete", bounded("job_api_busy", withJobID(h.complete)))
+		mux.HandleFunc("GET /v1/research/jobs/{id}/result", withJobID(h.getResult))
 	}
 	if hasCalendar {
 		h := researchCalendarHTTP{store: calendar}
@@ -144,12 +145,30 @@ func newHandler(maxResearchAge time.Duration, now func() time.Time, store jobSto
 	}
 	if hasCallUsage {
 		h := callUsageHTTP{store: usage}
-		mux.HandleFunc("POST /v1/research/jobs/{id}/record-call", bounded("job_api_busy", h.record))
+		mux.HandleFunc("POST /v1/research/jobs/{id}/record-call", bounded("job_api_busy", withJobID(h.record)))
 	}
 	mux.HandleFunc("POST /v1/research/validate", bounded("validator_busy", func(w http.ResponseWriter, r *http.Request) {
 		validateResearch(w, r, now, maxResearchAge)
 	}))
 	return mux
+}
+
+func withJobID(handle func(http.ResponseWriter, *http.Request, string)) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id := strings.ToLower(r.PathValue("id"))
+		if !jobUUID.MatchString(id) {
+			writeError(w, http.StatusBadRequest, "invalid_job_id")
+			return
+		}
+		handle(w, r, id)
+	}
+}
+
+func createStatus(created bool) int {
+	if created {
+		return http.StatusCreated
+	}
+	return http.StatusOK
 }
 
 // validateResearch checks the submitted documents as a pair. No submitted

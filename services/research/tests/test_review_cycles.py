@@ -1,3 +1,4 @@
+import hashlib
 import json
 import sqlite3
 import subprocess
@@ -319,7 +320,17 @@ def test_owner_plan_and_journal_checks_fail_closed(paperwork):
         materialize(root, plan | {"occurrences": plan["occurrences"] * 2}, forbidden)
     with closing(sqlite3.connect(root / "journal/reviews.sqlite3")) as writer:
         with writer:
-            writer.execute("UPDATE reviews SET request=? WHERE position=0", (b"{}",))
+            writer.execute(
+                "UPDATE reviews SET receipt=?, receipt_sha256=? WHERE position=0",
+                (b"null", hashlib.sha256(b"null").hexdigest()),
+            )
+        with pytest.raises(ValueError, match="receipt must be a JSON object"):
+            materialize(root, plan, forbidden)
+        with writer:
+            writer.execute(
+                "UPDATE reviews SET request=?, receipt=NULL, receipt_sha256=NULL WHERE position=0",
+                (b"{}",),
+            )
     with pytest.raises(ValueError, match="checksum"):
         materialize(root, plan, forbidden)
 

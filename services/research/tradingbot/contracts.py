@@ -113,7 +113,11 @@ class Horizon(Contract):
 class IntentProposal(Contract):
     symbol: Symbol
     action: Literal["BUY", "SELL", "HOLD", "ADD", "REDUCE"]
-    notional_usd: Money
+    # Structured output uses the validation schema. Reuse the wire grammar
+    # instead of Pydantic's Decimal regex with lookaheads.
+    notional_usd: Annotated[
+        Money, WithJsonSchema({"type": "string", "pattern": DECIMAL_PATTERN}, mode="validation")
+    ]
     confidence: Annotated[float, Field(ge=0, le=1, strict=True)] | None
     expected_return_pct: Annotated[float, Field(strict=True)] | None
     horizon: Horizon

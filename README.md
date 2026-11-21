@@ -1,18 +1,18 @@
 # Self-custody AI trader
 
-TradingAgents анализирует рынок и предлагает решения, один portfolio manager определяет BUY/SELL/HOLD/ADD/REDUCE и размер. Наш тонкий адаптер выпускает строгий JSON и проверяет cash/exposure/evidence. Nautilus — готовый движок будущего portfolio backtest/paper. Go исполнение и isolated signer появятся после проверки сигналов, исполнения и доступа к venue.
+**Проект работает в режимах research и paper.** TradingAgents анализирует рынок, а portfolio manager выбирает BUY/SELL/HOLD/ADD/REDUCE и размер позиции. Go проверяет решения, выдаёт задания по lease и ведёт виртуальные счета в PostgreSQL. Nautilus воспроизводит исторические сценарии. Отчёты и уведомления о виртуальных исполнениях доступны в Telegram.
 
-**Сейчас реализована первая исследовательская веха, не live-бот.** Есть настоящий entry point для TradingAgents, офлайн fixture demo, JSON contract, portfolio checks, call budget и проверка native Nautilus engine. Реальные LLM решения требуют настроенного API; fake demo не выдаётся за анализ/alpha. Кошелёк не подключён.
-
-В архитектуре **Go services + Python adapters** Go отвечает за control/state/risk/execution, Python — за TradingAgents и Nautilus. Локальный Go control проверяет research JSON и с настроенной PostgreSQL принимает, читает и выдаёт research jobs worker по lease. [Архитектура](docs/architecture.md), [переход](docs/planning/service-migration.md), [полный план](docs/planning/plan.md).
+Вызовы реальной модели требуют настроенного API. Live execution и подписание остаются в плане. [Архитектура](docs/architecture.md), [этапы перехода](docs/planning/service-migration.md), [план](docs/planning/plan.md).
 
 | Каталог сервиса | Назначение |
 |---|---|
 | [`services/research`](services/research/) | Python CLI, адаптеры TradingAgents и Nautilus, тесты и upstream locks |
+| [`services/evaluation`](services/evaluation/) | Исторические прогоны Nautilus, эталоны и оценка расходов |
 | [`services/control`](services/control/) | Go API, research jobs, PostgreSQL и тесты |
 | [`services/trade-events`](services/trade-events/) | Тестовый приём исполнений, pgqueue outbox и публикация в Kafka |
 | [`services/notifications`](services/notifications/) | Kafka consumer и личные уведомления в Telegram |
 | [`services/portfolio-analytics`](services/portfolio-analytics/) | Go-проекция paper-счёта и отчёты NAV, P&L и доходности. [Запуск](docs/runbooks/paper.md#аналитика-портфеля-в-telegram) |
+| [`services/venue-quotes`](services/venue-quotes/) | Go-сервис индикативных котировок. Стаканы Binance Spot и Dzengi, котировки Jupiter Swap v2. [Запуск](#котировки-площадки) |
 
 Код, зависимости и тесты принадлежат своим сервисам. В [`contracts/`](contracts/)
 лежат JSON-схемы и примеры payload. Конфигурация Compose — в [`deploy/`](deploy/).
@@ -23,6 +23,7 @@ TradingAgents анализирует рынок и предлагает реше
 |---|---|---|
 | AI core | TradingAgents v0.7.1 | Clean checkout `vendor/trading-agents`; наш адаптер снаружи |
 | Evaluation engine | NautilusTrader v1.231.0 | `vendor/nautilus-trader` reference; pinned binary wheel runtime |
+| Источник стакана | Dzengi, режим «Торги» | Публичный стакан токенизированных акций. [Сравнение площадок](docs/planning/plan.md#16-xstocks-vs-ondo-vs-broker) |
 | Future swap routing | Official Jupiter Swap v2 | API adapter; без собственного DEX router |
 | Future Solana primitives | Solana Foundation solana-go v2 | SDK, не собственная криптография |
 | Memory | Native TradingAgents baseline | FinMem concepts только после ablation; не второй runtime |
@@ -47,9 +48,72 @@ uv --directory services/research run --frozen --extra evaluation tradingbot prob
 .\services\research\scripts\update-upstream.ps1
 ```
 
-GitHub Actions ежедневно проверяет latest stable TradingAgents. `Quality` проверяет Python на Linux и Windows и три Go-модуля на Linux. [Описание CI](.github/README.md).
+GitHub Actions ежедневно проверяет последнюю стабильную версию TradingAgents. `Quality` проверяет Python на Linux и Windows и пять Go-модулей на Linux. [Описание CI](docs/upstream-updates.md#автоматическая-проверка-свежести).
 
 `demo`: TSLA/NVDA, $1 000 USDC, синтетический HOLD с unknown forecast/confidence, 0 API calls. Artifacts в уникальном `runtime/demo-*`. `probe-engine`: реальные Nautilus cash/position/fill operations на искусственных quotes и заранее заданных orders; не подсоединён к AI intents и не backtest доходности.
+
+## Котировки площадки
+
+`venue-quotes` слушает `127.0.0.1:18083`. `GET /v1/order-book/binance`
+читает публичный стакан Binance Spot, включая пары bStocks, например
+`NVDABUSDT`. `GET /v1/order-book` читает стакан Dzengi, например `NVDA`.
+Оба маршрута работают без аккаунта и API-ключа. Запрос принимает биржевой
+`symbol` и `depth` из `5`, `10`, `20`, `50`, `100`, `500`. Глубина по умолчанию
+составляет пять уровней с каждой стороны. Адрес задаётся в `TRADINGBOT_QUOTE_LISTEN`.
+При пустом `TRADINGBOT_QUOTE_PROVIDER` доступны все маршруты. Значения
+`binance`, `dzengi` и `jupiter` включают только соответствующего провайдера.
+
+```powershell
+go -C services/venue-quotes run ./cmd/venue-quotes
+```
+
+Из другого терминала можно запросить стаканы NVDA на обеих площадках.
+
+```powershell
+Invoke-RestMethod -Uri 'http://127.0.0.1:18083/v1/order-book/binance?symbol=NVDABUSDT&depth=50' | ConvertTo-Json -Depth 5
+Invoke-RestMethod -Uri 'http://127.0.0.1:18083/v1/order-book?symbol=NVDA&depth=5' | ConvertTo-Json -Depth 5
+```
+
+Ответ содержит `bids`, `asks`, цены и объёмы в decimal strings и локальное
+время получения. Dzengi отдаёт `provider_timestamp` в миллисекундах, Binance
+отдаёт `provider_sequence` из `lastUpdateId`. Стаканы имеют тип `indicative`.
+Пустой стакан или неизвестная пара Binance возвращают
+`404 order_book_unavailable`, ограничение запросов — `429`,
+сбой провайдера — `502`, тайм-аут — `504`. Разрешения на торговлю, комиссии
+конкретного аккаунта и исполнение проверяются отдельно.
+[Контракт](contracts/venue-order-book.schema.json),
+[пример Binance](contracts/valid-venue-order-book-binance.json),
+[пример Dzengi](contracts/valid-venue-order-book.json),
+[публичный API Binance](https://developers.binance.com/docs/binance-spot-api-docs/rest-api/market-data-endpoints),
+[спецификация Dzengi](https://apimarketdoc.dzengi.com/v3/api-docs/default).
+
+Для проверки заявок в режиме «Торги» нужен верифицированный аккаунт с торговым
+API-доступом. Демо-аккаунт Dzengi поддерживает только режим с левереджем.
+[Условия демо](https://help.dzengi.com/hc/ru/articles/7631879009169),
+[подключение торгового API](https://dzengi.com/ru/api-get-started).
+
+`POST /v1/quotes` остаётся доступен для исследования Solana через
+[Jupiter Swap v2](https://developers.jup.ag/docs/swap). Запрос задаёт пару mint
+и входную сумму в минимальных единицах токена.
+
+В другом терминале из корня репозитория отправьте пример для входа в NVDAx на
+100 USDC. Для обратной стороны поменяйте mint местами и задайте raw-сумму NVDAx.
+При запросах без ключа соблюдайте паузу не менее двух секунд. Для API-ключа
+провайдера используется переменная процесса `TRADINGBOT_JUPITER_API_KEY`.
+
+```powershell
+$request = Get-Content -Raw -LiteralPath contracts/valid-venue-quote-request.json
+Invoke-RestMethod -Method Post -Uri http://127.0.0.1:18083/v1/quotes -ContentType 'application/json' -Body $request
+```
+
+Ответ содержит расчётный выход и порог с учётом допуска на проскальзывание,
+сообщённую комиссию свопа, маршрут, ID Jupiter и локальное время получения.
+При отсутствии срока действия в ответе провайдера `provider_expires_at`
+равен `null`.
+Тип котировки — `indicative`. Сетевые затраты и стоимость исполнения
+измеряются отдельно. Для paper fills требуется источник с подтверждённой
+исполнимостью. [Контракт HTTP v1](contracts/venue-quote.schema.json) и
+[синтетический пример нормализованного ответа](contracts/valid-venue-quote-observation.json).
 
 ## Локальный Go control
 
@@ -317,6 +381,38 @@ docker compose -f deploy/research/compose.yaml --profile paper --profile paper-e
 docker compose -f deploy/research/compose.yaml --profile research-identity --profile paper-entry --profile paper-identity up -d --build postgres control identity-research paper-entry paper-identity-quote paper-identity-dispatch
 ```
 
+Ленту `0.3` можно собрать командой `paper-quote-collect`. Она запрашивает
+котировки с фиксированной входной суммой у локального тестового HTTP-сервера.
+Команда сверяет направление, mint, входную сумму и срок,
+пишет новую ленту для указанного счёта и возвращает её `tape_sha256`.
+Для своего счёта укажите его ID и SHA-256 точных байтов реестра в архиве.
+Закрепите `tape_sha256` в плане входов и `TRADINGBOT_PAPER_QUOTE_TAPE_SHA256`.
+[Схема обмена](contracts/paper-quote-collection.schema.json) ·
+[Пример запроса](contracts/valid-paper-quote-collection.json) ·
+[Пример ответа сервера](contracts/valid-paper-quote-fixture-response.json).
+
+В примере локальный сервер возвращает приведённый тестовый ответ на
+`POST /quote`. Для воспроизведения `--as-of` задаёт момент между доступностью
+и истечением тестовой котировки. Без этого флага сборщик проверяет её по
+текущему времени. `paper-quote-pin` сверяет доступность котировки после
+завершения исследования по времени PostgreSQL. Суммы и комиссии примера
+заданы для симуляции.
+
+```powershell
+$requestPath = (Resolve-Path contracts/valid-paper-quote-collection.json).Path
+$tapePath = Join-Path $PWD 'quote-tape.fixture.json'
+go -C services/control run ./cmd/paper-quote-collect --request $requestPath --source http://127.0.0.1:8765/quote --out $tapePath --as-of 2026-11-18T14:31:03Z
+```
+
+Для сквозной проверки BUY → SELL задайте `TRADINGBOT_TEST_DATABASE_URL`.
+Тест поднимает локальный HTTP-сервер, покупает и затем продаёт всю
+виртуальную позицию через `paper`. Он сверяет обе комиссии, закрытие
+исходного лота, итоговый баланс и повтор команд без дублей.
+
+```powershell
+go -C services/control test -mod=readonly -count=1 -v -run '^TestCollectedFixtureQuoteFlowsThroughStablePaperDispatch$' ./cmd/paper
+```
+
 Если в этом же Compose-проекте уже работает сервис `research` для
 синтетических smoke jobs, остановите его перед запуском `paper-research`.
 Оба читают одну очередь, а paper worker требует архив снимка.
@@ -371,8 +467,8 @@ ID решения и котировки, предельной комиссией
 абсолютные пути к файлам при запуске через `go -C`.
 
 ```powershell
-go -C services/control run ./cmd/paper-apply snapshot --account $accountId --policy $policyPath --marks $marksPath
-go -C services/control run ./cmd/paper-apply apply --policy $policyPath --request $requestPath --quote $quotePath
+go -C services/control run ./cmd/paper snapshot --account $accountId --policy $policyPath --marks $marksPath
+go -C services/control run ./cmd/paper apply --policy $policyPath --request $requestPath --quote $quotePath
 ```
 
 Первая команда выдаёт `portfolio` для research job и `snapshot_context` для
@@ -385,7 +481,7 @@ go -C services/control run ./cmd/paper-apply apply --policy $policyPath --reques
 возвращает прежний результат по ордеру.
 [Пример политики](contracts/valid-paper-policy.json) и [схема команды](contracts/paper-apply.schema.json).
 
-`paper-apply follow` отслеживает результат привязанного задания. Если в
+`paper follow` отслеживает результат привязанного задания. Если в
 записанном результате все решения HOLD, команда сохраняет квитанцию без
 заявки. Для исполнения она читает `<job_id>.json` из явно заданного
 `--quote-root`. Этот файл фиксирует путь и SHA-256 локальной котировки.
@@ -393,7 +489,7 @@ go -C services/control run ./cmd/paper-apply apply --policy $policyPath --reques
 продолжить тот же ордер даже при удалённом исходном файле.
 
 ```powershell
-go -C services/control run ./cmd/paper-apply follow --request $requestPath --policy $policyPath --quote-root $quoteRoot --poll-interval 5s
+go -C services/control run ./cmd/paper follow --request $requestPath --policy $policyPath --quote-root $quoteRoot --poll-interval 5s
 ```
 
 Файл для `follow` или `dispatch` может выпустить `paper-quote-pin` из
@@ -449,10 +545,10 @@ go -C services/control run ./cmd/paper-quote-study --plan $plan --plan-sha256 $p
 отдельных подтверждений. [Схема исследования](contracts/paper-quote-study.schema.json).
 
 Для заявки `UNKNOWN` или остатка после частичного исполнения
-`paper-apply reconcile` принимает отдельное локальное наблюдение симулятора,
+`paper reconcile` принимает отдельное локальное наблюдение симулятора,
 привязанное к исходной заявке и котировке. [Процедура сверки](docs/runbooks/paper.md#сверка-зависшей-виртуальной-заявки).
 
-`paper-apply review --account $accountId --order $openingOrderId` показывает
+`paper review --account $accountId --order $openingOrderId` показывает
 фактический остаток, резерв, ближайший пересмотр и срок тезиса. Время считается
 от первого исполнения, включая частичное. Чтобы проверить катализатор из
 готового расписания, добавьте `--schedule`, `--archive-root`,
@@ -465,7 +561,7 @@ go -C services/control run ./cmd/paper-quote-study --plan $plan --plan-sha256 $p
 снимок. Укажите абсолютные пути к конфигу и директории архива.
 
 ```powershell
-go -C services/control run ./cmd/paper-apply schedule-review --config $reviewConfig --archive-root $archiveRoot --poll-interval 30s
+go -C services/control run ./cmd/paper schedule-review --config $reviewConfig --archive-root $archiveRoot --poll-interval 30s
 ```
 
 С `--poll-interval` конфиг перечитывается перед каждым проходом. Передайте
@@ -476,15 +572,15 @@ go -C services/control run ./cmd/paper-apply schedule-review --config $reviewCon
 Для позиции, открытой по устойчивому ID, `review` возвращает `opening_identity`
 с исходным `security_id`, инструментом и хешем применения. Подготовьте расписание
 `0.2` на один момент среза. Команда `prepare-identity-review` читает `review` и
-`snapshot` через локальный `paper-apply`, проверяет архив и вычисляет хеш
+`snapshot` через локальный `paper`, проверяет архив и вычисляет хеш
 проекции. Для нового снимка обновите вход и сохраните принятый конфиг вместе с
 хешированными файлами для повтора.
 
 ```powershell
-$paperApply = Join-Path ([System.IO.Path]::GetTempPath()) ('tradingbot-paper-apply-' + [Guid]::NewGuid() + '.exe')
-go -C services/control build -mod=readonly -o $paperApply ./cmd/paper-apply
-uv --directory services/research run --offline --frozen tradingbot prepare-identity-review --paper-apply $paperApply --archive-root $archiveRoot --account $accountId --order $openingOrderId --as-of $cutoff --policy $policyPath --marks $marksPath --data-manifest-ref $manifestRef --data-manifest-sha256 $manifestHash --identity-registry-ref $registryRef --identity-registry-sha256 $registryHash --quote-tape-ref $quoteTapeRef --quote-tape-sha256 $quoteTapeHash --max-llm-calls 32 > $reviewConfig
-& $paperApply schedule-review --config $reviewConfig --archive-root $archiveRoot --identity-registry-sha256 $registryHash
+$paperCLI = Join-Path ([System.IO.Path]::GetTempPath()) ('tradingbot-paper-' + [Guid]::NewGuid() + '.exe')
+go -C services/control build -mod=readonly -o $paperCLI ./cmd/paper
+uv --directory services/research run --offline --frozen tradingbot prepare-identity-review --paper-cli $paperCLI --archive-root $archiveRoot --account $accountId --order $openingOrderId --as-of $cutoff --policy $policyPath --marks $marksPath --data-manifest-ref $manifestRef --data-manifest-sha256 $manifestHash --identity-registry-ref $registryRef --identity-registry-sha256 $registryHash --quote-tape-ref $quoteTapeRef --quote-tape-sha256 $quoteTapeHash --max-llm-calls 32 > $reviewConfig
+& $paperCLI schedule-review --config $reviewConfig --archive-root $archiveRoot --identity-registry-sha256 $registryHash
 ```
 
 Передавайте время `$cutoff`, для которого цены и состояние счёта были доступны.
@@ -518,14 +614,14 @@ docker compose -f deploy/research/compose.yaml --profile research-identity --pro
 Планировщик использует локально подготовленные цены и события. Чтобы
 продолжить виртуальное исполнение, запустите профиль `paper-identity`.
 
-Для первого входа `paper-apply schedule-entry` принимает готовый результат
+Для первого входа `paper schedule-entry` принимает готовый результат
 отбора и конфиг владельца со снимком счёта, временем запуска, лимитом
 вызовов и SHA-256 точных байтов отбора. Go перепроверяет состояние счёта,
 разрешённые бумаги и архив. Одно расписание на один момент создаёт одно
 задание и сохраняет контекст применения в той же транзакции.
 
 ```powershell
-go -C services/control run ./cmd/paper-apply schedule-entry --config $entryConfig --selection $selectionPath --archive-root $archiveRoot
+go -C services/control run ./cmd/paper schedule-entry --config $entryConfig --selection $selectionPath --archive-root $archiveRoot
 ```
 
 [Контракт расписания входа](contracts/paper-apply.schema.json#/$defs/EntryScheduleRequest) · [Пример расписания](contracts/valid-paper-entry-schedule.json).
@@ -536,11 +632,11 @@ go -C services/control run ./cmd/paper-apply schedule-entry --config $entryConfi
 используются записанные байты. Просроченный срез без записи пропускается.
 
 ```powershell
-uv --directory services/research run --offline --frozen python -m tradingbot.entry_cycles --root $ownerRoot --plan-ref $cyclePlanRef --plan-sha256 $cyclePlanHash --journal $entryJournal --paper-apply $paperApplyBinary
+uv --directory services/research run --offline --frozen python -m tradingbot.entry_cycles --root $ownerRoot --plan-ref $cyclePlanRef --plan-sha256 $cyclePlanHash --journal $entryJournal --paper-cli $paperCLI
 ```
 
 Передайте абсолютные пути к корню, постоянному журналу и собранному
-`paper-apply`. План содержит относительные ссылки из этого корня. Чтобы
+`paper`. План содержит относительные ссылки из этого корня. Чтобы
 процесс ожидал очередных окон, добавьте `--poll-interval-seconds 1`.
 В примере даты исторические. [Схема плана](contracts/paper-entry-cycle-plan.schema.json) · [Пример плана](contracts/valid-paper-entry-cycle-plan.json).
 
@@ -554,7 +650,7 @@ uv --directory services/research run --offline --frozen python -m tradingbot.ent
 Новые резервы проходят по действующей политике.
 
 ```powershell
-go -C services/control run ./cmd/paper-apply dispatch --account $accountId --policy $policyPath --quote-root $quoteRoot --poll-interval 5s
+go -C services/control run ./cmd/paper dispatch --account $accountId --policy $policyPath --quote-root $quoteRoot --poll-interval 5s
 ```
 
 Чтобы передать фактические исходы в следующее исследование, экспортируйте
@@ -1130,11 +1226,45 @@ uv --directory services/research run --frozen --extra evaluation tradingbot anal
 
 При необходимости `--config my-models.json` задаёт только `llm_provider`, `quick_think_llm`, `deep_think_llm` и optional tier provider/endpoints, поддержанные upstream. Не размещать ключи в этом JSON. Текущие default models берутся из pinned upstream, доступ и EU processing нужно подтвердить отдельно.
 
+Для локального анализа с подходящим планом ChatGPT выполните
+`uv --directory services/research run --offline --frozen tradingagents login chatgpt`,
+откройте ссылку из команды и подтвердите доступ TradingAgents в браузере. Для
+`analyze --config` укажите `chatgpt` в `llm_provider`,
+`quick_think_provider` и `deep_think_provider`. Обе модели должны быть
+доступны по плану. В проверенном запуске использовались `gpt-6-luna` и
+`gpt-6-sol`. [Документация OpenAI](https://developers.openai.com/siwc/token-sharing-open-source)
+
 Путь: три upstream analysts → bull/bear → trader/risk/PM для каждой бумаги → **один typed portfolio arbitration** → проверенный research batch. Outputs: `intents.json`, `portfolio.json`, `reports.json`, `metadata.json`. Output directories не перезаписываются. Decimal amounts сериализуются строками для точной передачи в Go.
+
+Для анализа на подготовленных входах передайте локальный архив с записями
+`bar`, `filing` и `news` по каждой бумаге. Сборщик
+`tradingbot.market_capture.capture_market` сохраняет цену акции с временем
+наблюдения и отдельно рассчитывает индикаторы по завершённым дневным барам.
+Отчётность и события добавляются в архив с источником и временем получения.
+Команда сверяет SHA-256, отбирает записи, полученные к `as_of` портфеля,
+и передаёт их напрямую модели принятия решения. Хеши архива и среза
+сохраняются в `metadata.json`.
+
+Для NVDA, TSLA, AAPL и MSFT локальная команда сбора автоматически получает
+раскрытия и финансовые показатели SEC, официальные ленты NVIDIA, Apple и
+Microsoft, затем добавляет цены и индикаторы. Для корпоративных событий
+Tesla используются раскрытия SEC. Укажите новый каталог для каждого снимка.
+При необходимости передайте контактный User-Agent SEC через
+`TRADINGBOT_SEC_USER_AGENT` или `-SecUserAgent`.
+
+```powershell
+$capturePath = Join-Path $PWD 'services/research/runtime/research-batch-001'
+./services/research/scripts/collect-research.ps1 -Output $capturePath
+$archivePath = Join-Path $capturePath 'snapshot/data-archive.json'
+$portfolioPath = Join-Path $capturePath 'snapshot/portfolio.json'
+$outputPath = Join-Path $capturePath 'result'
+$archiveSha = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash.ToLowerInvariant()
+uv --directory services/research run --offline --frozen tradingbot analyze --portfolio $portfolioPath --symbols NVDA TSLA AAPL MSFT --data-archive $archivePath --data-sha256 $archiveSha --max-calls 1 --output $outputPath
+```
 
 `max-calls` — shared thread-safe ограничение provider calls, не гарантированная сумма USD. SDK retries выключены; tool rounds/output tokens ограничены. Usage сохраняется где provider возвращает metadata; USD cost пока null. Structured output failure/unknown evidence/risk mismatch → error, без BUY по умолчанию и без free-text fallback в наш contract.
 
-## Границы первой вехи
+## Границы research и paper
 
 - `execution_mode` в schema **только `research`**; signer/submit/live commands отсутствуют.
 - Cash/concentration/holding/action checks не заменяют production Go risk kernel и reservations ledger.
@@ -1142,7 +1272,7 @@ uv --directory services/research run --frozen --extra evaluation tradingbot anal
 - Forecast/confidence — оценки модели, не calibration или доказанная alpha. Котировок real execution пока нет.
 - Native memory/reflection upstream имеет своё fixed-window settlement; это baseline, не наш фактический net position P&L.
 - Real paid LLM run ещё не проверен. Offline integration и native-engine probe не заменяют его.
-- Postgres ledger, chronological PIT replay, cost-aware fills, asset registry, Go execution/security и forward paper — следующие части [плана](docs/planning/plan.md) и [backlog](docs/planning/todo.md).
+- Готовность live execution и фактическую доходность отслеживаем отдельно по [плану](docs/planning/plan.md), [backlog](docs/planning/todo.md) и [результатам проверок](docs/verification.md).
 
 ## Проверки
 
@@ -1150,9 +1280,11 @@ uv --directory services/research run --frozen --extra evaluation tradingbot anal
 uv --directory services/research run --frozen --extra evaluation pytest
 uv --directory services/research run --frozen --extra evaluation ruff check tradingbot tests scripts
 uv --directory services/research build --no-sources
+uv --directory services/evaluation run --frozen pytest
 go -C services/control test -mod=readonly ./...
 go -C services/trade-events test -mod=readonly ./...
 go -C services/notifications test -mod=readonly ./...
+go -C services/portfolio-analytics test -mod=readonly ./...
 ```
 
 Чтобы включить PostgreSQL-тесты Go, задайте `TRADINGBOT_TEST_DATABASE_URL`

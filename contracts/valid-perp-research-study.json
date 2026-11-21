@@ -1,0 +1,77 @@
+{
+  "schema_version": "0.1",
+  "source_mode": "synthetic_fixture",
+  "as_of": "2026-10-05T14:35:00Z",
+  "horizon_hours": 24,
+  "available_collateral_usd": "1000",
+  "policy": {
+    "allowed_leverage": [1, 2, 3, 5],
+    "max_notional_usd": "1500",
+    "max_stress_loss_usd": "110",
+    "max_quote_age_seconds": 60,
+    "max_mark_basis_bps": 50,
+    "min_mark_stress_bps": 500,
+    "maintenance_buffer_bps": 100,
+    "min_net_edge_bps": 25
+  },
+  "markets": [
+    {
+      "market_id": "FIXTURE.TSLA",
+      "security_id": "fixture-tsla",
+      "symbol": "TSLA",
+      "product": "linear_usd_isolated_perpetual",
+      "observation_id": "fixture-tsla-observation",
+      "observed_at": "2026-10-05T14:34:50Z",
+      "available_at": "2026-10-05T14:34:51Z",
+      "mark_usd": "300.9",
+      "index_usd": "300",
+      "mark_stress_bps": 700,
+      "quotes": [
+        {
+          "notional_usd": "1200",
+          "venue_max_leverage": 3,
+          "maintenance_margin_bps": 500,
+          "long": {
+            "round_trip_execution_bps": 22,
+            "projected_funding_cost_bps": 8,
+            "funding_stress_cost_bps": 40
+          },
+          "short": {
+            "round_trip_execution_bps": 24,
+            "projected_funding_cost_bps": -8,
+            "funding_stress_cost_bps": 35
+          }
+        }
+      ]
+    },
+    {
+      "market_id": "FIXTURE.NVDA",
+      "security_id": "fixture-nvda",
+      "symbol": "NVDA",
+      "product": "linear_usd_isolated_perpetual",
+      "observation_id": "fixture-nvda-observation",
+      "observed_at": "2026-10-05T14:34:55Z",
+      "available_at": "2026-10-05T14:34:56Z",
+      "mark_usd": "149.8",
+      "index_usd": "150",
+      "mark_stress_bps": 600,
+      "quotes": [
+        {
+          "notional_usd": "800",
+          "venue_max_leverage": 5,
+          "maintenance_margin_bps": 600,
+          "long": {
+            "round_trip_execution_bps": 20,
+            "projected_funding_cost_bps": 6,
+            "funding_stress_cost_bps": 25
+          },
+          "short": {
+            "round_trip_execution_bps": 20,
+            "projected_funding_cost_bps": -6,
+            "funding_stress_cost_bps": 25
+          }
+        }
+      ]
+    }
+  ]
+}

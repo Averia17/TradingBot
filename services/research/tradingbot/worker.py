@@ -4,7 +4,7 @@ import json
 import logging
 import re
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor, wait
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from functools import partial
@@ -230,29 +230,10 @@ class _Worker:
     def run(self) -> None:
         if self.analyze is None and not self.wait_for_call_usage():
             return
-        claim_options = (
-            {"identity_registry_sha256": self.identity_registry.sha256}
-            if self.identity_registry is not None
-            else {}
-        )
         claim_id = str(uuid4())
         while not self.stop.is_set():
             try:
-                claim = self.control.post(
-                    "claim",
-                    _encode({"worker_id": self.worker_id, "claim_id": claim_id} | claim_options),
-                    (200, 204),
-                )
-                if claim is not None:
-                    lease = _Lease.from_response(claim, self.worker_id, claim_id)
-                    request = claim.get("request")
-                    if (
-                        claim.keys() != (_LEASE_KEYS | {"request"})
-                        or not isinstance(request, dict)
-                        or request.get("job_id") != lease.job_id
-                        or not self.supports_request(request)
-                    ):
-                        raise ControlError(retryable=True)
+                claimed = self.claim(claim_id)
             except ControlError as exc:
                 if exc.status == 409:
                     claim_id = str(uuid4())
@@ -260,29 +241,46 @@ class _Worker:
                     raise
                 else:
                     _LOG.warning("Research claim response unavailable: %s", exc)
-            else:
-                if claim is not None:
-                    try:
-                        self.process(lease, request)
-                    except Exception as exc:
-                        # The queue can recover this attempt after expiry. Record
-                        # only error types so provider data never reaches logs.
-                        _LOG.warning(
-                            "Research attempt incomplete job=%s attempt=%d error=%s",
-                            lease.job_id,
-                            lease.attempt,
-                            type(exc).__name__,
-                        )
-                        if (
-                            self.analyze is None
-                            and isinstance(exc, ControlError)
-                            and exc.status == 404
-                            and not self.wait_for_call_usage()
-                        ):
-                            return
-                    claim_id = str(uuid4())
-                    continue
-            self.stop.wait(self.poll_interval)
+                claimed = None
+            if claimed is None:
+                self.stop.wait(self.poll_interval)
+                continue
+            if not self.run_attempt(*claimed):
+                return
+            claim_id = str(uuid4())
+
+    def claim(self, claim_id: str) -> tuple[_Lease, dict] | None:
+        identity = {"worker_id": self.worker_id, "claim_id": claim_id}
+        if self.identity_registry is not None:
+            identity["identity_registry_sha256"] = self.identity_registry.sha256
+        claim = self.control.post("claim", _encode(identity), (200, 204))
+        if claim is None:
+            return None
+        lease = _Lease.from_response(claim, self.worker_id, claim_id)
+        request = claim.get("request")
+        if (
+            claim.keys() != (_LEASE_KEYS | {"request"})
+            or not isinstance(request, dict)
+            or request.get("job_id") != lease.job_id
+            or not self.supports_request(request)
+        ):
+            raise ControlError(retryable=True)
+        return lease, request
+
+    def run_attempt(self, lease: _Lease, request: dict) -> bool:
+        try:
+            self.process(lease, request)
+        except Exception as exc:
+            # Incomplete attempts recover after expiry. Log only the error type.
+            _LOG.warning(
+                "Research attempt incomplete job=%s attempt=%d error=%s",
+                lease.job_id,
+                lease.attempt,
+                type(exc).__name__,
+            )
+            if self.analyze is None and isinstance(exc, ControlError) and exc.status == 404:
+                return self.wait_for_call_usage()
+        return True
 
     def supports_request(self, request: dict) -> bool:
         version = request.get("job_schema_version")
@@ -348,56 +346,64 @@ class _Worker:
         if active is None or self.stop.is_set():
             return
         watchdog = _LeaseWatchdog(active.expires)
+        try:
+            analyze = self.attempt_analyzer(active, watchdog)
+            with ThreadPoolExecutor(max_workers=1, thread_name_prefix="research") as executor:
+                pending = executor.submit(
+                    analyze, request, active.attempt, active.deadline, watchdog.cancelled
+                )
+                try:
+                    completed = self.await_result(pending, active, watchdog)
+                finally:
+                    if not pending.done():
+                        watchdog.cancelled.set()
+        finally:
+            watchdog.close()
+        if completed is None:
+            return
+        active, result = completed
+        if self.stop.is_set() or watchdog.cancelled.is_set() or _remaining(active.expires) <= 0:
+            return
+        self.publish(
+            active,
+            result,
+            expected_version="0.3" if request.get("job_schema_version") == "0.2" else "0.2",
+        )
+
+    def attempt_analyzer(self, lease: _Lease, watchdog: _LeaseWatchdog) -> Analyzer:
         analyze = self.analyze
         if analyze is None:
             from tradingbot.adapters.offline import analyze_offline
 
             analyze = partial(
                 analyze_offline,
-                authorize_call=partial(self.authorize_call, active, watchdog),
-                record_call=partial(self.record_call, active, watchdog),
+                authorize_call=partial(self.authorize_call, lease, watchdog),
+                record_call=partial(self.record_call, lease, watchdog),
             )
         if self.archive_root is not None:
             analyze = partial(analyze, archive_root=self.archive_root)
         if self.identity_registry is not None:
             analyze = partial(analyze, owner_identity_registry=self.identity_registry)
-        with ThreadPoolExecutor(max_workers=1, thread_name_prefix="research") as executor:
-            pending = executor.submit(
-                analyze, request, active.attempt, active.deadline, watchdog.cancelled
+        return analyze
+
+    def await_result(
+        self, pending: Future[dict], lease: _Lease, watchdog: _LeaseWatchdog
+    ) -> tuple[_Lease, dict] | None:
+        next_heartbeat = self.heartbeat_at(lease)
+        while not self.stop.is_set() and not watchdog.cancelled.is_set():
+            if pending.done():
+                return lease, pending.result()
+            if monotonic() >= next_heartbeat:
+                updated = self.renew(lease)
+                if updated is None or not watchdog.extend(updated.expires):
+                    return None
+                lease = updated
+                next_heartbeat = self.heartbeat_at(lease)
+            wait(
+                (pending,),
+                timeout=max(0, min(0.1, next_heartbeat - monotonic(), _remaining(lease.expires))),
             )
-            next_heartbeat = self.heartbeat_at(active)
-            try:
-                while not self.stop.is_set() and not watchdog.cancelled.is_set():
-                    if pending.done():
-                        result = pending.result()
-                        break
-                    if monotonic() >= next_heartbeat:
-                        updated = self.renew(active)
-                        if updated is None or not watchdog.extend(updated.expires):
-                            return
-                        active = updated
-                        next_heartbeat = self.heartbeat_at(active)
-                    wait(
-                        (pending,),
-                        timeout=max(
-                            0, min(0.1, next_heartbeat - monotonic(), _remaining(active.expires))
-                        ),
-                    )
-                else:
-                    return
-            finally:
-                if not pending.done():
-                    watchdog.cancelled.set()
-                watchdog.close()
-        if (
-            not self.stop.is_set()
-            and not watchdog.cancelled.is_set()
-            and _remaining(active.expires) > 0
-        ):
-            self.publish(
-                active, result,
-                expected_version="0.3" if request.get("job_schema_version") == "0.2" else "0.2",
-            )
+        return None
 
     def heartbeat_at(self, lease: _Lease) -> float:
         remaining = _remaining(lease.expires)

@@ -19,7 +19,7 @@ import (
 	"tradingbot/control/internal/contract"
 	"tradingbot/control/internal/control"
 	"tradingbot/control/internal/jobs"
-	"tradingbot/control/internal/researchscheduler"
+	"tradingbot/control/internal/research_scheduler"
 )
 
 func TestCoverageReportsDeclaredWindowsAndDurableWorkerEvidence(t *testing.T) {
@@ -41,13 +41,13 @@ func TestCoverageReportsDeclaredWindowsAndDurableWorkerEvidence(t *testing.T) {
 	}
 	old, missed, open, active, future := now.Add(-72*time.Hour), now.Add(-2*time.Hour), now.Add(-3*time.Second), now.Add(-time.Second), now.Add(24*time.Hour)
 	raw := coverageSchedule(t, digest, active)
-	schedule, err := researchscheduler.Load(bytes.NewReader(raw))
+	schedule, err := research_scheduler.Load(bytes.NewReader(raw))
 	if err != nil {
 		t.Fatal(err)
 	}
 	server := httptest.NewServer(control.NewHandler(time.Hour, time.Now, store))
 	t.Cleanup(server.Close)
-	if err := researchscheduler.Run(ctx, schedule, researchscheduler.Config{ControlURL: server.URL, ArchiveRoot: root, Once: true}); err != nil {
+	if err := research_scheduler.Run(ctx, schedule, research_scheduler.Config{ControlURL: server.URL, ArchiveRoot: root, Once: true}); err != nil {
 		t.Fatal(err)
 	}
 	id := func(at time.Time) string { return contract.ResearchCalendarJobID("fixture-paper-research", at) }
@@ -73,7 +73,7 @@ func TestCoverageReportsDeclaredWindowsAndDurableWorkerEvidence(t *testing.T) {
 		t.Fatalf("record fixture callback: created=%v %v", created, err)
 	}
 	raw = coverageSchedule(t, digest, future, active, open, missed, old)
-	full, err := researchscheduler.Load(bytes.NewReader(raw))
+	full, err := research_scheduler.Load(bytes.NewReader(raw))
 	if err != nil {
 		t.Fatal(err)
 	}

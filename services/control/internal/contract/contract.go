@@ -29,7 +29,10 @@ var portfolioSchema []byte
 //go:embed paper-account.schema.json
 var paperSchema []byte
 
-var decimalPattern = regexp.MustCompile(`^(?:0|[1-9][0-9]{0,11})(?:\.[0-9]{1,8})?$`)
+var (
+	decimalPattern = regexp.MustCompile(`^(?:0|[1-9][0-9]{0,11})(?:\.[0-9]{1,8})?$`)
+	symbolPattern  = regexp.MustCompile(`^[A-Z][A-Z0-9.\-]{0,15}$`)
+)
 
 type Horizon struct {
 	Min int `json:"min_hours"`
@@ -207,6 +210,27 @@ func Amount(s string) (*big.Rat, error) {
 	return n, nil
 }
 func ParseBatch(data []byte, now time.Time, maxAge time.Duration) (Batch, error) {
+	batch, err := decodeResearchBatch(data)
+	if err != nil {
+		return batch, err
+	}
+	if err := batch.CheckFreshness(now, maxAge); err != nil {
+		return batch, err
+	}
+	return batch, batch.checkDecisions()
+}
+
+// DecodeBatch validates the immutable batch content. Call CheckFreshness with
+// the authoritative clock before accepting a result against a research job.
+func DecodeBatch(data []byte) (Batch, error) {
+	batch, err := decodeResearchBatch(data)
+	if err != nil {
+		return batch, err
+	}
+	return batch, batch.checkDecisions()
+}
+
+func decodeResearchBatch(data []byte) (Batch, error) {
 	var b Batch
 	if err := Decode(data, batchValidator, &b); err != nil {
 		return b, err
@@ -214,39 +238,50 @@ func ParseBatch(data []byte, now time.Time, maxAge time.Duration) (Batch, error)
 	if b.Version != BatchVersion || b.Mode != "research" {
 		return b, errors.New("unsupported protocol")
 	}
+	return b, nil
+}
+
+func (b Batch) CheckFreshness(now time.Time, maxAge time.Duration) error {
 	if b.AsOf.After(b.Created) || b.Created.After(now) || !b.Expires.After(now) || !b.Expires.After(b.Created) || now.Sub(b.AsOf) > maxAge {
-		return b, errors.New("expired, stale or future batch")
+		return errors.New("expired, stale or future batch")
 	}
+	return nil
+}
+
+func (b Batch) checkDecisions() error {
 	symbols, ids := map[string]bool{}, map[string]bool{}
 	for _, i := range b.Intents {
 		decisionID := strings.ToLower(i.ID)
 		if symbols[i.Symbol] || ids[decisionID] {
-			return b, errors.New("duplicate decision")
+			return errors.New("duplicate decision")
 		}
 		symbols[i.Symbol] = true
 		ids[decisionID] = true
-		amount, err := Amount(i.Notional)
-		if err != nil {
-			return b, err
-		}
+		positiveNotional := nonzeroWireAmount(i.Notional)
 		if i.Horizon.Min > i.Horizon.Max {
-			return b, errors.New("invalid horizon")
+			return errors.New("invalid horizon")
 		}
 		if i.Action == "HOLD" {
-			if amount.Sign() != 0 {
-				return b, errors.New("HOLD amount")
+			if positiveNotional {
+				return errors.New("HOLD amount")
 			}
-		} else if amount.Sign() <= 0 || i.Confidence == nil || i.Expected == nil || len(i.Evidence) == 0 {
-			return b, errors.New("incomplete intent")
+		} else if !positiveNotional || i.Confidence == nil || i.Expected == nil || len(i.Evidence) == 0 {
+			return errors.New("incomplete intent")
 		}
 		for _, ref := range i.Evidence {
 			if _, ok := b.Evidence[ref]; !ok {
-				return b, errors.New("unknown evidence")
+				return errors.New("unknown evidence")
 			}
 		}
 	}
-	return b, nil
+	return nil
 }
+
+// nonzeroWireAmount is only used after the schema validates the decimal grammar.
+func nonzeroWireAmount(value string) bool {
+	return strings.ContainsAny(value, "123456789")
+}
+
 func ParsePortfolio(data []byte) (Portfolio, error) {
 	var p Portfolio
 	if err := Decode(data, portfolioValidator, &p); err != nil {
@@ -270,11 +305,8 @@ func ParsePortfolio(data []byte) (Portfolio, error) {
 			return p, errors.New("duplicate position")
 		}
 		seen[pos.Symbol] = true
-		for _, s := range []string{pos.Quantity, pos.Mark} {
-			n, err := Amount(s)
-			if err != nil || n.Sign() <= 0 {
-				return p, errors.New("invalid position amount")
-			}
+		if !nonzeroWireAmount(pos.Quantity) || !nonzeroWireAmount(pos.Mark) {
+			return p, errors.New("invalid position amount")
 		}
 	}
 	return p, nil
@@ -315,7 +347,6 @@ func CheckAllocation(b Batch, p Portfolio, symbols []string) error {
 			return errors.New("unrequested symbol")
 		}
 		held := holdings[i.Symbol]
-		n, _ := Amount(i.Notional)
 		switch i.Action {
 		case "HOLD":
 			continue
@@ -328,6 +359,7 @@ func CheckAllocation(b Batch, p Portfolio, symbols []string) error {
 				return errors.New("missing held instrument")
 			}
 		}
+		n, _ := Amount(i.Notional)
 		if i.Action == "BUY" || i.Action == "ADD" {
 			existing := new(big.Rat)
 			if held != nil {
@@ -352,16 +384,15 @@ func CheckAllocation(b Batch, p Portfolio, symbols []string) error {
 }
 
 func CheckSymbols(symbols []string) error {
-	valid := regexp.MustCompile(`^[A-Z][A-Z0-9.\-]{0,15}$`)
-	seen := map[string]bool{}
 	if len(symbols) == 0 || len(symbols) > 100 {
 		return errors.New("invalid symbol count")
 	}
-	for _, s := range symbols {
-		if !valid.MatchString(s) || seen[s] {
-			return fmt.Errorf("invalid symbol %s", strings.TrimSpace(s))
+	seen := make(map[string]bool, len(symbols))
+	for _, symbol := range symbols {
+		if !symbolPattern.MatchString(symbol) || seen[symbol] {
+			return fmt.Errorf("invalid symbol %s", strings.TrimSpace(symbol))
 		}
-		seen[s] = true
+		seen[symbol] = true
 	}
 	return nil
 }

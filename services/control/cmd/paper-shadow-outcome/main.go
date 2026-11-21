@@ -12,7 +12,7 @@ import (
 	"syscall"
 	"time"
 
-	"tradingbot/control/internal/paperthesis"
+	"tradingbot/control/internal/paper_thesis"
 )
 
 func main() {
@@ -51,11 +51,11 @@ func run(ctx context.Context, dsn string, args []string, output io.Writer) error
 	if err != nil {
 		return err
 	}
-	input, err := paperthesis.ParseShadowInput(raw, *digest, buy, sell)
+	input, err := paper_thesis.ParseShadowInput(raw, *digest, buy, sell)
 	if err != nil {
 		return err
 	}
-	report, err := paperthesis.ReadShadowReport(ctx, dsn, input)
+	report, err := paper_thesis.ReadShadowReport(ctx, dsn, input)
 	if err != nil {
 		return err
 	}
@@ -64,7 +64,7 @@ func run(ctx context.Context, dsn string, args []string, output io.Writer) error
 
 func readLocal(path string) ([]byte, error) {
 	info, err := os.Stat(path)
-	if err != nil || !info.Mode().IsRegular() || info.Size() > paperthesis.MaxShadowInputBytes {
+	if err != nil || !info.Mode().IsRegular() || info.Size() > paper_thesis.MaxShadowInputBytes {
 		return nil, errors.New("paper shadow input must be a bounded regular file")
 	}
 	file, err := os.Open(path)
@@ -72,7 +72,7 @@ func readLocal(path string) ([]byte, error) {
 		return nil, errors.New("open paper shadow input failed")
 	}
 	defer file.Close()
-	raw, err := io.ReadAll(io.LimitReader(file, paperthesis.MaxShadowInputBytes+1))
+	raw, err := io.ReadAll(io.LimitReader(file, paper_thesis.MaxShadowInputBytes+1))
 	if err != nil {
 		return nil, errors.New("read paper shadow input failed")
 	}

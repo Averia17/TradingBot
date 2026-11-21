@@ -7,15 +7,24 @@ import msgspec
 import pytest
 
 from tradingbot_evaluation.__main__ import main
-from tradingbot_evaluation.benchmarks import run_benchmarks
-from tradingbot_evaluation.replay import load_replay, replay_prefix, run_replay
+from tradingbot_evaluation.benchmarks import benchmark_nav_series, run_benchmarks
+from tradingbot_evaluation.equal_weight import EqualWeightSchedule
+from tradingbot_evaluation.replay import (
+    load_replay,
+    replay_nav_series,
+    replay_prefix,
+    run_replay,
+    run_replay_with_account_checkpoints,
+)
 from tradingbot_evaluation.replay_evidence import derive_replay_evidence
+from tradingbot_evaluation.research_replay import replay_account_at
 from tradingbot_evaluation.statistics import (
     evaluate_statistics,
     load_evidence,
     load_protocol,
     protocol_sha256,
 )
+from tradingbot_evaluation.trend import TrendConfig
 
 
 def at(day, hour=12):
@@ -332,6 +341,62 @@ def test_daily_native_marks_benchmark_cash_dividends_and_delayed_quotes():
     assert report["alpha_measured"] is False and report["clean_out_of_sample"] is False
     assert report["verification_scope"]["ledger_provenance_verified"] is False
     assert report["comparisons"][0]["strategy_total_return_bps"] == "280.808081"
+
+
+def test_native_checkpoints_match_prefixes_at_equal_time_fills_and_corporate_actions():
+    source = replay_document()
+    source["quotes"].append(quote("TSLA", 3, "52.00", "52.00", hour=14))
+    source["stock_splits"] = [
+        {
+            "action_id": "tsla-split",
+            "symbol": "TSLA",
+            "available_at": at(3, 13),
+            "effective_at": at(3, 14),
+            "new_shares": 2,
+            "old_shares": 1,
+        }
+    ]
+    # The late, pre-split observation cannot replace a mark in current units.
+    source["quotes"][-3].update(observed_at=at(3, 12))
+    replay = load_replay(dumps(source))
+    start_at = datetime.fromisoformat(at(1, 18))
+    cutoffs = tuple(datetime.fromisoformat(value) for value in (at(2), at(3, 14), at(4)))
+    config = {
+        "start_at": start_at,
+        "buy_and_hold_symbol": "TSLA",
+        "include_equal_weight": True,
+        "trend": TrendConfig("TSLA", 1, 36 * 3600),
+        "equal_weight_schedule": EqualWeightSchedule(
+            (datetime.fromisoformat(at(3, 13)),), 60, 604800,
+        ),
+    }
+    strategy = replay_nav_series(replay, cutoffs)
+    benchmarks = benchmark_nav_series(replay, cutoffs, **config)
+    account_cutoffs = (
+        datetime.fromisoformat(at(1, 11)), *cutoffs, datetime.fromisoformat(at(4, 14)),
+    )
+    through = account_cutoffs[-1]
+    terminal_report, accounts = run_replay_with_account_checkpoints(
+        replay, through=through, cutoffs=account_cutoffs,
+    )
+    assert terminal_report == run_replay(replay, through=through)
+    assert accounts == {cutoff: replay_account_at(replay, cutoff) for cutoff in account_cutoffs}
+    assert list(accounts.values()) == [
+        ("1000.00", {}), ("798.00", {"TSLA": "2"}), ("800.00", {"TSLA": "4"}),
+        ("1017.80", {"TSLA": "2"}), ("1017.80", {"TSLA": "2"}),
+    ]
+
+    for cutoff in cutoffs:
+        prefix = replay_prefix(replay, cutoff)
+        terminal = run_replay(prefix, through=cutoff)
+        assert strategy[cutoff].nav_usd == terminal["ending_bid_mark_nav_usd"]
+        assert strategy[cutoff].held_symbols == terminal["open_positions"].keys()
+        reports = run_benchmarks(prefix, through=cutoff, **config)["benchmarks"]
+        assert benchmarks.keys() == reports.keys()
+        for kind, result in reports.items():
+            mark = benchmarks[kind][cutoff]
+            assert mark.nav_usd == result["ending_bid_mark_nav_usd"]
+            assert mark.held_symbols == result["open_positions"].keys()
 
 
 def test_future_quote_changes_only_future_nav_after_refreezing():

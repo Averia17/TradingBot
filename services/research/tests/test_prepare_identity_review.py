@@ -113,7 +113,7 @@ def test_normal_cli_builds_frozen_review_from_only_two_go_read_calls(
     tmp_path, monkeypatch, capsys, paperwork
 ):
     options, view, snapshot = paperwork
-    binary = tmp_path / "paper-apply.exe"
+    binary = tmp_path / "paper.exe"
     binary.write_bytes(b"test local executable")
     calls = []
 
@@ -140,8 +140,8 @@ def test_normal_cli_builds_frozen_review_from_only_two_go_read_calls(
         body = view if argv[1] == "review" else snapshot
         return subprocess.CompletedProcess(argv, 0, json.dumps(body).encode(), b"")
 
-    monkeypatch.setattr("tradingbot.prepare_identity_review.subprocess.run", run)
-    argv = ["prepare-identity-review", "--paper-apply", str(binary)]
+    monkeypatch.setattr("tradingbot.paper_cli.subprocess.run", run)
+    argv = ["prepare-identity-review", "--paper-cli", str(binary)]
     for name, value in options.items():
         flag = name.replace("_", "-")
         if isinstance(value, dict):

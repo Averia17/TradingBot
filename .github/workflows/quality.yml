@@ -76,7 +76,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
-      GO_MODULES: services/control services/trade-events services/notifications services/portfolio-analytics
+      GO_MODULES: services/control services/trade-events services/notifications services/portfolio-analytics services/venue-quotes
     services:
       postgres:
         image: postgres:17-alpine@sha256:d3244e8ce3f165ee3c93d9c4a4b1d0fe48b3a89e2287b717fdcbbde92d405065

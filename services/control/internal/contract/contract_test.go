@@ -20,12 +20,16 @@ func fixture(t *testing.T) []byte {
 
 func TestEmbeddedSchemasMatchPublishedContracts(t *testing.T) {
 	for name, embedded := range map[string][]byte{
-		"schema.json":               batchSchema,
-		"portfolio.schema.json":     portfolioSchema,
-		"paper-account.schema.json": paperSchema,
-		"paper-apply.schema.json":   paperApplySchema,
-		"paper-replay.schema.json":  paperReplaySchema,
-		"research-job.schema.json":  researchJobSchema,
+		"equity-route-study.schema.json":     equityRouteStudySchema,
+		"equity-route-theses.schema.json":    equityRouteThesesSchema,
+		"schema.json":                        batchSchema,
+		"portfolio.schema.json":              portfolioSchema,
+		"paper-account.schema.json":          paperSchema,
+		"paper-apply.schema.json":            paperApplySchema,
+		"paper-quote-collection.schema.json": paperQuoteCollectionSchema,
+		"paper-replay.schema.json":           paperReplaySchema,
+		"perp-research-study.schema.json":    perpStudySchema,
+		"research-job.schema.json":           researchJobSchema,
 	} {
 		t.Run(name, func(t *testing.T) {
 			published, err := os.ReadFile("../../../../contracts/" + name)

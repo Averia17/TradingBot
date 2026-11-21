@@ -1,6 +1,6 @@
 from decimal import Decimal
 
-from tradingbot.evaluation import run_synthetic_probe
+from tradingbot.nautilus_probe import run_synthetic_probe
 
 
 def test_selected_native_engine_tracks_two_simulated_equities_and_cash():

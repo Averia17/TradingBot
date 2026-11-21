@@ -1,0 +1,8 @@
+{
+  "option_id": "FIXTURE.TSLA:SHORT:1200:2",
+  "gross_return_bps": 140,
+  "review_in_hours": 8,
+  "thesis": "Synthetic short example",
+  "invalidation_conditions": ["Synthetic catalyst reverses"],
+  "evidence_ids": ["market:FIXTURE.TSLA:fixture-tsla-observation", "TSLA:market_report"]
+}

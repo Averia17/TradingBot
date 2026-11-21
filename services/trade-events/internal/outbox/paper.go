@@ -10,24 +10,13 @@ import (
 	"github.com/goware/pgqueue"
 	"github.com/jackc/pgx/v5"
 	"github.com/twmb/franz-go/pkg/kgo"
-	"golang.org/x/sync/errgroup"
 
 	"tradingbot/trade-events/internal/fill_event"
 )
 
 const paperQueueName = "paper-trade-filled-v1"
 
-var publishPaperJob = pgqueue.JobSpec[fill_event.PaperEvent]{
-	Queue: paperQueueName,
-	HashFn: func(event fill_event.PaperEvent) *string {
-		return &event.ID
-	},
-	PollInterval:   publishJob.PollInterval,
-	MaxRetries:     publishJob.MaxRetries,
-	RetryDelay:     publishJob.RetryDelay,
-	LeaseDuration:  publishJob.LeaseDuration,
-	FinalizeBuffer: publishJob.FinalizeBuffer,
-}
+var publishPaperJob = publishJobSpec[json.RawMessage](paperQueueName)
 
 // RelayPaper copies committed ledger fills to pgqueue and relays them to the
 // dedicated Kafka topic. Both queue schemas must be in the ledger database.
@@ -43,51 +32,14 @@ func (o *Outbox) RelayPaper(ctx context.Context, producer *kgo.Client) error {
 	return runHandoff(ctx, worker, "paper fill", o.queueOnePaper)
 }
 
-func runHandoff(ctx context.Context, worker *pgqueue.Worker, name string, queueOne func(context.Context) (bool, error)) error {
-	group, runCtx := errgroup.WithContext(ctx)
-	group.Go(func() error {
-		if err := worker.Start(runCtx); err != nil {
-			return err
-		}
-		if runCtx.Err() == nil {
-			return fmt.Errorf("%s relay stopped unexpectedly", name)
-		}
-		return nil
-	})
-	group.Go(func() error {
-		for runCtx.Err() == nil {
-			moved, err := queueOne(runCtx)
-			if err != nil {
-				return err
-			}
-			if !moved {
-				select {
-				case <-runCtx.Done():
-				case <-time.After(time.Second):
-				}
-			}
-		}
-		return nil
-	})
-	return group.Wait()
+func (o *Outbox) queueOnePaper(ctx context.Context) (bool, error) {
+	return o.handoff(ctx, "paper outbox", o.movePaperFill)
 }
 
-func (o *Outbox) queueOnePaper(ctx context.Context) (bool, error) {
-	tx, err := o.db.Conn.Begin(ctx)
-	if err != nil {
-		return false, fmt.Errorf("begin paper outbox handoff: %w", err)
-	}
-	defer func() {
-		cleanup, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-		_ = tx.Rollback(cleanup)
-	}()
-	if _, err := tx.Exec(ctx, `SET LOCAL synchronous_commit='on'`); err != nil {
-		return false, fmt.Errorf("configure durable paper outbox handoff: %w", err)
-	}
+func (o *Outbox) movePaperFill(ctx context.Context, tx pgx.Tx) (bool, error) {
 	var accountID, eventID string
 	var payload []byte
-	err = tx.QueryRow(ctx, `SELECT account_id::text,event_id::text,payload FROM paper_fill_outbox WHERE queued_at IS NULL
+	err := tx.QueryRow(ctx, `SELECT account_id::text,event_id::text,payload FROM paper_fill_outbox WHERE queued_at IS NULL
 		ORDER BY created_at,account_id,event_id LIMIT 1 FOR UPDATE SKIP LOCKED`).Scan(&accountID, &eventID, &payload)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
@@ -99,7 +51,11 @@ func (o *Outbox) queueOnePaper(ctx context.Context) (bool, error) {
 	if err != nil || event.AccountID != accountID || event.FillEventID != eventID {
 		return false, fmt.Errorf("invalid ledger outbox fill %s for account %s", eventID, accountID)
 	}
-	if _, err := enqueueExact(ctx, o.queue, tx, publishPaperJob, event); err != nil {
+	canonicalPayload, err := json.Marshal(event)
+	if err != nil {
+		return false, fmt.Errorf("encode paper fill outbox task: %w", err)
+	}
+	if _, err := enqueueExactTask(ctx, tx, paperQueueName, event.ID, canonicalPayload); err != nil {
 		return false, err
 	}
 	mark, err := tx.Exec(ctx, `UPDATE paper_fill_outbox SET queued_at=clock_timestamp() WHERE account_id=$1 AND event_id=$2`, accountID, eventID)
@@ -109,21 +65,16 @@ func (o *Outbox) queueOnePaper(ctx context.Context) (bool, error) {
 	if mark.RowsAffected() != 1 {
 		return false, errors.New("paper fill handoff did not update exactly one outbox row")
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return false, fmt.Errorf("commit paper outbox handoff: %w", err)
-	}
 	return true, nil
 }
 
 type paperRelay struct{ relay }
 
-func (r *paperRelay) RunTask(ctx context.Context, job *pgqueue.Job[fill_event.PaperEvent]) pgqueue.Result {
-	payload, err := json.Marshal(job.Payload)
+func (r *paperRelay) RunTask(ctx context.Context, job *pgqueue.Job[json.RawMessage]) pgqueue.Result {
+	fill, err := fill_event.DecodePaper(job.Payload)
 	if err != nil {
-		return pgqueue.Fail(fmt.Errorf("encode paper fill: %w", err))
-	}
-	if _, err := fill_event.DecodePaper(payload); err != nil {
 		return pgqueue.Fail(fmt.Errorf("invalid paper fill: %w", err))
 	}
-	return r.publish(ctx, job.Task.ID, job.Payload.ID, payload)
+	// The handoff stored canonical bytes in the same transaction as queued_at.
+	return r.publish(ctx, job.Task.ID, fill.ID, fill.ID, job.Payload)
 }

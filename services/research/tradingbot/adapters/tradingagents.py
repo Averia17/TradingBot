@@ -237,9 +237,13 @@ class TradingAgentsRuntime:
     callbacks: list
 
     def decision_model(self):
-        from tradingagents.llm_clients import create_tier_client
+        return create_portfolio_model(self.config, callbacks=self.callbacks)
 
-        return create_tier_client(self.config, "deep", callbacks=self.callbacks).get_llm()
+
+def create_portfolio_model(config: dict, *, callbacks: list):
+    from tradingagents.llm_clients import create_tier_client
+
+    return create_tier_client(config, "deep", callbacks=callbacks).get_llm()
 
 
 def create_runtime(

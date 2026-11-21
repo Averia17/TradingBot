@@ -35,7 +35,7 @@ func ReadCompletedResearch(ctx context.Context, dsn string, ids []string) ([]Com
 	remaining := maxResearchReplayBytes
 	err := withResearchReadSnapshot(ctx, dsn, func(tx pgx.Tx) error {
 		for _, id := range ids {
-			completed, err := readCompletedResearch(ctx, tx, id)
+			completed, _, err := readCompletedResearch(ctx, tx, id)
 			if err != nil {
 				return err
 			}
@@ -59,11 +59,7 @@ func ReadCompletedResearch(ctx context.Context, dsn string, ids []string) ([]Com
 func ReadCompletedPaperResearch(ctx context.Context, dsn, id string) (CompletedPaperResearch, error) {
 	var receipt CompletedPaperResearch
 	err := withResearchReadSnapshot(ctx, dsn, func(tx pgx.Tx) error {
-		completed, err := readCompletedResearch(ctx, tx, id)
-		if err != nil {
-			return err
-		}
-		registry, err := jobRegistryPin(completed.Job.Request)
+		completed, registry, err := readCompletedResearch(ctx, tx, id)
 		if err != nil {
 			return err
 		}
@@ -88,19 +84,19 @@ func ReadCompletedPaperResearch(ctx context.Context, dsn, id string) (CompletedP
 	return receipt, nil
 }
 
-func readCompletedResearch(ctx context.Context, tx pgx.Tx, id string) (CompletedResearch, error) {
+func readCompletedResearch(ctx context.Context, tx pgx.Tx, id string) (CompletedResearch, string, error) {
 	result, err := readResult(tx.QueryRow(ctx, selectResult, id))
 	if err != nil {
-		return CompletedResearch{}, fmt.Errorf("read completed result for %s: %w", id, err)
+		return CompletedResearch{}, "", fmt.Errorf("read completed result for %s: %w", id, err)
 	}
-	job, asOf, err := claimInputs(ctx, tx, id)
+	inputs, err := readJobInputs(ctx, tx, id)
 	if err != nil {
-		return CompletedResearch{}, fmt.Errorf("read immutable inputs for %s: %w", id, err)
+		return CompletedResearch{}, "", fmt.Errorf("read immutable inputs for %s: %w", id, err)
 	}
-	if asOf.After(job.CreatedAt) {
-		return CompletedResearch{}, fmt.Errorf("research job %s was recorded before its snapshot", id)
+	if inputs.snapshotAt.After(inputs.CreatedAt) {
+		return CompletedResearch{}, "", fmt.Errorf("research job %s was recorded before its snapshot", id)
 	}
-	return CompletedResearch{Job: job, Result: result}, nil
+	return CompletedResearch{Job: inputs.Job, Result: result}, inputs.registrySHA, nil
 }
 
 func withResearchReadSnapshot(ctx context.Context, dsn string, read func(pgx.Tx) error) error {

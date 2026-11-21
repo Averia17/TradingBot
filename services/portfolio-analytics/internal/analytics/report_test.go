@@ -61,6 +61,75 @@ func TestReportSuppressesIncompleteValuationAndGaps(t *testing.T) {
 	}
 }
 
+func TestPositionWeightsUseExactValuesBeforeReportRounding(t *testing.T) {
+	cutoff := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+	state := newState()
+	marks := []Valuation{mark("a", "0.00000001", cutoff), mark("b", "0.00000001", cutoff)}
+	marks[0].Mark.Instrument.Decimals = 1
+	marks[1].Mark.Instrument = Instrument{InstrumentID: "equity:XYZ", RegistryVersion: "v1", Decimals: 1}
+	for i, quantity := range []string{"3", "4"} {
+		instrument := marks[i].Mark.Instrument
+		state.Positions[instrument.InstrumentID] = holding{Balance: Balance{Instrument: instrument, QuantityRaw: quantity}}
+	}
+	index := indexValuations(marks, "")
+	current := valuePortfolioAt(state, index, cutoff, time.Hour, true)
+	historical := valuePortfolioAt(state, index, cutoff, time.Hour, false)
+	if historical.nav.Cmp(current.nav) != 0 || len(historical.positions) != 0 {
+		t.Fatal("historical scan must use the same exact NAV without position rows")
+	}
+	if len(current.positions) != 2 || current.positions[0].InstrumentID != "equity:ABC" {
+		t.Fatalf("positions with identical displayed value must sort by instrument ID: %+v", current.positions)
+	}
+	checkDecimal(t, current.positions[0].MarketValueUSD, "0")
+	checkDecimal(t, current.positions[1].MarketValueUSD, "0")
+	checkDecimal(t, current.positions[0].WeightPct, "42.85714286")
+	checkDecimal(t, current.positions[1].WeightPct, "57.14285714")
+}
+
+func TestValuationTimelineKeepsCausalMarkPriority(t *testing.T) {
+	day := time.Date(2026, 11, 18, 0, 0, 0, 0, time.UTC)
+	rows := []Valuation{
+		{ID: "new", ObservedAt: day.Add(time.Hour), AvailableAt: day.Add(3 * time.Hour)},
+		{ID: "old-late", ObservedAt: day, AvailableAt: day.Add(4 * time.Hour)},
+		{ID: "tie-b", ObservedAt: day, AvailableAt: day.Add(time.Hour)},
+		{ID: "tie-a", ObservedAt: day, AvailableAt: day.Add(time.Hour)},
+		{ID: "new-correction", ObservedAt: day.Add(time.Hour), AvailableAt: day.Add(5 * time.Hour)},
+	}
+	timeline := buildValuationTimeline(rows)
+	if got := timeline.latestVisibleAt(day); got != nil {
+		t.Fatalf("unavailable mark entered valuation: %+v", got)
+	}
+	for i, want := range []string{"tie-a", "tie-a", "new", "new", "new-correction"} {
+		got := timeline.latestVisibleAt(day.Add(time.Duration(i+1) * time.Hour))
+		if got == nil || got.ID != want {
+			t.Fatalf("cutoff %d: got %+v, want %s", i+1, got, want)
+		}
+	}
+}
+
+func TestCostCoverageUsesTheLatestAvailableOverlappingInterval(t *testing.T) {
+	start := time.Date(2026, 11, 16, 0, 0, 0, 0, time.UTC).Add(-time.Nanosecond)
+	end := start.AddDate(0, 0, 3)
+	knownAt := end.Add(2 * time.Hour)
+	row := func(id, first, last, status string, availableAt time.Time) Valuation {
+		return Valuation{Kind: "cost_coverage", ID: id, ObservedAt: availableAt, AvailableAt: availableAt,
+			Coverage: &Coverage{FirstDay: first, LastDay: last, Categories: map[string]string{"llm": status}}}
+	}
+	index := indexValuations([]Valuation{
+		row("original", "2026-11-16", "2026-11-18", "complete", end.Add(time.Hour)),
+		row("revision", "2026-11-17", "2026-11-18", "zero", knownAt),
+		row("future", "2026-11-16", "2026-11-17", "missing", knownAt.Add(time.Hour)),
+	}, "")
+	coverage := selectCostCoverage(index.coverage, start, end, knownAt)
+	if len(coverage) != 3 || coverage["2026-11-16"]["llm"] != "complete" ||
+		coverage["2026-11-17"]["llm"] != "zero" || coverage["2026-11-18"]["llm"] != "zero" {
+		t.Fatalf("unexpected interval selection: %+v", coverage)
+	}
+	if got := selectCostCoverage(index.coverage, start, end, knownAt.Add(time.Hour)); got != nil {
+		t.Fatalf("newer incomplete coverage was ignored: %+v", got)
+	}
+}
+
 func TestPerformanceChecksAllDaysAndCostCoverage(t *testing.T) {
 	input := reportFixture(t)
 	input.valuations = append(input.valuations,

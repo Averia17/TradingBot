@@ -16,9 +16,9 @@ import (
 
 	"tradingbot/control/internal/contract"
 	"tradingbot/control/internal/jobs"
-	"tradingbot/control/internal/paperapply"
-	"tradingbot/control/internal/paperquotes"
-	"tradingbot/control/internal/papersim"
+	"tradingbot/control/internal/paper_quotes"
+	"tradingbot/control/internal/paper_sim"
+	"tradingbot/control/internal/paper_workflow"
 )
 
 func main() {
@@ -32,22 +32,22 @@ func main() {
 }
 
 type researchReader interface {
-	paperapply.ResearchStore
+	paper_workflow.ResearchStore
 	GetPaperDispatch(context.Context, string) (jobs.PaperDispatchTask, error)
 	Now(context.Context) (time.Time, error)
 }
 
 type pinResult struct {
-	Version     string     `json:"paper_quote_pin_result_schema_version"`
-	Source      string     `json:"source_mode"`
-	JobID       string     `json:"job_id"`
-	TapeSHA256  string     `json:"tape_sha256"`
-	Status      string     `json:"status"`
-	Quote       *pinQuote  `json:"quote,omitempty"`
-	CompletedAt *time.Time `json:"completed_at,omitempty"`
-	ObservedAt  *time.Time `json:"observed_at,omitempty"`
-	AvailableAt *time.Time `json:"available_at,omitempty"`
-	CheckedAt   *time.Time `json:"checked_at,omitempty"`
+	Version     string                       `json:"paper_quote_pin_result_schema_version"`
+	Source      string                       `json:"source_mode"`
+	JobID       string                       `json:"job_id"`
+	TapeSHA256  string                       `json:"tape_sha256"`
+	Status      string                       `json:"status"`
+	Quote       *paper_quotes.QuoteReference `json:"quote,omitempty"`
+	CompletedAt *time.Time                   `json:"completed_at,omitempty"`
+	ObservedAt  *time.Time                   `json:"observed_at,omitempty"`
+	AvailableAt *time.Time                   `json:"available_at,omitempty"`
+	CheckedAt   *time.Time                   `json:"checked_at,omitempty"`
 }
 
 func run(ctx context.Context, dsn string, args []string, output io.Writer) error {
@@ -71,13 +71,13 @@ func run(ctx context.Context, dsn string, args []string, output io.Writer) error
 	if *poll != 0 && (*poll < time.Second || *poll > time.Hour) {
 		return errors.New("poll interval must be zero or between 1s and 1h")
 	}
-	tape, err := paperquotes.OpenTape(*tapePath, *digest, *jobID, *accountID)
+	tape, err := paper_quotes.OpenTape(*tapePath, *digest, *jobID, *accountID)
 	if err != nil {
 		return fmt.Errorf("open synthetic quote tape: %w", err)
 	}
 	var requestBytes []byte
 	if *requestPath != "" {
-		requestBytes, err = readPath(*requestPath, papersim.MaxInputBytes)
+		requestBytes, err = readPath(*requestPath, paper_sim.MaxInputBytes)
 		if err != nil {
 			return fmt.Errorf("read bound application request: %w", err)
 		}
@@ -107,8 +107,8 @@ func run(ctx context.Context, dsn string, args []string, output io.Writer) error
 	return encoder.Encode(result)
 }
 
-func pinCompleted(ctx context.Context, research researchReader, root *os.Root, tape *paperquotes.Tape, jobID string, requestBytes []byte) (pinResult, error) {
-	result := pinResult{Version: "0.1", Source: papersim.Source, JobID: jobID, TapeSHA256: tape.SHA256()}
+func pinCompleted(ctx context.Context, research researchReader, root *os.Root, tape *paper_quotes.Tape, jobID string, requestBytes []byte) (pinResult, error) {
+	result := pinResult{Version: "0.1", Source: paper_sim.Source, JobID: jobID, TapeSHA256: tape.SHA256()}
 	job, err := research.Get(ctx, jobID)
 	if errors.Is(err, jobs.ErrNotFound) {
 		result.Status = "awaiting_research"
@@ -143,12 +143,12 @@ func pinCompleted(ctx context.Context, research researchReader, root *os.Root, t
 	if err != nil {
 		return result, err
 	}
-	review, err := paperapply.ReviewQuotes(req, job, receipt, now)
+	review, err := paper_workflow.ReviewQuotes(req, job, receipt, now)
 	if err != nil {
 		return result, err
 	}
 	result.CompletedAt, result.CheckedAt = &receipt.CompletedAt, &now
-	existing, err := readPin(root, jobID)
+	existing, err := readQuotePin(root, jobID)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return result, err
 	}
@@ -182,8 +182,8 @@ func pinCompleted(ctx context.Context, research researchReader, root *os.Root, t
 		result.Status = "awaiting_quote"
 		return result, nil
 	}
-	pin := quotePin{Version: "0.1", JobID: jobID, Quote: quoteReference(tape, jobID, candidate.SHA256)}
-	created, err := publishPin(ctx, root, pin, candidate.Raw)
+	pin := paper_quotes.QuotePin{Version: "0.1", JobID: jobID, Quote: quoteReference(tape, jobID, candidate.SHA256)}
+	created, err := publishQuotePin(ctx, root, pin, candidate.Raw)
 	if err != nil {
 		return result, err
 	}
@@ -193,7 +193,7 @@ func pinCompleted(ctx context.Context, research researchReader, root *os.Root, t
 	return result.withQuote("pinned", pin, *candidate), nil
 }
 
-func checkTapeBinding(tape *paperquotes.Tape, req paperapply.Request) error {
+func checkTapeBinding(tape *paper_quotes.Tape, req paper_workflow.Request) error {
 	if tape.AccountID() != "" && req.SnapshotContext.AccountID != tape.AccountID() {
 		return errors.New("durable paper dispatch differs from the synthetic tape account")
 	}
@@ -207,13 +207,13 @@ func checkTapeBinding(tape *paperquotes.Tape, req paperapply.Request) error {
 	return nil
 }
 
-func applicationRequest(ctx context.Context, research researchReader, jobID string, raw []byte) (paperapply.Request, error) {
+func applicationRequest(ctx context.Context, research researchReader, jobID string, raw []byte) (paper_workflow.Request, error) {
 	explicit := len(raw) != 0
 	task, err := research.GetPaperDispatch(ctx, jobID)
 	switch {
 	case err == nil:
 		if task.JobID != jobID {
-			return paperapply.Request{}, paperapply.ErrInvalid
+			return paper_workflow.Request{}, paper_workflow.ErrInvalid
 		}
 		// A scheduled job always uses its pre-bound durable request.
 		if len(raw) == 0 {
@@ -221,28 +221,28 @@ func applicationRequest(ctx context.Context, research researchReader, jobID stri
 		}
 	case errors.Is(err, jobs.ErrNotFound):
 		if len(raw) == 0 {
-			return paperapply.Request{}, errors.New("provide --request for a job without durable paper dispatch")
+			return paper_workflow.Request{}, errors.New("provide --request for a job without durable paper dispatch")
 		}
 	default:
-		return paperapply.Request{}, err
+		return paper_workflow.Request{}, err
 	}
-	var req paperapply.Request
-	if len(raw) > papersim.MaxInputBytes || contract.Decode(raw, contract.PaperApplication, &req) != nil || req.JobID != jobID || req.Intent != nil {
-		return paperapply.Request{}, paperapply.ErrInvalid
+	var req paper_workflow.Request
+	if len(raw) > paper_sim.MaxInputBytes || contract.Decode(raw, contract.PaperApplication, &req) != nil || req.JobID != jobID || req.Intent != nil {
+		return paper_workflow.Request{}, paper_workflow.ErrInvalid
 	}
 	if req.Identity != nil && (err != nil || explicit) {
-		return paperapply.Request{}, errors.New("security-bound quote pin requires the durable paper dispatch request")
+		return paper_workflow.Request{}, errors.New("security-bound quote pin requires the durable paper dispatch request")
 	}
 	if err == nil {
 		canonical, encodeErr := json.Marshal(req)
 		if encodeErr != nil || sha256.Sum256(canonical) != task.RequestSHA256 || req.SnapshotContext.AccountID != task.AccountID {
-			return paperapply.Request{}, errors.New("paper application request differs from durable dispatch")
+			return paper_workflow.Request{}, errors.New("paper application request differs from durable dispatch")
 		}
 	}
 	return req, nil
 }
 
-func (r pinResult) withQuote(status string, pin quotePin, candidate paperquotes.Observation) pinResult {
+func (r pinResult) withQuote(status string, pin paper_quotes.QuotePin, candidate paper_quotes.Observation) pinResult {
 	r.Status, r.Quote = status, &pin.Quote
 	observed, available := candidate.Quote.ObservedAt.UTC(), candidate.AvailableAt.UTC()
 	r.ObservedAt, r.AvailableAt = &observed, &available

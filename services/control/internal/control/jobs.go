@@ -91,6 +91,15 @@ func (r jobRequest) hasIdentityBindings() bool {
 	return true
 }
 
+// CheckArchivedIdentityRequest verifies that an immutable job still matches
+// the registry pin under which PostgreSQL admits its attempts.
+func CheckArchivedIdentityRequest(job jobs.Job, registrySHA string) bool {
+	var request jobRequest
+	return contract.Decode(job.Request, contract.ResearchIdentityJob, &request) == nil &&
+		request.ID == job.ID && request.hasIdentityBindings() && request.IdentityRegistry.SHA256 == registrySHA &&
+		contract.CheckSymbols(request.RequestedSymbols) == nil
+}
+
 func (h jobHTTP) create(w http.ResponseWriter, r *http.Request) {
 	body, ok := readJSONBody(w, r)
 	if !ok {

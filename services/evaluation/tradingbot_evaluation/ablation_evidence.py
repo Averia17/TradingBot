@@ -13,11 +13,10 @@ from tradingbot_evaluation.statistics import (
     EvaluationProtocol,
     ResearchVariant,
     _validate_ablation_evidence,
-    _validate_protocol,
     load_evidence,
-    protocol_sha256,
+    verify_frozen_protocol,
 )
-from tradingbot_evaluation.walk_forward_evidence import reproduce_study, study_identity, study_plan
+from tradingbot_evaluation.walk_forward_evidence import reproduce_study, study_plan, study_tape
 
 
 def derive_ablation_evidence(
@@ -29,10 +28,7 @@ def derive_ablation_evidence(
     infer_for: Callable[[ResearchVariant], Callable[[bytes], bytes]],
     identity_registry_raw: bytes | None = None,
 ) -> EvaluationEvidence:
-    frozen = protocol_sha256(protocol)
-    if frozen != expected_protocol_sha256:
-        raise ValueError("Frozen protocol SHA-256 differs from the expected digest")
-    _validate_protocol(protocol)
+    frozen = verify_frozen_protocol(protocol, expected_protocol_sha256)
     source = protocol.ablation_source
     if source is msgspec.UNSET:
         raise ValueError("A frozen ablation source is required")
@@ -40,19 +36,16 @@ def derive_ablation_evidence(
     planned_calls = sum(step.max_llm_calls for step in plan.steps) * len(source.variants)
     if planned_calls > source.max_total_llm_calls:
         raise ValueError("Ablation variants exceed the aggregate planned call budget")
-    identity = study_identity(source, plan, tape_raw, identity_registry_raw)
+    tape, identity = study_tape(source, plan, tape_raw, identity_registry_raw)
 
     marks = {day: {} for day in protocol.expected_nav_dates}
     arms = {}
     for name, variant in sorted(source.variants.items()):
         replay, walk, configs = reproduce_study(
             plan,
-            plan_raw,
-            tape_raw,
-            plan_sha256=source.plan_sha256,
-            tape_sha256=source.tape_sha256,
-            identity_registry_raw=identity_registry_raw,
-            identity_registry_sha256=source.identity_registry_sha256,
+            tape,
+            identity,
+            source=source,
             infer=infer_for(variant),
         )
         arms[name] = AblationArm(variant=variant, walk=walk, research_config_sha256_by_step=configs)

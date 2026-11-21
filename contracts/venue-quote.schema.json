@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Venue quotes HTTP v1",
+  "$ref": "#/$defs/Observation",
+  "$defs": {
+    "Mint": {"type": "string", "pattern": "^[1-9A-HJ-NP-Za-km-z]{32,44}$"},
+    "RawAmount": {
+      "type": "string",
+      "pattern": "^[1-9][0-9]{0,19}$",
+      "description": "Canonical, positive uint64 in the relevant token's smallest units. Runtime checks the upper bound."
+    },
+    "Request": {
+      "type": "object",
+      "properties": {
+        "network": {"const": "solana-mainnet"},
+        "input_mint": {"$ref": "#/$defs/Mint"},
+        "output_mint": {"$ref": "#/$defs/Mint"},
+        "in_amount": {"$ref": "#/$defs/RawAmount"}
+      },
+      "required": ["network", "input_mint", "output_mint", "in_amount"],
+      "unevaluatedProperties": false
+    },
+    "Observation": {
+      "type": "object",
+      "properties": {
+        "network": {"const": "solana-mainnet"},
+        "input_mint": {"$ref": "#/$defs/Mint"},
+        "output_mint": {"$ref": "#/$defs/Mint"},
+        "in_amount": {"$ref": "#/$defs/RawAmount"},
+        "provider": {"type": "string", "minLength": 1},
+        "firmness": {"const": "indicative"},
+        "out_amount": {"$ref": "#/$defs/RawAmount"},
+        "min_out_amount": {"$ref": "#/$defs/RawAmount"},
+        "swap_fee_bps": {"type": ["integer", "null"], "minimum": 0, "maximum": 10000},
+        "swap_fee_mint": {"anyOf": [{"$ref": "#/$defs/Mint"}, {"type": "null"}]},
+        "route": {"type": "string", "minLength": 1},
+        "provider_request_id": {"type": "string", "minLength": 1},
+        "requested_at": {"type": "string", "format": "date-time"},
+        "observed_at": {"type": "string", "format": "date-time"},
+        "provider_expires_at": {"type": ["string", "null"], "format": "date-time"}
+      },
+      "required": [
+        "network", "input_mint", "output_mint", "in_amount", "provider", "firmness",
+        "out_amount", "min_out_amount", "swap_fee_bps", "swap_fee_mint", "route",
+        "provider_request_id", "requested_at", "observed_at", "provider_expires_at"
+      ],
+      "additionalProperties": false
+    },
+    "Error": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "enum": [
+            "expected_json", "request_too_large", "invalid_quote_request", "quote_service_busy",
+            "quote_provider_rate_limited", "quote_provider_timeout", "quote_provider_unavailable"
+          ]
+        }
+      },
+      "required": ["code"],
+      "additionalProperties": false
+    }
+  }
+}

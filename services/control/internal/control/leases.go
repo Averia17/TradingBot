@@ -16,23 +16,17 @@ import (
 var workerIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 
 func (h jobHTTP) claim(w http.ResponseWriter, r *http.Request) {
-	body, ok := readJSONBody(w, r)
+	fields, ok := readWorkerFields(w, r)
 	if !ok {
 		return
 	}
-	var fields map[string]string
-	if contract.Decode(body, nil, &fields) != nil {
-		writeError(w, http.StatusBadRequest, "invalid_request")
-		return
-	}
 	registrySHA, scoped := fields["identity_registry_sha256"]
-	if (scoped && (len(fields) != 3 || !sha256Hex.MatchString(registrySHA))) ||
-		(!scoped && len(fields) != 2) {
-		writeError(w, http.StatusBadRequest, "invalid_request")
-		return
+	fieldCount := 2
+	if scoped {
+		fieldCount++
 	}
 	workerID, claimID := fields["worker_id"], strings.ToLower(fields["claim_id"])
-	if !workerIDPattern.MatchString(workerID) || !jobUUID.MatchString(claimID) {
+	if len(fields) != fieldCount || !jobUUID.MatchString(claimID) || scoped && !sha256Hex.MatchString(registrySHA) {
 		writeError(w, http.StatusBadRequest, "invalid_request")
 		return
 	}
@@ -73,19 +67,19 @@ func (h jobHTTP) claim(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (h jobHTTP) heartbeat(w http.ResponseWriter, r *http.Request) {
-	jobID := strings.ToLower(r.PathValue("id"))
-	if !jobUUID.MatchString(jobID) {
-		writeError(w, http.StatusBadRequest, "invalid_job_id")
+func (h jobHTTP) heartbeat(w http.ResponseWriter, r *http.Request, jobID string) {
+	fields, ok := readWorkerFields(w, r)
+	if !ok {
 		return
 	}
-	workerID, token, ok := readLeaseIdentity(w, r, "lease_token")
-	if !ok {
+	token := strings.ToLower(fields["lease_token"])
+	if len(fields) != 2 || !jobUUID.MatchString(token) {
+		writeError(w, http.StatusBadRequest, "invalid_request")
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), jobStoreTimeout)
 	defer cancel()
-	lease, err := h.store.Heartbeat(ctx, jobID, workerID, token)
+	lease, err := h.store.Heartbeat(ctx, jobID, fields["worker_id"], token)
 	switch {
 	case errors.Is(err, jobs.ErrNotFound):
 		writeError(w, http.StatusNotFound, "job_not_found")
@@ -98,30 +92,19 @@ func (h jobHTTP) heartbeat(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (h jobHTTP) authorizeCall(w http.ResponseWriter, r *http.Request) {
-	jobID := strings.ToLower(r.PathValue("id"))
-	if !jobUUID.MatchString(jobID) {
-		writeError(w, http.StatusBadRequest, "invalid_job_id")
-		return
-	}
-	body, ok := readJSONBody(w, r)
+func (h jobHTTP) authorizeCall(w http.ResponseWriter, r *http.Request, jobID string) {
+	fields, ok := readWorkerFields(w, r)
 	if !ok {
 		return
 	}
-	var fields map[string]string
-	if contract.Decode(body, nil, &fields) != nil || len(fields) != 3 || !workerIDPattern.MatchString(fields["worker_id"]) {
-		writeError(w, http.StatusBadRequest, "invalid_request")
-		return
-	}
-	workerID := fields["worker_id"]
 	token, callID := strings.ToLower(fields["lease_token"]), strings.ToLower(fields["call_id"])
-	if !jobUUID.MatchString(token) || !jobUUID.MatchString(callID) {
+	if len(fields) != 3 || !jobUUID.MatchString(token) || !jobUUID.MatchString(callID) {
 		writeError(w, http.StatusBadRequest, "invalid_request")
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), jobStoreTimeout)
 	defer cancel()
-	permit, created, err := h.store.AuthorizeCall(ctx, jobID, workerID, token, callID)
+	permit, created, err := h.store.AuthorizeCall(ctx, jobID, fields["worker_id"], token, callID)
 	switch {
 	case errors.Is(err, jobs.ErrNotFound):
 		writeError(w, http.StatusNotFound, "job_not_found")
@@ -134,11 +117,7 @@ func (h jobHTTP) authorizeCall(w http.ResponseWriter, r *http.Request) {
 	case err != nil:
 		writeError(w, http.StatusServiceUnavailable, "storage_unavailable")
 	default:
-		status := http.StatusOK
-		if created {
-			status = http.StatusCreated
-		}
-		writeJSON(w, status, struct {
+		writeJSON(w, createStatus(created), struct {
 			JobID     string `json:"job_id"`
 			CallID    string `json:"call_id"`
 			Attempt   int    `json:"attempt"`
@@ -147,22 +126,17 @@ func (h jobHTTP) authorizeCall(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func readLeaseIdentity(w http.ResponseWriter, r *http.Request, key string) (workerID, id string, ok bool) {
+func readWorkerFields(w http.ResponseWriter, r *http.Request) (map[string]string, bool) {
 	body, ok := readJSONBody(w, r)
 	if !ok {
-		return "", "", false
+		return nil, false
 	}
 	var fields map[string]string
-	if contract.Decode(body, nil, &fields) != nil || len(fields) != 2 || !workerIDPattern.MatchString(fields["worker_id"]) {
+	if contract.Decode(body, nil, &fields) != nil || !workerIDPattern.MatchString(fields["worker_id"]) {
 		writeError(w, http.StatusBadRequest, "invalid_request")
-		return "", "", false
+		return nil, false
 	}
-	id = strings.ToLower(fields[key])
-	if !jobUUID.MatchString(id) {
-		writeError(w, http.StatusBadRequest, "invalid_request")
-		return "", "", false
-	}
-	return fields["worker_id"], id, true
+	return fields, true
 }
 
 type leaseResponse struct {

@@ -65,6 +65,18 @@ func TestRiskActivityCountsSettledGrossAndUnresolvedResidualAtAccountVersion(t *
 		len(activity.Pending) != 1 || activity.Pending[0] != wantPending {
 		t.Fatalf("unresolved daily activity = %+v, %v", activity, err)
 	}
+	pending := reserveFixture(3, unknown.AccountVersion)
+	reservedAgain, _, err := store.Reserve(ctx, pending)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantNew := RiskReservation{Instrument: pending.Instrument, QuantityRaw: pending.QuantityRaw,
+		RemainingQuantityRaw: pending.QuantityRaw, GrossUSD: pending.GrossUSD}
+	activity, err = store.RiskActivity(ctx, testAccountID, reservedAgain.AccountVersion)
+	if err != nil || !activity.HasUnknown || len(activity.Pending) != 2 ||
+		activity.Pending[0] != wantPending || activity.Pending[1] != wantNew {
+		t.Fatalf("activity with multiple open orders = %+v, %v", activity, err)
+	}
 
 	// In this isolated fixture, put the sell's record immediately before UTC midnight.
 	if _, err := store.pool.Exec(ctx, `UPDATE paper_events SET recorded_at=$3
@@ -78,7 +90,8 @@ func TestRiskActivityCountsSettledGrossAndUnresolvedResidualAtAccountVersion(t *
 		t.Fatal(err)
 	}
 	activity, err = store.RiskActivity(ctx, testAccountID, cancelled.AccountVersion)
-	if err != nil || activity.HasUnknown || activity.SettledGrossUSD != "17.00000001" || len(activity.Pending) != 0 {
+	if err != nil || activity.HasUnknown || activity.SettledGrossUSD != "17.00000001" ||
+		len(activity.Pending) != 1 || activity.Pending[0] != wantNew {
 		t.Fatalf("cancelled residual and UTC-day activity = %+v, %v", activity, err)
 	}
 }

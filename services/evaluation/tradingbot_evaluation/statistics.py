@@ -520,6 +520,14 @@ def protocol_sha256(protocol: EvaluationProtocol) -> str:
     return sha256(msgspec.json.encode(protocol, order="deterministic")).hexdigest()
 
 
+def verify_frozen_protocol(protocol: EvaluationProtocol, expected_sha256: str) -> str:
+    frozen = protocol_sha256(protocol)
+    if frozen != expected_sha256:
+        raise ValueError("Frozen protocol SHA-256 differs from the expected digest")
+    _validate_protocol(protocol)
+    return frozen
+
+
 def _validate_ablation_evidence(
     source: AblationSource | msgspec.UnsetType, evidence: AblationProvenance | msgspec.UnsetType
 ) -> None:

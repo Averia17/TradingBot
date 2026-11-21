@@ -45,7 +45,7 @@
         "account_id": {"$ref": "#/$defs/AccountID"},
         "order_id": {"$ref": "#/$defs/AccountID"},
         "decision_id": {"$ref": "#/$defs/AccountID"},
-        "research_job_id": {"$ref": "#/$defs/AccountID", "description": "Durable source for a reservation authorized through paper-apply."},
+        "research_job_id": {"$ref": "#/$defs/AccountID", "description": "Durable source for a reservation authorized through paper."},
         "quote_id": {"$ref": "#/$defs/AccountID"},
         "snapshot_version": {"type": "integer", "minimum": 1},
         "instrument": {"$ref": "#/$defs/Instrument"},

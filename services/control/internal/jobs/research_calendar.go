@@ -27,7 +27,7 @@ const selectCalendarOccurrence = `SELECT o.job_id::text, o.schedule_id, o.schedu
 // The returned job state is projected from the jobs table, including a job
 // received concurrently or whose original HTTP response was lost.
 func (s *Store) RecordCalendarOccurrence(ctx context.Context, occurrence contract.ResearchCalendarOccurrence) (contract.ResearchCalendarReceipt, bool, error) {
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+	tx, err := s.beginWrite(ctx)
 	if err != nil {
 		return contract.ResearchCalendarReceipt{}, false, fmt.Errorf("begin calendar observation: %w", err)
 	}
@@ -38,9 +38,6 @@ func (s *Store) RecordCalendarOccurrence(ctx context.Context, occurrence contrac
 	}
 	if deadline := occurrence.Deadline(); now.Before(deadline) || now.Sub(deadline) > contract.ResearchCalendarObservationLookback {
 		return contract.ResearchCalendarReceipt{}, false, ErrCalendarWindow
-	}
-	if _, err := tx.Exec(ctx, `SET LOCAL synchronous_commit = 'on'`); err != nil {
-		return contract.ResearchCalendarReceipt{}, false, fmt.Errorf("configure durable calendar observation: %w", err)
 	}
 	jobID := contract.ResearchCalendarJobID(occurrence.ScheduleID, occurrence.ScheduledAt)
 	written, err := tx.Exec(ctx, `INSERT INTO research_schedule_occurrences

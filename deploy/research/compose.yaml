@@ -104,8 +104,8 @@ services:
       - '${TRADINGBOT_PAPER_ENTRY_PLAN_SHA256:-}'
       - --journal
       - /journal
-      - --paper-apply
-      - /usr/local/bin/paper-apply
+      - --paper-cli
+      - /usr/local/bin/paper
       - --poll-interval-seconds
       - '1'
     environment:
@@ -142,8 +142,8 @@ services:
       - '${TRADINGBOT_PAPER_REVIEW_PLAN_SHA256:-}'
       - --journal
       - /journal
-      - --paper-apply
-      - /usr/local/bin/paper-apply
+      - --paper-cli
+      - /usr/local/bin/paper
       - --poll-interval-seconds
       - '1'
     volumes:
@@ -153,7 +153,7 @@ services:
   paper-review:
     profiles: [paper]
     image: ${TRADINGBOT_CONTROL_IMAGE:-tradingbot-control:local}
-    entrypoint: [/usr/local/bin/paper-apply]
+    entrypoint: [/usr/local/bin/paper]
     command: [schedule-review, --config, /paper-config/review.json, --archive-root, /archive, --poll-interval, 30s]
     environment:
       TRADINGBOT_DATABASE_URL: postgresql://research_control@postgres:5432/tradingbot?sslmode=disable
@@ -180,7 +180,7 @@ services:
   paper-dispatch: &paper-dispatch
     profiles: [paper]
     image: ${TRADINGBOT_CONTROL_IMAGE:-tradingbot-control:local}
-    entrypoint: [/usr/local/bin/paper-apply]
+    entrypoint: [/usr/local/bin/paper]
     command: [dispatch, --account, '${TRADINGBOT_PAPER_ACCOUNT_ID:-}', --policy, /paper-config/policy.json, --quote-root, /quotes, --poll-interval, 5s]
     environment: &paper-dispatch-environment
       TRADINGBOT_DATABASE_URL: postgresql://research_control@postgres:5432/tradingbot?sslmode=disable

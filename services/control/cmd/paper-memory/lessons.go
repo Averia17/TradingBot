@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"tradingbot/control/internal/ledger"
-	"tradingbot/control/internal/papermemory"
+	"tradingbot/control/internal/paper_memory"
 )
 
 func lessonCommand(ctx context.Context, dsn, command string, args []string, output io.Writer) error {
@@ -64,7 +64,7 @@ func lessonCommand(ctx context.Context, dsn, command string, args []string, outp
 		var fact ledger.LessonFact
 		err = ledger.WithReadSnapshot(ctx, dsn, func(snapshot ledger.ReadSnapshot) error {
 			var err error
-			fact, err = papermemory.BuildLesson(ctx, snapshot, *account, fill, snapshot.Cutoff())
+			fact, err = paper_memory.BuildLesson(ctx, snapshot, *account, fill, snapshot.Cutoff())
 			return err
 		})
 		if err != nil {

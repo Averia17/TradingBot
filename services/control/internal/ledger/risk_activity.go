@@ -27,6 +27,9 @@ type RiskReservation struct {
 	GrossUSD             string
 }
 
+const readPendingOrdersSQL = storedOrderProjection + `
+	WHERE o.account_id=$1 AND o.status IN ('reserved','partially_filled','unknown') ORDER BY o.order_id`
+
 // RiskActivity reads one PostgreSQL snapshot. Reserve checks the same version
 // under lock so later fills and orders invalidate a stale admission.
 func (s *Store) RiskActivity(ctx context.Context, accountID string, expectedVersion int64) (RiskActivity, error) {
@@ -61,18 +64,14 @@ func (s *Store) RiskActivity(ctx context.Context, accountID string, expectedVers
 		return RiskActivity{}, fmt.Errorf("read paper settled daily gross: %w", err)
 	}
 
-	rows, err := tx.Query(ctx, `SELECT order_id::text FROM paper_orders
-		WHERE account_id=$1 AND status IN ('reserved','partially_filled','unknown') ORDER BY order_id`, accountID)
+	rows, err := tx.Query(ctx, readPendingOrdersSQL, accountID, int64(0))
 	if err != nil {
 		return RiskActivity{}, fmt.Errorf("query pending paper reservations: %w", err)
 	}
-	orderIDs, err := pgx.CollectRows(rows, pgx.RowTo[string])
-	if err != nil {
-		return RiskActivity{}, fmt.Errorf("read pending paper reservation IDs: %w", err)
-	}
-	activity.Pending = make([]RiskReservation, 0, len(orderIDs))
-	for _, orderID := range orderIDs {
-		order, _, err := readOrder(ctx, tx, accountID, orderID)
+	defer rows.Close()
+	activity.Pending = make([]RiskReservation, 0)
+	for rows.Next() {
+		order, _, err := scanStoredOrder(rows, accountID, 0, "")
 		if err != nil {
 			return RiskActivity{}, err
 		}
@@ -81,6 +80,9 @@ func (s *Store) RiskActivity(ctx context.Context, accountID string, expectedVers
 			Instrument: order.Instrument, QuantityRaw: order.QuantityRaw,
 			RemainingQuantityRaw: order.RemainingQuantityRaw, GrossUSD: order.GrossUSD,
 		})
+	}
+	if err := rows.Err(); err != nil {
+		return RiskActivity{}, fmt.Errorf("read pending paper reservations: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return RiskActivity{}, fmt.Errorf("finish paper risk snapshot: %w", err)

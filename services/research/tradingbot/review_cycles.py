@@ -3,13 +3,13 @@
 import argparse
 import hashlib
 import json
-import os
 import sqlite3
 import subprocess
 import tempfile
 import time
 from collections.abc import Callable
 from contextlib import closing
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Literal, Self
@@ -17,8 +17,21 @@ from typing import Annotated, Literal, Self
 from pydantic import Field, JsonValue, TypeAdapter, model_validator
 
 from tradingbot.contracts import Contract
+from tradingbot.paper_cli import (
+    MAX_DOCUMENT_BYTES,
+    AdmissionReceipt,
+    AdmissionState,
+    AdmissionStop,
+    AdmissionWindow,
+    GoRunner,
+    admit_occurrence,
+    execute_cycle_command,
+    invoke_paper_cli,
+    parse_cycle_args,
+    poll_admissions,
+)
 from tradingbot.paper_memory import LedgerID
-from tradingbot.prepare_identity_review import MAX_DOCUMENT_BYTES, prepare_identity_review
+from tradingbot.prepare_identity_review import prepare_identity_review
 from tradingbot.snapshots import (
     ArchiveReference,
     CaptureTime,
@@ -28,9 +41,7 @@ from tradingbot.snapshots import (
     read_pinned_json,
 )
 
-GoRunner = Callable[..., dict]
 _CaptureTime = TypeAdapter(CaptureTime)
-_PENDING = {"not_released", "pending_prepare", "pending_go"}
 _DB = "reviews.sqlite3"
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS owner_plan (
@@ -110,7 +121,8 @@ class ReviewCyclePlan(Contract):
         return self
 
 
-class _Receipt(Contract):
+class _Receipt(AdmissionReceipt):
+    unadmitted = frozenset({"not_due", "missed"})
     review_schedule_schema_version: Literal["0.2"]
     status: Literal[
         "not_due",
@@ -122,29 +134,15 @@ class _Receipt(Contract):
         "expired",
         "already_scheduled",
     ]
-    created: Annotated[bool, Field(strict=True)]
-    job_id: LedgerID | None = None
-    created_at: CaptureTime | None = None
     trigger: dict[str, JsonValue] | None = None
     snapshot: dict[str, JsonValue] | None = None
 
     @model_validator(mode="after")
     def durable_receipt(self) -> Self:
-        if self.status in {"not_due", "missed"}:
-            if self.created or any(
-                value is not None
-                for value in (self.job_id, self.created_at, self.trigger, self.snapshot)
-            ):
-                raise ValueError(
-                    "review receipt cannot claim a durable job for an unadmitted window"
-                )
-        elif (
-            self.job_id is None
-            or self.created_at is None
-            or self.created
-            and self.status != "queued"
+        if self.status in self.unadmitted and (
+            self.trigger is not None or self.snapshot is not None
         ):
-            raise ValueError("accepted review receipt lacks its durable job identity")
+            raise ValueError("unadmitted review cannot include a trigger or snapshot")
         if self.trigger is not None and self.trigger.get("trigger_id") != self.job_id:
             raise ValueError("review trigger does not identify the acknowledged job")
         return self
@@ -162,57 +160,62 @@ def _sha(raw: bytes) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
-class _Journal:
-    def __init__(self, connection: sqlite3.Connection, identity: bytes):
-        self.connection = connection
-        connection.execute("PRAGMA synchronous=FULL")
-        connection.executescript(_SCHEMA)
-        with connection:
-            connection.execute("INSERT OR IGNORE INTO owner_plan VALUES (1, ?)", (identity,))
-            stored = connection.execute(
-                "SELECT identity FROM owner_plan WHERE singleton=1"
-            ).fetchone()
-            if stored != (identity,):
-                raise ValueError("review journal belongs to a different immutable owner plan")
+def _open_journal(connection: sqlite3.Connection, identity: bytes) -> None:
+    connection.execute("PRAGMA synchronous=FULL")
+    connection.executescript(_SCHEMA)
+    with connection:
+        connection.execute("INSERT OR IGNORE INTO owner_plan VALUES (1, ?)", (identity,))
+        stored = connection.execute("SELECT identity FROM owner_plan WHERE singleton=1").fetchone()
+        if stored != (identity,):
+            raise ValueError("review journal belongs to a different immutable owner plan")
 
-    def get(self, position: int) -> tuple[bytes | None, bytes | None]:
+
+@dataclass(frozen=True)
+class _Journal:
+    connection: sqlite3.Connection
+    position: int
+
+    def load(self) -> AdmissionState[bytes]:
         row = self.connection.execute(
             "SELECT request, request_sha256, receipt, receipt_sha256 FROM reviews WHERE position=?",
-            (position,),
+            (self.position,),
         ).fetchone()
         if row is None:
-            return None, None
+            return AdmissionState()
         request, request_hash, receipt, receipt_hash = row
         for data, digest in ((request, request_hash), (receipt, receipt_hash)):
             if data is not None and (len(data) > MAX_DOCUMENT_BYTES or _sha(data) != digest):
                 raise ValueError("review journal payload checksum or size differs")
-        return request, receipt
+        if receipt is None:
+            return AdmissionState(request=request)
+        outcome = decode_pinned_json(receipt)
+        if not isinstance(outcome, dict):
+            raise ValueError("review journal receipt must be a JSON object")
+        return AdmissionState(request, outcome)
 
-    def stage(self, position: int, request: bytes) -> tuple[bytes | None, bytes | None]:
+    def stage(self, request: bytes) -> AdmissionState[bytes]:
         with self.connection:
             self.connection.execute(
                 "INSERT OR IGNORE INTO reviews(position,request,request_sha256) VALUES (?,?,?)",
-                (position, request, _sha(request)),
+                (self.position, request, _sha(request)),
             )
         # Concurrent runners use the first durable bytes and the same Go identity.
-        return self.get(position)
+        return self.load()
 
-    def finish(
-        self, position: int, receipt: dict, *, staged: bool
-    ) -> tuple[bytes | None, bytes | None]:
+    def finish(self, receipt: dict, *, submitted: bool) -> AdmissionState[bytes]:
         raw = _encode(receipt)
         with self.connection:
-            if staged:
+            if submitted:
                 self.connection.execute(
                     "UPDATE reviews SET receipt=?, receipt_sha256=? WHERE position=? AND receipt IS NULL",
-                    (raw, _sha(raw), position),
+                    (raw, _sha(raw), self.position),
                 )
             else:
                 self.connection.execute(
                     "INSERT OR IGNORE INTO reviews(position,receipt,receipt_sha256) VALUES (?,?,?)",
-                    (position, raw, _sha(raw)),
+                    (self.position, raw, _sha(raw)),
                 )
-        return self.get(position)
+        return self.load()
 
 
 def _prepare(root: Path, plan: ReviewCyclePlan, window: ReviewWindow, invoke: GoRunner) -> bytes:
@@ -229,24 +232,19 @@ def _prepare(root: Path, plan: ReviewCyclePlan, window: ReviewWindow, invoke: Go
             raise _NotOpen
         return output
 
-    with tempfile.TemporaryDirectory() as directory:
-        policy = Path(directory) / "policy.json"
-        marks = Path(directory) / "marks.json"
-        policy.write_bytes(read_pinned_bytes(root, plan.policy))
-        marks.write_bytes(read_pinned_bytes(root, window.marks))
-        request = prepare_identity_review(
-            invoke=read,
-            archive_root=root,
-            account=plan.account_id,
-            order=window.opening_order_id,
-            as_of=window.as_of.isoformat(),
-            policy=policy,
-            marks=marks,
-            data_manifest=window.data_manifest,
-            identity_registry=plan.identity_registry,
-            quote_tape=plan.quote_tape,
-            max_llm_calls=window.max_llm_calls,
-        )
+    request = prepare_identity_review(
+        invoke=read,
+        archive_root=root,
+        account=plan.account_id,
+        order=window.opening_order_id,
+        as_of=window.as_of.isoformat(),
+        policy=read_pinned_bytes(root, plan.policy),
+        marks=read_pinned_bytes(root, window.marks),
+        data_manifest=window.data_manifest,
+        identity_registry=plan.identity_registry,
+        quote_tape=plan.quote_tape,
+        max_llm_calls=window.max_llm_calls,
+    )
     if window.event is not None:
         request["event"] = window.event.model_dump(mode="json")
     raw = _encode(request)
@@ -303,63 +301,41 @@ def _submit(
 def _drive_window(
     root: Path,
     journal: _Journal,
-    position: int,
     plan: ReviewCyclePlan,
     window: ReviewWindow,
     invoke: GoRunner,
     clock: Callable[[], datetime],
 ) -> dict:
-    raw, terminal = journal.get(position)
-    if terminal is not None:
-        return decode_pinned_json(terminal)
-    if raw is None:
-        now = clock()
-        if now < window.release_at:
-            return {"status": "not_released", "created": False}
-        if now > window.deadline:
-            raw, terminal = journal.finish(
-                position, {"status": "missed", "created": False}, staged=False
-            )
-        else:
-            try:
-                prepared = _prepare(root, plan, window, invoke)
-                if clock() > window.deadline:
-                    raw, terminal = journal.finish(
-                        position, {"status": "missed", "created": False}, staged=False
-                    )
-                else:
-                    raw, terminal = journal.stage(position, prepared)
-            except _NotOpen:
-                raw, terminal = journal.finish(
-                    position, {"status": "not_open", "created": False}, staged=False
-                )
-            except ValueError as exc:
-                raw, terminal = journal.finish(
-                    position,
-                    {"status": "refused", "created": False, "error": type(exc).__name__},
-                    staged=False,
-                )
-            except (OSError, subprocess.SubprocessError) as exc:
-                return {"status": "pending_prepare", "created": False, "error": type(exc).__name__}
-        if terminal is not None:
-            return decode_pinned_json(terminal)
-    if raw is None:
-        raise ValueError("review journal lost its staged request")
-    try:
-        response = _submit(root, plan, window, raw, invoke)
-    except (OSError, subprocess.SubprocessError) as exc:
-        return {"status": "pending_go", "created": False, "error": type(exc).__name__}
-    try:
-        receipt = _Receipt.model_validate(response)
-    except ValueError as exc:
-        return {"status": "pending_go", "created": False, "error": type(exc).__name__}
-    acknowledged = receipt.model_dump(
-        mode="json", include={"status", "created", "job_id", "created_at"}, exclude_none=True
+    def prepare() -> bytes | AdmissionStop:
+        try:
+            return _prepare(root, plan, window, invoke)
+        except _NotOpen:
+            return AdmissionStop("not_open", terminal=True)
+        except ValueError as exc:
+            return AdmissionStop("refused", exc, terminal=True)
+        except (OSError, subprocess.SubprocessError) as exc:
+            return AdmissionStop("pending_prepare", exc)
+
+    def submit(raw: bytes) -> dict | AdmissionStop:
+        try:
+            response = _submit(root, plan, window, raw, invoke)
+        except (OSError, subprocess.SubprocessError) as exc:
+            return AdmissionStop("pending_go", exc)
+        try:
+            receipt = _Receipt.model_validate(response)
+        except ValueError as exc:
+            return AdmissionStop("pending_go", exc)
+        return receipt.model_dump(
+            mode="json", include={"status", "created", "job_id", "created_at"}, exclude_none=True
+        )
+
+    return admit_occurrence(
+        AdmissionWindow(window.release_at, window.deadline, "not_released", check_prepared_deadline=True),
+        journal,
+        prepare,
+        submit,
+        clock,
     )
-    _, terminal = journal.finish(position, acknowledged, staged=True)
-    if terminal is None:
-        raise ValueError("review journal lost its acknowledgement")
-    return decode_pinned_json(terminal)
 
 
 def run_cycles(
@@ -380,14 +356,14 @@ def run_cycles(
     )
     journal.mkdir(parents=True, exist_ok=True)
     with closing(sqlite3.connect(journal / _DB, timeout=5)) as connection:
-        store = _Journal(connection, identity)
+        _open_journal(connection, identity)
         outcomes = [
             {
                 "opening_order_id": window.opening_order_id,
                 "as_of": window.as_of.isoformat(),
                 "release_at": window.release_at.isoformat(),
             }
-            | _drive_window(root, store, position, plan, window, invoke, clock)
+            | _drive_window(root, _Journal(connection, position), plan, window, invoke, clock)
             for position, window in enumerate(plan.occurrences)
         ]
     return {
@@ -407,86 +383,43 @@ def poll_cycles(
     *,
     trusted_identity_registry_sha256: str | None,
 ) -> None:
-    previous = None
-    while True:
-        report = run_cycles(
+    poll_admissions(
+        lambda: run_cycles(
             root,
             reference,
             journal,
             invoke,
             trusted_identity_registry_sha256=trusted_identity_registry_sha256,
-        )
-        if previous != report:
-            emit(report)
-            previous = report
-        pending = [row for row in report["occurrences"] if row["status"] in _PENDING]
-        if not pending:
-            return
-        now = datetime.now(UTC)
-        future = (
-            datetime.fromisoformat(row["release_at"])
-            for row in pending
-            if row["status"] == "not_released"
-        )
-        until_release = min(
-            ((release - now).total_seconds() for release in future if release > now),
-            default=interval,
-        )
-        time.sleep(min(interval, until_release))
+        ),
+        emit,
+        interval,
+        waiting_status="not_released",
+        release_field="release_at",
+        retry_statuses={"pending_prepare", "pending_go"},
+        clock=lambda: datetime.now(UTC),
+        wait=time.sleep,
+    )
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--schema", action="store_true", help="Print the owner review plan schema")
-    parser.add_argument("--root", type=Path)
-    parser.add_argument("--plan-ref")
-    parser.add_argument("--plan-sha256")
-    parser.add_argument("--journal", type=Path)
-    parser.add_argument("--paper-apply", type=Path)
-    parser.add_argument("--poll-interval-seconds", type=int)
-    parser.add_argument(
-        "--identity-registry-sha256",
-        default=os.getenv("TRADINGBOT_RESEARCH_IDENTITY_REGISTRY_SHA256"),
-    )
-    args = parser.parse_args()
+    args = parse_cycle_args(parser)
     if args.schema:
         print(json.dumps(ReviewCyclePlan.model_json_schema(), indent=2))
         return 0
-    if not all((args.root, args.plan_ref, args.plan_sha256, args.journal, args.paper_apply)):
-        parser.error("--root, --plan-ref, --plan-sha256, --journal, and --paper-apply are required")
-    if args.poll_interval_seconds is not None and not 1 <= args.poll_interval_seconds <= 60:
-        parser.error("--poll-interval-seconds must be between 1 and 60")
 
-    def invoke(*arguments):
-        output = subprocess.run(
-            [str(binary), *arguments], check=True, capture_output=True, timeout=45
-        ).stdout
-        if len(output) > MAX_DOCUMENT_BYTES:
-            raise subprocess.SubprocessError("Go review receipt exceeds the document limit")
+    def invoke(*arguments: str) -> dict:
         try:
-            response = decode_pinned_json(output)
+            return invoke_paper_cli(binary, *arguments)
         except ValueError:
-            raise subprocess.SubprocessError("Go review receipt is not valid JSON") from None
-        if not isinstance(response, dict):
-            raise subprocess.SubprocessError("Go review receipt must be a JSON object")
-        return response
-
-    def emit(report):
-        print(json.dumps(report), flush=True)
+            raise subprocess.SubprocessError("Go review receipt is invalid") from None
 
     try:
-        binary = args.paper_apply.resolve(strict=True)
+        binary = args.paper_cli.resolve(strict=True)
         if not binary.is_file():
-            raise ValueError("paper-apply must be an explicit local binary")
-        root = args.root.resolve(strict=True)
-        reference = ArchiveReference(ref=args.plan_ref, sha256=args.plan_sha256)
-        options = {"trusted_identity_registry_sha256": args.identity_registry_sha256}
-        if args.poll_interval_seconds is None:
-            emit(run_cycles(root, reference, args.journal, invoke, **options))
-        else:
-            poll_cycles(
-                root, reference, args.journal, invoke, args.poll_interval_seconds, emit, **options
-            )
+            raise ValueError("paper must be an explicit local binary")
+        execute_cycle_command(args, invoke, run_cycles, poll_cycles)
     except (ValueError, OSError, OverflowError, sqlite3.Error) as exc:
         parser.exit(2, f"review cycles rejected ({type(exc).__name__})\n")
     return 0

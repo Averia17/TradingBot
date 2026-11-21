@@ -1,7 +1,6 @@
 package outbox
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -20,16 +19,17 @@ const queueName = "trade-filled-v1"
 
 var ErrConflict = errors.New("trade event ID already exists with different contents")
 
-var publishJob = pgqueue.JobSpec[fill_event.Event]{
-	Queue: queueName,
-	HashFn: func(event fill_event.Event) *string {
-		return &event.ID
-	},
-	PollInterval:   time.Second,
-	MaxRetries:     20,
-	RetryDelay:     10 * time.Second,
-	LeaseDuration:  45 * time.Second,
-	FinalizeBuffer: 10 * time.Second,
+var publishJob = publishJobSpec[fill_event.Event](queueName)
+
+func publishJobSpec[T any](queueName string) pgqueue.JobSpec[T] {
+	return pgqueue.JobSpec[T]{
+		Queue:          queueName,
+		PollInterval:   time.Second,
+		MaxRetries:     20,
+		RetryDelay:     10 * time.Second,
+		LeaseDuration:  45 * time.Second,
+		FinalizeBuffer: 10 * time.Second,
+	}
 }
 
 type Outbox struct {
@@ -107,24 +107,36 @@ func (o *Outbox) EnqueueTx(ctx context.Context, tx pgx.Tx, event fill_event.Even
 	if err := event.Validate(); err != nil {
 		return 0, fmt.Errorf("validate confirmed fill event: %w", err)
 	}
-	return enqueueExact(ctx, o.queue, tx, publishJob, event)
-}
-
-func enqueueExact[T any](ctx context.Context, queue *pgqueue.Queue, tx pgx.Tx, job pgqueue.JobSpec[T], event T) (int64, error) {
 	payload, err := json.Marshal(event)
 	if err != nil {
 		return 0, fmt.Errorf("encode confirmed fill event: %w", err)
 	}
-	id, err := pgqueue.EnqueueTx(ctx, queue, tx, job, event, pgqueue.WithIgnoreDuplicates())
-	if err != nil {
-		return 0, fmt.Errorf("enqueue confirmed fill event: %w", err)
+	return enqueueExactTask(ctx, tx, queueName, event.ID, payload)
+}
+
+// The pgqueue enqueue API always looks up the ID after a deduplicated insert.
+// Our byte comparison is needed only when a task already exists.
+func enqueueExactTask(ctx context.Context, tx pgx.Tx, queueName, dedupKey string, payload []byte) (int64, error) {
+	var taskID int64
+	err := tx.QueryRow(ctx, `INSERT INTO pgqueue_tasks (queue, hash, payload, created_at)
+		VALUES ($1, $2, $3, $4) ON CONFLICT (queue, hash) DO NOTHING RETURNING id`,
+		queueName, dedupKey, payload, time.Now().UTC()).Scan(&taskID)
+	if err == nil {
+		return taskID, nil
 	}
-	var stored []byte
-	if err := tx.QueryRow(ctx, "SELECT payload FROM pgqueue_tasks WHERE id = $1", id).Scan(&stored); err != nil {
-		return 0, fmt.Errorf("read outbox payload: %w", err)
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return 0, fmt.Errorf("enqueue outbox task: %w", err)
 	}
-	if !bytes.Equal(stored, payload) {
+	// A separate statement sees the winner of a concurrent insert under
+	// READ COMMITTED, including one that committed while this insert waited.
+	var samePayload bool
+	if err := tx.QueryRow(ctx, `SELECT id, payload IS NOT DISTINCT FROM $3::bytea
+		FROM pgqueue_tasks WHERE queue = $1 AND hash = $2`,
+		queueName, dedupKey, payload).Scan(&taskID, &samePayload); err != nil {
+		return 0, fmt.Errorf("read existing outbox task: %w", err)
+	}
+	if !samePayload {
 		return 0, ErrConflict
 	}
-	return id, nil
+	return taskID, nil
 }

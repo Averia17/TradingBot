@@ -2,6 +2,7 @@ package ledger
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -9,6 +10,7 @@ import (
 	"fmt"
 	"math/big"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -77,8 +79,20 @@ func (r ReservationRequest) valid() bool {
 		compareAmounts(r.GrossUSD, "0") > 0 && (r.Side != "SELL" || compareAmounts(r.MaxFeeUSD, r.GrossUSD) <= 0) && !r.ExpiresAt.IsZero()
 }
 
+// compareAmounts expects nonnegative decimals validated by moneyPattern.
 func compareAmounts(left, right string) int {
-	return amount(left).Cmp(amount(right))
+	if left == right {
+		return 0
+	}
+	leftWhole, leftFraction, _ := strings.Cut(left, ".")
+	rightWhole, rightFraction, _ := strings.Cut(right, ".")
+	if order := cmp.Compare(len(leftWhole), len(rightWhole)); order != 0 {
+		return order
+	}
+	if order := strings.Compare(leftWhole, rightWhole); order != 0 {
+		return order
+	}
+	return strings.Compare(strings.TrimRight(leftFraction, "0"), strings.TrimRight(rightFraction, "0"))
 }
 
 func amount(value string) *big.Rat {
@@ -91,7 +105,7 @@ func rawUnits(value string) *big.Int {
 	return units
 }
 
-const orderQuery = `SELECT o.request, o.request_hash, o.status, o.account_version, o.created_at,
+const storedOrderProjection = `SELECT o.order_id::text, o.request, o.request_hash, o.status, o.account_version, o.created_at,
 	COALESCE((SELECT jsonb_agg(jsonb_build_object(
 		'event_id', f.event_id::text, 'quantity_raw', f.quantity_raw::text,
 		'gross_usd', trim_scale(f.gross_usd)::text,
@@ -99,9 +113,10 @@ const orderQuery = `SELECT o.request, o.request_hash, o.status, o.account_versio
 	) ORDER BY e.account_version)
 	FROM paper_fills f JOIN paper_events e USING (account_id, event_id)
 	WHERE (f.account_id, f.order_id)=(o.account_id, o.order_id)
-		AND ($3::bigint=0 OR e.account_version <= $3)), '[]'::jsonb)
-	FROM paper_orders o
-	WHERE o.account_id=$1 AND o.order_id=$2`
+		AND ($2::bigint=0 OR e.account_version <= $2)), '[]'::jsonb)
+	FROM paper_orders o`
+
+const readStoredOrderSQL = storedOrderProjection + ` WHERE o.account_id=$1 AND o.order_id=$3`
 
 func (s *Store) GetOrder(ctx context.Context, accountID, orderID string) (Order, error) {
 	return getOrder(ctx, s.pool, accountID, orderID)
@@ -116,13 +131,18 @@ func getOrder(ctx context.Context, db rowQuerier, accountID, orderID string) (Or
 }
 
 func readOrder(ctx context.Context, db rowQuerier, accountID, orderID string) (Order, []byte, error) {
-	return readOrderAt(ctx, db, accountID, orderID, 0, "")
+	return readOrderAtVersion(ctx, db, accountID, orderID, 0, "")
 }
 
-func readOrderAt(ctx context.Context, db rowQuerier, accountID, orderID string, version int64, status string) (Order, []byte, error) {
+func readOrderAtVersion(ctx context.Context, db rowQuerier, accountID, orderID string, version int64, status string) (Order, []byte, error) {
+	return scanStoredOrder(db.QueryRow(ctx, readStoredOrderSQL, accountID, version, orderID), accountID, version, status)
+}
+
+func scanStoredOrder(row pgx.Row, accountID string, version int64, status string) (Order, []byte, error) {
 	var order Order
+	var orderID string
 	var request, hash, fills []byte
-	err := db.QueryRow(ctx, orderQuery, accountID, orderID, version).Scan(&request, &hash, &order.Status, &order.AccountVersion, &order.CreatedAt, &fills)
+	err := row.Scan(&orderID, &request, &hash, &order.Status, &order.AccountVersion, &order.CreatedAt, &fills)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Order{}, nil, ErrNotFound
 	}
@@ -147,13 +167,13 @@ func readOrderAt(ctx context.Context, db rowQuerier, accountID, orderID string, 
 	if version != 0 {
 		order.AccountVersion, order.Status = version, status
 	}
-	if err := order.summarizeFills(); err != nil {
+	if err := order.validateAndSummarizeFills(); err != nil {
 		return Order{}, nil, err
 	}
 	return order, hash, nil
 }
 
-func (o *Order) summarizeFills() error {
+func (o *Order) validateAndSummarizeFills() error {
 	var total big.Int
 	for i := range o.Fills {
 		fill := &o.Fills[i]
@@ -174,6 +194,15 @@ func (o *Order) summarizeFills() error {
 		o.Fill = &o.Fills[len(o.Fills)-1]
 	}
 	return nil
+}
+
+// appendSettledFill updates the summary from the accounting transition after
+// the store has validated the existing fills and booked the new fill.
+func (o *Order) appendSettledFill(fill Fill, remaining *big.Int) {
+	o.Fills = append(o.Fills, fill)
+	o.Fill = &o.Fills[len(o.Fills)-1]
+	o.FilledQuantityRaw = new(big.Int).Sub(rawUnits(o.QuantityRaw), remaining).String()
+	o.RemainingQuantityRaw = remaining.String()
 }
 
 func lockAccount(ctx context.Context, tx pgx.Tx, accountID string) (int64, error) {
@@ -242,10 +271,11 @@ func (s *Store) reserve(ctx context.Context, r ReservationRequest, application *
 	if version != r.SnapshotVersion {
 		return Order{}, false, ErrStale
 	}
-	if err := reserveFunds(ctx, tx, r); err != nil {
+	accounting, change := reserveOrder(r)
+	if err := writeReservation(ctx, tx, r, change); err != nil {
 		return Order{}, false, err
 	}
-	order := Order{ReservationRequest: r, Status: "reserved", AccountVersion: version + 1,
+	order := Order{ReservationRequest: r, Status: accounting.status, AccountVersion: version + 1,
 		FilledQuantityRaw: "0", RemainingQuantityRaw: r.QuantityRaw, Fills: []Fill{}}
 	var orderInserted bool
 	deadline := r.ExpiresAt
@@ -289,7 +319,7 @@ func (s *Store) reserve(ctx context.Context, r ReservationRequest, application *
 	return order, true, nil
 }
 
-func reserveFunds(ctx context.Context, tx pgx.Tx, r ReservationRequest) error {
+func writeReservation(ctx context.Context, tx pgx.Tx, r ReservationRequest, change balanceChange) error {
 	var existingVersion string
 	var existingDecimals int
 	err := tx.QueryRow(ctx, `SELECT registry_version, decimals FROM paper_positions WHERE account_id=$1 AND instrument_id=$2`, r.AccountID, r.Instrument.ID).
@@ -310,15 +340,16 @@ func reserveFunds(ctx context.Context, tx pgx.Tx, r ReservationRequest) error {
 	}
 	var rows int64
 	if r.Side == "BUY" {
-		command, err := tx.Exec(ctx, `UPDATE paper_accounts SET reserved_cash_usd = reserved_cash_usd + $2::text::numeric + $3::text::numeric
-			WHERE account_id=$1 AND cash_usd-reserved_cash_usd >= $2::text::numeric + $3::text::numeric`, r.AccountID, r.GrossUSD, r.MaxFeeUSD)
+		command, err := tx.Exec(ctx, `UPDATE paper_accounts SET reserved_cash_usd=reserved_cash_usd+$2::text::numeric
+			WHERE account_id=$1 AND cash_usd-reserved_cash_usd >= $2::text::numeric`, r.AccountID, change.reservedCash.FloatString(8))
 		if err != nil {
 			return fmt.Errorf("reserve paper cash: %w", err)
 		}
 		rows = command.RowsAffected()
 	} else {
 		command, err := tx.Exec(ctx, `UPDATE paper_positions SET reserved_quantity_raw=reserved_quantity_raw+$3::text::numeric
-			WHERE account_id=$1 AND instrument_id=$2 AND quantity_raw-reserved_quantity_raw >= $3::text::numeric`, r.AccountID, r.Instrument.ID, r.QuantityRaw)
+			WHERE account_id=$1 AND instrument_id=$2 AND quantity_raw-reserved_quantity_raw >= $3::text::numeric`,
+			r.AccountID, r.Instrument.ID, change.reservedQuantity.String())
 		if err != nil {
 			return fmt.Errorf("reserve paper quantity: %w", err)
 		}

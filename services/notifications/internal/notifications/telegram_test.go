@@ -98,6 +98,10 @@ func TestTelegramTransportErrorOmitsToken(t *testing.T) {
 	if err := telegram.Send(t.Context(), "BUY AAPL"); err == nil || strings.Contains(err.Error(), fakeToken) {
 		t.Fatalf("expected a sanitized transport failure, got %v", err)
 	}
+	var updates []analyticsTelegramUpdate
+	if err := telegram.commandRequest(t.Context(), "getUpdates", struct{}{}, maxUpdateResponse, &updates); err == nil || strings.Contains(err.Error(), fakeToken) {
+		t.Fatalf("expected a sanitized command transport failure, got %v", err)
+	}
 }
 
 func TestTelegramRequiresNumericPrivateChat(t *testing.T) {
@@ -116,7 +120,7 @@ func testTelegram(t *testing.T, handler http.Handler) *Telegram {
 	if err != nil {
 		t.Fatal(err)
 	}
-	telegram.endpoint = server.URL + "/bot" + fakeToken + "/sendMessage"
+	telegram.botURL = server.URL + "/bot" + fakeToken
 	return telegram
 }
 

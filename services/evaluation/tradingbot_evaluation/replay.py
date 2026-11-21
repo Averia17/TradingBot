@@ -5,6 +5,7 @@ import re
 from bisect import bisect_right
 from collections import defaultdict, deque
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
 from enum import IntEnum
@@ -16,6 +17,7 @@ from typing import Annotated, Literal
 import msgspec
 from nautilus_trader.backtest.engine import BacktestEngine
 from nautilus_trader.backtest.modules import SimulationModule
+from nautilus_trader.common.actor import Actor
 from nautilus_trader.config import BacktestEngineConfig, LoggingConfig, SimulationModuleConfig
 from nautilus_trader.core.data import Data
 from nautilus_trader.model.currencies import USD
@@ -170,7 +172,10 @@ def replay_sha256(replay: Replay) -> str:
 def load_replay(data: bytes) -> Replay:
     if len(data) > MAX_INPUT_BYTES:
         raise ValueError("Replay fixture exceeds the input limit")
-    document = json.loads(data, object_pairs_hook=_unique_fields)
+    return _decode_replay(json.loads(data, object_pairs_hook=_unique_fields))
+
+
+def _decode_replay(document: object) -> Replay:
     replay = msgspec.convert(document, type=Replay)
     if Decimal(replay.starting_cash_usd) <= 0:
         raise ValueError("Starting cash must be positive")
@@ -215,8 +220,8 @@ def _validate_calendar_precision(document: dict) -> None:
     )
     for rows, fields in fields_by_row:
         for row in rows:
-            for field in fields:
-                fraction = _FRACTIONAL_SECONDS.search(row[field])
+            for timestamp_field in fields:
+                fraction = _FRACTIONAL_SECONDS.search(row[timestamp_field])
                 if fraction and fraction[1][6:].strip("0"):
                     raise ValueError("Execution calendar replay requires microsecond precision")
 
@@ -363,7 +368,7 @@ def _scaled_usd(value: Decimal, factor: Fraction) -> Decimal:
     return Decimal(cents.numerator) / 100
 
 
-class _CorporateActionBoundary(Data):
+class _ReplayBoundary(Data):
     def __init__(self, timestamp_ns: int):
         self.timestamp_ns = timestamp_ns
 
@@ -411,9 +416,9 @@ class _CorporateActions(SimulationModule):
         self.cash_received = Decimal(0)
 
     def boundaries(self) -> list[CustomData]:
-        data_type = DataType(_CorporateActionBoundary)
+        data_type = DataType(_ReplayBoundary)
         return [
-            CustomData(data_type, _CorporateActionBoundary(timestamp_ns))
+            CustomData(data_type, _ReplayBoundary(timestamp_ns))
             for timestamp_ns in sorted({timestamp for timestamp, _, _ in self.timeline})
         ]
 
@@ -550,8 +555,145 @@ class _ReplayStrategy(Strategy):
         )
 
 
+@dataclass(frozen=True, slots=True)
+class NativeNav:
+    nav_usd: str
+    held_symbols: frozenset[str]
+
+
+NativeAccountState = tuple[str, dict[str, str]]
+
+
+@dataclass(slots=True)
+class _Checkpoints:
+    cutoffs: tuple[datetime, ...]
+    include_nav: bool = False
+    nav: dict[datetime, NativeNav] = field(default_factory=dict)
+    accounts: dict[datetime, NativeAccountState] = field(default_factory=dict)
+
+
+class _CheckpointBoundary(_ReplayBoundary):
+    def __init__(self, at: datetime):
+        super().__init__(_nanoseconds(at))
+        self.at = at
+
+
+_CHECKPOINT_TYPE = DataType(_CheckpointBoundary)
+_CHECKPOINT_CLIENT = ClientId("REPLAY-CHECKPOINTS")
+
+
+class _BidMarks:
+    def __init__(self, quotes: Sequence[Quote]):
+        self.pending = iter(quotes)
+        self.next_quote = next(self.pending, None)
+        self.marks: dict[str, Quote] = {}
+
+    def through(self, at: datetime) -> dict[str, Quote]:
+        while self.next_quote is not None and self.next_quote.available_at <= at:
+            quote = self.next_quote
+            prior = self.marks.get(quote.symbol)
+            if prior is None or prior.observed_at <= quote.observed_at:
+                self.marks[quote.symbol] = quote
+            self.next_quote = next(self.pending, None)
+        return self.marks
+
+
+def _open_positions(cache) -> dict[str, Decimal]:
+    return {
+        position.instrument_id.symbol.value: position.quantity.as_decimal()
+        for position in cache.positions_open()
+    }
+
+
+def _raw_positions(
+    positions: dict[str, Decimal], units: _SplitUnits, at: datetime,
+) -> dict[str, str]:
+    return {
+        symbol: str(_whole_shares(Fraction(quantity) * units.factor_at(symbol, at)))
+        for symbol, quantity in positions.items()
+    }
+
+
+def _bid_nav(
+    cash: Decimal, positions: dict[str, Decimal], marks: dict[str, Quote], units: _SplitUnits
+) -> Decimal:
+    nav = cash
+    for symbol, quantity in positions.items():
+        mark = marks[symbol]
+        nav += quantity * _scaled_usd(
+            Decimal(mark.bid_usd), units.factor_at(symbol, mark.observed_at)
+        )
+    return nav
+
+
+class _CheckpointObserver(Actor):
+    def __init__(self, venue: Venue, marks: _BidMarks, units: _SplitUnits, checkpoints: _Checkpoints):
+        super().__init__()
+        self.venue = venue
+        self.marks = marks
+        self.units = units
+        self.checkpoints = checkpoints
+
+    def on_start(self):
+        self.subscribe_data(_CHECKPOINT_TYPE, _CHECKPOINT_CLIENT)
+
+    def on_data(self, boundary: _CheckpointBoundary):
+        at = boundary.at
+        cash = self.portfolio.account(self.venue).balance_total(USD).as_decimal()
+        positions = _open_positions(self.cache)
+        if self.checkpoints.include_nav:
+            nav = _bid_nav(cash, positions, self.marks.through(at), self.units)
+            self.checkpoints.nav[at] = NativeNav(_usd(nav), frozenset(positions))
+        else:
+            self.checkpoints.accounts[at] = (_usd(cash), _raw_positions(positions, self.units, at))
+
+
 def run_replay(replay: Replay, *, through: datetime | None = None) -> dict:
     return _run_replay(replay, through=through)
+
+
+def run_replay_with_account_checkpoints(
+    replay: Replay,
+    *,
+    through: datetime,
+    cutoffs: tuple[datetime, ...],
+) -> tuple[dict, dict[datetime, NativeAccountState]]:
+    """Read settled cash and share quantities during the same native run."""
+    if cutoffs and (
+        through.utcoffset() is None
+        or any(at.utcoffset() is None for at in cutoffs)
+        or cutoffs != tuple(sorted(set(cutoffs)))
+        or cutoffs[-1] > through
+    ):
+        raise ValueError("Account checkpoints require increasing timezone-aware cutoffs within the horizon")
+    checkpoints = _Checkpoints(cutoffs) if cutoffs else None
+    result = _run_replay(replay, through=through, checkpoints=checkpoints)
+    return result, checkpoints.accounts if checkpoints is not None else {}
+
+
+def replay_nav_series(
+    replay: Replay,
+    cutoffs: tuple[datetime, ...],
+    *,
+    strategy_factory: Callable[
+        [dict[str, Equity], tuple[Order, ...], _SplitUnits], _ReplayStrategy
+    ] = _ReplayStrategy,
+    strategy_data: tuple[list[CustomData], ClientId] | None = None,
+) -> dict[datetime, NativeNav]:
+    if not cutoffs:
+        return {}
+    if any(at.utcoffset() is None for at in cutoffs) or cutoffs != tuple(sorted(set(cutoffs))):
+        raise ValueError("NAV checkpoints require strictly increasing timezone-aware cutoffs")
+    prefix = replay_prefix(replay, cutoffs[-1])
+    if not prefix.quotes:
+        cash = NativeNav(_usd(Decimal(replay.starting_cash_usd)), frozenset())
+        return dict.fromkeys(cutoffs, cash)
+    checkpoints = _Checkpoints(cutoffs, include_nav=True)
+    _run_replay(
+        prefix, through=cutoffs[-1], strategy_factory=strategy_factory,
+        strategy_data=strategy_data, checkpoints=checkpoints,
+    )
+    return checkpoints.nav
 
 
 def _run_replay(
@@ -562,6 +704,7 @@ def _run_replay(
         [dict[str, Equity], tuple[Order, ...], _SplitUnits], _ReplayStrategy
     ] = _ReplayStrategy,
     strategy_data: tuple[list[CustomData], ClientId] | None = None,
+    checkpoints: _Checkpoints | None = None,
 ) -> dict:
     venue = Venue("PAPER")
     starting_cash = Decimal(replay.starting_cash_usd)
@@ -597,6 +740,7 @@ def _run_replay(
     eligible_quotes = [
         quote for quote in session_quotes if units.quote_is_current(quote, quote.available_at)
     ]
+    bid_marks = _BidMarks(eligible_quotes)
     ticks = []
     for quote in eligible_quotes:
         factor = units.factor_at(quote.symbol, quote.observed_at)
@@ -625,21 +769,32 @@ def _run_replay(
         for instrument in instruments.values():
             engine.add_instrument(instrument)
         if boundaries:
-            # Stable sort by availability gives corporate boundaries priority over
-            # equal-time quotes. No artificial quote or trade advances the clock.
-            engine.add_data(boundaries, client_id=ClientId("CORPORATE-ACTIONS"))
+            engine.add_data(boundaries, client_id=ClientId("CORPORATE-ACTIONS"), sort=False)
         if ticks:
-            engine.add_data(ticks)
+            engine.add_data(ticks, sort=False)
         if strategy_data is not None:
             data, client_id = strategy_data
-            # A phase may use quotes available exactly at its cutoff. Their
-            # ticks precede equal-time strategy data in the stable sort.
-            engine.add_data(data, client_id=client_id)
+            engine.add_data(data, client_id=client_id, sort=False)
+        if checkpoints is not None:
+            engine.add_data(
+                [CustomData(_CHECKPOINT_TYPE, _CheckpointBoundary(at)) for at in checkpoints.cutoffs],
+                client_id=_CHECKPOINT_CLIENT,
+                sort=False,
+            )
+            engine.add_actor(_CheckpointObserver(venue, bid_marks, units, checkpoints))
         engine.add_strategy(strategy)
-        if ticks or boundaries or strategy_data is not None:
+        has_data = bool(ticks or boundaries or strategy_data is not None or checkpoints is not None)
+        if has_data:
+            # At equal timestamps the stable sort preserves insertion order:
+            # corporate actions, quotes, strategy phases, then checkpoints.
+            engine.sort_data()
             engine.run()
         if actions.timeline:
             raise RuntimeError("Nautilus did not settle all corporate action boundaries")
+        if checkpoints is not None:
+            observations = checkpoints.nav if checkpoints.include_nav else checkpoints.accounts
+            if tuple(observations) != checkpoints.cutoffs:
+                raise RuntimeError("Nautilus did not settle all replay checkpoints")
         booked_units = defaultdict(int)
         for fill in strategy.fills:
             booked_units[fill["intent_id"]] += int(fill["quantity"])
@@ -657,27 +812,13 @@ def _run_replay(
 
         cash = (
             engine.portfolio.account(venue).balance_total(USD).as_decimal()
-            if ticks or boundaries or strategy_data is not None
+            if has_data
             else starting_cash
         )
-        positions = {
-            position.instrument_id.symbol.value: position.quantity.as_decimal()
-            for position in engine.cache.positions_open()
-        }
-        marks = {
-            quote.symbol: quote
-            for quote in sorted(eligible_quotes, key=lambda item: item.observed_at)
-        }
-        nav = cash
-        for symbol, quantity in positions.items():
-            mark = marks[symbol]
-            nav += quantity * _scaled_usd(
-                Decimal(mark.bid_usd), units.factor_at(symbol, mark.observed_at)
-            )
-        raw_positions = {
-            symbol: str(_whole_shares(Fraction(quantity) * units.factor_at(symbol, horizon)))
-            for symbol, quantity in positions.items()
-        }
+        positions = _open_positions(engine.cache)
+        marks = bid_marks.through(horizon)
+        nav = _bid_nav(cash, positions, marks, units)
+        raw_positions = _raw_positions(positions, units, horizon)
         commissions = sum((Decimal(fill["commission_usd"]) for fill in strategy.fills), Decimal(0))
         result = {
             "schema_version": REPLAY_VERSION,

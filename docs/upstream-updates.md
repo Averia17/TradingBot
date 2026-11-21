@@ -12,7 +12,7 @@ services/research/                  Python research service
     tradingagents.py               imports/config/context/graph/report boundary
   tradingbot/contracts.py           наш стабильный JSON contract и проверки
   tradingbot/research.py            общий portfolio arbitration
-  tradingbot/evaluation.py          отдельная граница Nautilus engine
+  tradingbot/nautilus_probe.py      отдельная граница Nautilus engine
   tests/                           offline contract/integration/update tests
   scripts/upstream.py               clone / verify / check / tested update
   upstream.lock.json               проверенные upstream tag + SHA
@@ -159,25 +159,35 @@ Offline green не доказывает provider availability, качество 
 отдельными этапами исходного плана.
 
 Оба компонента обновляются независимо. В частности, миграция Nautilus v1→v2
-может потребовать адаптации `evaluation.py`, окружения и данных; одной смены
+может потребовать адаптации `nautilus_probe.py`, окружения и данных; одной смены
 тега недостаточно. Текущая проверка native engine должна оставаться зелёной.
 
 ## Автоматическая проверка свежести
 
-`.github/workflows/quality.yml` проверяет pull request/push на Ubuntu и Windows.
-`.github/workflows/upstream-compatibility.yml` ежедневно и по ручному запуску
-тестирует latest stable TradingAgents в одноразовом CI окружении и сохраняет
-проверенные candidate lock-файлы. CI не изменяет ветки и не разворачивает бота.
-Локальное продвижение выполняется командой updater выше.
+[Quality](../.github/workflows/quality.yml) проверяет Python-зависимости, lint,
+тесты и сборку на Ubuntu и Windows при push и pull request. На Linux он также
+проверяет четыре Go-модуля, в том числе гонки данных и сценарии с PostgreSQL 17.
+Compose smoke проверяет отказ при неподдерживаемой версии результата, замену и
+откат воркера, сохранение заданий и запуск отдельного evaluation-контейнера.
+[Сценарий smoke](../deploy/research/smoke.py).
 
-История ежедневных проверок доступна в [GitHub Actions](https://github.com/Averia17/TradingBot/actions/workflows/upstream-compatibility.yml).
-GitHub запускает расписание для default branch с включёнными Actions.
-Состав проверок описан в [инструкции CI](../.github/README.md).
+[Проверка совместимости](../.github/workflows/upstream-compatibility.yml)
+запускается ежедневно на default branch и вручную. Один job выбирает тег и SHA
+последнего стабильного TradingAgents, оба окружения проверяют этот SHA.
+При успехе workflow сохраняет candidate locks, `pyproject.toml` и журнал
+обновления. Оба workflow используют `contents: read`. Версия в репозитории
+меняется локальным updater. [История запусков](https://github.com/Averia17/TradingBot/actions).
+
+Внешние Actions закреплены по commit. Dependabot еженедельно предлагает
+обновления, которые проходят Quality. На 14.11.2026 проверены
+[checkout v7.0.1](https://github.com/actions/checkout/releases/tag/v7.0.1),
+[setup-go v7.0.0](https://github.com/actions/setup-go/releases/tag/v7.0.0),
+[setup-uv v10.3.3](https://github.com/astral-sh/setup-uv/releases/tag/v10.3.3),
+[upload-artifact v7.0.2](https://github.com/actions/upload-artifact/releases/tag/v7.0.2).
 
 Целевая service architecture и отдельные runtime artifacts описаны в
 [architecture](architecture.md). Текущий updater обслуживает dev/build checkout;
-переход к независимым research/evaluation locks и deployment описан в
-[service migration](planning/service-migration.md).
+этапы упаковки и развёртывания описаны в [service migration](planning/service-migration.md).
 
 Полный upstream suite запускается в Linux CI, а наш adapter suite — на Linux
 и Windows. В TradingAgents v0.7.1 upstream исправил предположение теста,

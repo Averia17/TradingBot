@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math/big"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -74,7 +73,7 @@ func (s *Store) resolve(ctx context.Context, r ResolutionRequest, proof *reconci
 		if !bytes.Equal(priorHash, hash[:]) || priorKind != "paper_order."+r.Outcome {
 			return Order{}, false, ErrConflict
 		}
-		prior, _, err := readOrderAt(ctx, tx, r.AccountID, r.OrderID, priorVersion, r.Outcome)
+		prior, _, err := readOrderAtVersion(ctx, tx, r.AccountID, r.OrderID, priorVersion, r.Outcome)
 		return prior, false, err
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
@@ -85,24 +84,27 @@ func (s *Store) resolve(ctx context.Context, r ResolutionRequest, proof *reconci
 			return Order{}, false, err
 		}
 	}
-	if order.Status == "filled" || order.Status == "cancelled" || (order.Status == "unknown" && r.Outcome == "unknown") {
-		return Order{}, false, ErrConflict
-	}
-	remainingFee := remainingFeeBudget(order)
-	if remainingFee.Sign() < 0 {
-		return Order{}, false, errors.New("stored paper fills exceed their fee allocation")
-	}
+	var fill *Fill
 	if r.isFill() {
-		// Keep the original payload and hash for legacy full-fill retries.
-		if r.QuantityRaw == "" {
-			r.QuantityRaw = order.RemainingQuantityRaw
+		quantity := r.QuantityRaw
+		if quantity == "" {
+			quantity = order.RemainingQuantityRaw
 		}
-		if err := validateFill(ctx, tx, order, r, remainingFee); err != nil {
+		// The fill carries the inferred quantity. The hashed request still
+		// has the original quantity field for legacy full-fill retries.
+		fill = &Fill{EventID: r.EventID, QuantityRaw: quantity, GrossUSD: r.GrossUSD, FeeUSD: r.FeeUSD, ObservedAt: r.ObservedAt}
+	}
+	next, change, err := restoreOrderAccounting(order).resolve(r.Outcome, fill)
+	if err != nil {
+		return Order{}, false, err
+	}
+	if fill != nil {
+		if err := validateObservedFill(ctx, tx, order, *fill); err != nil {
 			return Order{}, false, err
 		}
 	}
-	if r.Outcome != "unknown" {
-		if err := resolveFunds(ctx, tx, order, r, remainingFee); err != nil {
+	if next.status != "unknown" {
+		if err := writeSettlement(ctx, tx, next, change); err != nil {
 			return Order{}, false, err
 		}
 	}
@@ -110,22 +112,18 @@ func (s *Store) resolve(ctx context.Context, r ResolutionRequest, proof *reconci
 	if err := writeEvent(ctx, tx, r.AccountID, r.EventID, order.AccountVersion, "paper_order."+r.Outcome, hash[:], payload); err != nil {
 		return Order{}, false, err
 	}
-	order.Status = r.Outcome
+	order.Status = next.status
 	var analyticsFill *accountAnalyticsFill
-	if r.isFill() {
-		fill, err := writeFill(ctx, tx, r)
-		if err != nil {
+	if fill != nil {
+		if err := writeFill(ctx, tx, order, fill); err != nil {
 			return Order{}, false, err
 		}
-		if err := writeFillOutbox(ctx, tx, order, fill); err != nil {
+		if err := writeFillOutbox(ctx, tx, order, *fill); err != nil {
 			return Order{}, false, err
 		}
-		booked := accountFill(order, fill)
+		booked := accountFill(order.ReservationRequest, *fill)
 		analyticsFill = &booked
-		order.Fills = append(order.Fills, fill)
-		if err := order.summarizeFills(); err != nil {
-			return Order{}, false, err
-		}
+		order.appendSettledFill(*fill, next.remaining.quantity)
 	}
 	if _, err := tx.Exec(ctx, `UPDATE paper_orders SET status=$3, account_version=$4 WHERE account_id=$1 AND order_id=$2`,
 		r.AccountID, r.OrderID, order.Status, order.AccountVersion); err != nil {
@@ -143,94 +141,46 @@ func (s *Store) resolve(ctx context.Context, r ResolutionRequest, proof *reconci
 	return order, true, nil
 }
 
-func remainingFeeBudget(order Order) *big.Rat {
-	remaining := amount(order.MaxFeeUSD)
-	for _, fill := range order.Fills {
-		remaining.Sub(remaining, amount(fill.FeeUSD))
-	}
-	return remaining
-}
-
-func proportionalGross(order Order, quantity *big.Int) *big.Rat {
-	ratio := new(big.Rat).SetFrac(quantity, rawUnits(order.QuantityRaw))
-	return ratio.Mul(ratio, amount(order.GrossUSD))
-}
-
-func validateFill(ctx context.Context, tx pgx.Tx, order Order, r ResolutionRequest, remainingFee *big.Rat) error {
-	quantity := rawUnits(r.QuantityRaw)
-	comparison := quantity.Cmp(rawUnits(order.RemainingQuantityRaw))
-	if quantity.Sign() <= 0 || (r.Outcome == "filled" && comparison != 0) || (r.Outcome == "partially_filled" && comparison >= 0) {
-		return ErrInvalid
-	}
-	fee, gross := amount(r.FeeUSD), amount(r.GrossUSD)
-	priceComparison := gross.Cmp(proportionalGross(order, quantity))
-	if fee.Cmp(remainingFee) > 0 || (order.Side == "BUY" && priceComparison > 0) ||
-		(order.Side == "SELL" && (priceComparison < 0 || fee.Cmp(gross) > 0)) {
+func validateObservedFill(ctx context.Context, tx pgx.Tx, order Order, fill Fill) error {
+	priceComparison := amount(fill.GrossUSD).Cmp(proportionalGross(order.ReservationRequest, rawUnits(fill.QuantityRaw)))
+	if (order.Side == "BUY" && priceComparison > 0) || (order.Side == "SELL" && priceComparison < 0) {
 		return ErrInvalid
 	}
 	var now time.Time
 	if err := tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&now); err != nil {
 		return fmt.Errorf("read paper accounting clock: %w", err)
 	}
-	if r.ObservedAt.Before(order.CreatedAt) || r.ObservedAt.After(now) || !r.ObservedAt.Before(order.ExpiresAt) {
+	if fill.ObservedAt.Before(order.CreatedAt) || fill.ObservedAt.After(now) || !fill.ObservedAt.Before(order.ExpiresAt) {
 		return ErrInvalid
 	}
 	return nil
 }
 
-func buyReservation(order Order, quantity *big.Int, fee *big.Rat) *big.Rat {
-	// Round the unsettled gross limit up to the next scale-8 unit. Preserve
-	// enough cash for the entire remaining quantity at the authorized limit.
-	scale := big.NewInt(100_000_000)
-	gross := proportionalGross(order, quantity)
-	numerator := new(big.Int).Mul(gross.Num(), scale)
-	units, remainder := new(big.Int), new(big.Int)
-	units.QuoRem(numerator, gross.Denom(), remainder)
-	if remainder.Sign() != 0 {
-		units.Add(units, big.NewInt(1))
-	}
-	rounded := new(big.Rat).SetFrac(units, scale)
-	return rounded.Add(rounded, fee)
-}
-
-func resolveFunds(ctx context.Context, tx pgx.Tx, order Order, r ResolutionRequest, remainingFee *big.Rat) error {
-	if r.Outcome == "cancelled" {
-		r.QuantityRaw, r.GrossUSD, r.FeeUSD = "0", "0", "0"
-	}
+func writeSettlement(ctx context.Context, tx pgx.Tx, next orderAccounting, change balanceChange) error {
+	order := next.request
 	if order.Side == "BUY" {
-		remaining := rawUnits(order.RemainingQuantityRaw)
-		released := buyReservation(order, remaining, remainingFee)
-		if r.Outcome == "partially_filled" {
-			remaining.Sub(remaining, rawUnits(r.QuantityRaw))
-			remainingFee = new(big.Rat).Sub(remainingFee, amount(r.FeeUSD))
-			released.Sub(released, buyReservation(order, remaining, remainingFee))
-		}
 		if err := updateOne(ctx, tx, `UPDATE paper_accounts SET
-			reserved_cash_usd=reserved_cash_usd-$2::text::numeric,
-			cash_usd=cash_usd-$3::text::numeric-$4::text::numeric WHERE account_id=$1`,
-			r.AccountID, released.FloatString(8), r.GrossUSD, r.FeeUSD); err != nil {
+			reserved_cash_usd=reserved_cash_usd+$2::text::numeric,
+			cash_usd=cash_usd+$3::text::numeric WHERE account_id=$1`,
+			order.AccountID, change.reservedCash.FloatString(8), change.cash.FloatString(8)); err != nil {
 			return err
 		}
-		if r.Outcome == "cancelled" {
+		if next.status == "cancelled" {
 			return nil
 		}
 		return updateOne(ctx, tx, `INSERT INTO paper_positions (account_id, instrument_id, registry_version, decimals, quantity_raw)
 			VALUES ($1,$2,$3,$4,$5::text::numeric) ON CONFLICT (account_id,instrument_id) DO UPDATE
 			SET quantity_raw=paper_positions.quantity_raw+EXCLUDED.quantity_raw
 			WHERE paper_positions.registry_version=EXCLUDED.registry_version AND paper_positions.decimals=EXCLUDED.decimals`,
-			r.AccountID, order.Instrument.ID, order.Instrument.RegistryVersion, order.Instrument.Decimals, r.QuantityRaw)
+			order.AccountID, order.Instrument.ID, order.Instrument.RegistryVersion, order.Instrument.Decimals, change.quantity.String())
 	}
-	unitsReleased := order.RemainingQuantityRaw
-	if r.Outcome == "partially_filled" {
-		unitsReleased = r.QuantityRaw
-	}
-	if err := updateOne(ctx, tx, `UPDATE paper_positions SET reserved_quantity_raw=reserved_quantity_raw-$3::text::numeric,
-		quantity_raw=quantity_raw-$4::text::numeric WHERE account_id=$1 AND instrument_id=$2`,
-		r.AccountID, order.Instrument.ID, unitsReleased, r.QuantityRaw); err != nil {
+	if err := updateOne(ctx, tx, `UPDATE paper_positions SET reserved_quantity_raw=reserved_quantity_raw+$3::text::numeric,
+		quantity_raw=quantity_raw+$4::text::numeric WHERE account_id=$1 AND instrument_id=$2`,
+		order.AccountID, order.Instrument.ID, change.reservedQuantity.String(), change.quantity.String()); err != nil {
 		return err
 	}
-	return updateOne(ctx, tx, `UPDATE paper_accounts SET cash_usd=cash_usd+$2::text::numeric-$3::text::numeric WHERE account_id=$1`,
-		r.AccountID, r.GrossUSD, r.FeeUSD)
+	return updateOne(ctx, tx, `UPDATE paper_accounts SET cash_usd=cash_usd+$2::text::numeric WHERE account_id=$1`,
+		order.AccountID, change.cash.FloatString(8))
 }
 
 func updateOne(ctx context.Context, tx pgx.Tx, query string, args ...any) error {
@@ -244,16 +194,15 @@ func updateOne(ctx context.Context, tx pgx.Tx, query string, args ...any) error 
 	return nil
 }
 
-func writeFill(ctx context.Context, tx pgx.Tx, r ResolutionRequest) (Fill, error) {
-	fill := Fill{EventID: r.EventID, QuantityRaw: r.QuantityRaw, ObservedAt: r.ObservedAt}
+func writeFill(ctx context.Context, tx pgx.Tx, order Order, fill *Fill) error {
 	err := tx.QueryRow(ctx, `INSERT INTO paper_fills (account_id,order_id,event_id,gross_usd,fee_usd,observed_at,quantity_raw)
 		VALUES ($1,$2,$3,$4::text::numeric,$5::text::numeric,$6,$7::text::numeric)
 		RETURNING trim_scale(gross_usd)::text, trim_scale(fee_usd)::text`,
-		r.AccountID, r.OrderID, r.EventID, r.GrossUSD, r.FeeUSD, r.ObservedAt, r.QuantityRaw).Scan(&fill.GrossUSD, &fill.FeeUSD)
+		order.AccountID, order.OrderID, fill.EventID, fill.GrossUSD, fill.FeeUSD, fill.ObservedAt, fill.QuantityRaw).Scan(&fill.GrossUSD, &fill.FeeUSD)
 	if err != nil {
-		return Fill{}, fmt.Errorf("store paper fill: %w", err)
+		return fmt.Errorf("store paper fill: %w", err)
 	}
-	return fill, nil
+	return nil
 }
 
 type Event struct {

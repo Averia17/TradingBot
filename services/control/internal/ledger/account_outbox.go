@@ -22,6 +22,9 @@ type accountAnalyticsEvent struct {
 	Fill            *accountAnalyticsFill `json:"fill,omitempty"`
 }
 
+const insertAccountOutboxSQL = `INSERT INTO paper_account_outbox
+	(account_id, account_version, event_id, payload, created_at) VALUES ($1,$2,$3,$4,$5)`
+
 type accountAnalyticsFill struct {
 	Side          string    `json:"side"`
 	QuantityRaw   string    `json:"quantity_raw"`
@@ -34,7 +37,7 @@ type accountAnalyticsFill struct {
 	ResearchJobID string    `json:"research_job_id,omitempty"`
 }
 
-func accountFill(order Order, fill Fill) accountAnalyticsFill {
+func accountFill(order ReservationRequest, fill Fill) accountAnalyticsFill {
 	return accountAnalyticsFill{
 		Side: order.Side, QuantityRaw: fill.QuantityRaw, GrossUSD: fill.GrossUSD, FeeUSD: fill.FeeUSD,
 		ObservedAt: fill.ObservedAt.UTC(), OrderID: order.OrderID, DecisionID: order.DecisionID,
@@ -48,21 +51,23 @@ func captureAccountOutbox(ctx context.Context, tx pgx.Tx, accountID, eventID str
 	event := accountAnalyticsEvent{
 		Version: "1.0", AccountID: accountID, EventID: eventID, AccountVersion: version, Fill: fill,
 	}
-	err := tx.QueryRow(ctx, `SELECT e.kind, e.recorded_at, trim_scale(a.cash_usd)::text, trim_scale(a.reserved_cash_usd)::text
+	var position Position
+	if instrument != nil {
+		position.Instrument = *instrument
+	}
+	err := tx.QueryRow(ctx, `SELECT e.kind, e.recorded_at, trim_scale(a.cash_usd)::text, trim_scale(a.reserved_cash_usd)::text,
+		COALESCE(p.quantity_raw::text,''), COALESCE(p.reserved_quantity_raw::text,'')
 		FROM paper_accounts a JOIN paper_events e ON e.account_id=a.account_id AND e.account_version=a.version
-		WHERE a.account_id=$1 AND e.event_id=$2 AND a.version=$3`, accountID, eventID, version).
-		Scan(&event.Kind, &event.RecordedAt, &event.CashUSD, &event.ReservedCashUSD)
+		LEFT JOIN paper_positions p ON p.account_id=a.account_id AND p.instrument_id=$4 AND p.registry_version=$5 AND p.decimals=$6
+		WHERE a.account_id=$1 AND e.event_id=$2 AND a.version=$3`, accountID, eventID, version,
+		position.ID, position.RegistryVersion, position.Decimals).
+		Scan(&event.Kind, &event.RecordedAt, &event.CashUSD, &event.ReservedCashUSD, &position.QuantityRaw, &position.ReservedQuantityRaw)
 	if err != nil {
 		return fmt.Errorf("capture paper account version %d: %w", version, err)
 	}
 	if instrument != nil {
-		position := Position{Instrument: *instrument}
-		err := tx.QueryRow(ctx, `SELECT quantity_raw::text, reserved_quantity_raw::text FROM paper_positions
-			WHERE account_id=$1 AND instrument_id=$2 AND registry_version=$3 AND decimals=$4`,
-			accountID, instrument.ID, instrument.RegistryVersion, instrument.Decimals).
-			Scan(&position.QuantityRaw, &position.ReservedQuantityRaw)
-		if err != nil {
-			return fmt.Errorf("capture paper position version %d: %w", version, err)
+		if position.QuantityRaw == "" || position.ReservedQuantityRaw == "" {
+			return fmt.Errorf("capture paper position version %d: %w", version, pgx.ErrNoRows)
 		}
 		event.Position = &position
 	}
@@ -70,16 +75,23 @@ func captureAccountOutbox(ctx context.Context, tx pgx.Tx, accountID, eventID str
 }
 
 func writeAccountOutbox(ctx context.Context, tx pgx.Tx, event accountAnalyticsEvent) error {
-	event.RecordedAt = event.RecordedAt.UTC()
-	payload, err := json.Marshal(event)
+	payload, err := encodeAccountOutboxEvent(event)
 	if err != nil {
-		return fmt.Errorf("encode paper account analytics event: %w", err)
+		return err
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO paper_account_outbox
-		(account_id, account_version, event_id, payload, created_at) VALUES ($1,$2,$3,$4,$5)`,
+	_, err = tx.Exec(ctx, insertAccountOutboxSQL,
 		event.AccountID, event.AccountVersion, event.EventID, payload, event.RecordedAt)
 	if err != nil {
 		return fmt.Errorf("enqueue paper account analytics version %d: %w", event.AccountVersion, err)
 	}
 	return nil
+}
+
+func encodeAccountOutboxEvent(event accountAnalyticsEvent) ([]byte, error) {
+	event.RecordedAt = event.RecordedAt.UTC()
+	payload, err := json.Marshal(event)
+	if err != nil {
+		return nil, fmt.Errorf("encode paper account analytics event: %w", err)
+	}
+	return payload, nil
 }

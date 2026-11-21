@@ -77,15 +77,7 @@ func (e paperAccountEvent) taskKey() string {
 	return e.AccountID + ":" + strconv.FormatInt(e.AccountVersion, 10)
 }
 
-var publishPaperAccountJob = pgqueue.JobSpec[paperAccountTask]{
-	Queue:          paperAccountQueue,
-	HashFn:         func(task paperAccountTask) *string { return &task.Key },
-	PollInterval:   publishJob.PollInterval,
-	MaxRetries:     publishJob.MaxRetries,
-	RetryDelay:     publishJob.RetryDelay,
-	LeaseDuration:  publishJob.LeaseDuration,
-	FinalizeBuffer: publishJob.FinalizeBuffer,
-}
+var publishPaperAccountJob = publishJobSpec[paperAccountTask](paperAccountQueue)
 
 func (o *Outbox) RelayPaperAccounts(ctx context.Context, producer *kgo.Client, headInterval time.Duration) error {
 	if headInterval <= 0 {
@@ -115,42 +107,42 @@ func (o *Outbox) RelayPaperAccounts(ctx context.Context, producer *kgo.Client, h
 }
 
 func (o *Outbox) queueOnePaperAccount(ctx context.Context) (bool, error) {
-	var moved bool
-	err := pgx.BeginTxFunc(ctx, o.db.Conn, pgx.TxOptions{}, func(tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx, `SET LOCAL synchronous_commit='on'`); err != nil {
-			return fmt.Errorf("configure durable paper account handoff: %w", err)
-		}
-		var accountID, eventID string
-		var version int64
-		var payload []byte
-		err := tx.QueryRow(ctx, `SELECT account_id::text,account_version,event_id::text,payload FROM paper_account_outbox
-			WHERE queued_at IS NULL ORDER BY created_at,account_id,account_version
-			LIMIT 1 FOR UPDATE SKIP LOCKED`).Scan(&accountID, &version, &eventID, &payload)
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil
-		}
-		if err != nil {
-			return fmt.Errorf("select pending paper account event: %w", err)
-		}
-		event, err := decodePaperAccountEvent(payload)
-		if err != nil || event.AccountID != accountID || event.AccountVersion != version || event.EventID != eventID {
-			return fmt.Errorf("invalid paper account outbox event for account %s version %d", accountID, version)
-		}
-		task := paperAccountTask{Key: event.taskKey(), Payload: payload}
-		if _, err := enqueueExact(ctx, o.queue, tx, publishPaperAccountJob, task); err != nil {
-			return err
-		}
-		mark, err := tx.Exec(ctx, `UPDATE paper_account_outbox SET queued_at=clock_timestamp() WHERE account_id=$1 AND account_version=$2`, accountID, version)
-		if err != nil {
-			return fmt.Errorf("mark paper account event queued: %w", err)
-		}
-		if mark.RowsAffected() != 1 {
-			return errors.New("paper account handoff did not update exactly one outbox row")
-		}
-		moved = true
-		return nil
-	})
-	return moved && err == nil, err
+	return o.handoff(ctx, "paper account", o.movePaperAccountEvent)
+}
+
+func (o *Outbox) movePaperAccountEvent(ctx context.Context, tx pgx.Tx) (bool, error) {
+	var accountID, eventID string
+	var version int64
+	var payload []byte
+	err := tx.QueryRow(ctx, `SELECT account_id::text,account_version,event_id::text,payload FROM paper_account_outbox
+		WHERE queued_at IS NULL ORDER BY created_at,account_id,account_version
+		LIMIT 1 FOR UPDATE SKIP LOCKED`).Scan(&accountID, &version, &eventID, &payload)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("select pending paper account event: %w", err)
+	}
+	event, err := decodePaperAccountEvent(payload)
+	if err != nil || event.AccountID != accountID || event.AccountVersion != version || event.EventID != eventID {
+		return false, fmt.Errorf("invalid paper account outbox event for account %s version %d", accountID, version)
+	}
+	task := paperAccountTask{Key: event.taskKey(), Payload: payload}
+	queuedPayload, err := json.Marshal(task)
+	if err != nil {
+		return false, fmt.Errorf("encode paper account outbox task: %w", err)
+	}
+	if _, err := enqueueExactTask(ctx, tx, paperAccountQueue, task.Key, queuedPayload); err != nil {
+		return false, err
+	}
+	mark, err := tx.Exec(ctx, `UPDATE paper_account_outbox SET queued_at=clock_timestamp() WHERE account_id=$1 AND account_version=$2`, accountID, version)
+	if err != nil {
+		return false, fmt.Errorf("mark paper account event queued: %w", err)
+	}
+	if mark.RowsAffected() != 1 {
+		return false, errors.New("paper account handoff did not update exactly one outbox row")
+	}
+	return true, nil
 }
 
 type paperAccountRelay struct{ relay }
@@ -160,5 +152,5 @@ func (r *paperAccountRelay) RunTask(ctx context.Context, job *pgqueue.Job[paperA
 	if err != nil || job.Payload.Key != event.taskKey() {
 		return pgqueue.Fail(errors.New("invalid queued paper account event"))
 	}
-	return r.publishKeyed(ctx, job.Task.ID, event.EventID, event.AccountID, job.Payload.Payload)
+	return r.publish(ctx, job.Task.ID, event.EventID, event.AccountID, job.Payload.Payload)
 }

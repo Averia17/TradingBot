@@ -6,6 +6,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
 from fractions import Fraction
+from functools import partial
 from typing import Annotated
 
 import msgspec
@@ -13,6 +14,7 @@ from nautilus_trader.model.currencies import USD
 
 from tradingbot_evaluation.replay import (
     EPOCH,
+    NativeNav,
     Order,
     Replay,
     _nanoseconds,
@@ -20,6 +22,7 @@ from tradingbot_evaluation.replay import (
     _run_replay,
     _scaled_usd,
     _whole_shares,
+    replay_nav_series,
 )
 
 MAX_LOOKBACK_QUOTES = 252
@@ -148,9 +151,34 @@ class _TrendStrategy(_ReplayStrategy):
                     self.statuses[order.intent_id] = "expired"
 
 
+def _trend_replay(replay: Replay, symbol: str) -> Replay:
+    return msgspec.structs.replace(
+        replay,
+        quotes=tuple(quote for quote in replay.quotes if quote.symbol == symbol),
+        orders=(),
+        cash_dividends=tuple(action for action in replay.cash_dividends if action.symbol == symbol),
+        stock_splits=tuple(action for action in replay.stock_splits if action.symbol == symbol),
+    )
+
+
+def _trend_strategy(replay: Replay, config: TrendConfig, start_at: datetime):
+    return partial(
+        _TrendStrategy, config=config, start_at=start_at, commission_bps=replay.commission_bps,
+    )
+
+
+def trend_nav(
+    replay: Replay, cutoffs: tuple[datetime, ...], *, config: TrendConfig, start_at: datetime,
+) -> dict[datetime, NativeNav]:
+    return replay_nav_series(
+        _trend_replay(replay, config.symbol), cutoffs,
+        strategy_factory=_trend_strategy(replay, config, start_at),
+    )
+
+
 def run_trend(replay: Replay, *, config: TrendConfig, start_at: datetime, end_at: datetime) -> dict:
-    quotes = tuple(quote for quote in replay.quotes if quote.symbol == config.symbol)
-    if not quotes:
+    fixture = _trend_replay(replay, config.symbol)
+    if not fixture.quotes:
         cash = format(Decimal(replay.starting_cash_usd), ".2f")
         return {
             "parameters": asdict(config),
@@ -172,31 +200,16 @@ def run_trend(replay: Replay, *, config: TrendConfig, start_at: datetime, end_at
             "mark_is_stale": True,
         }
 
+    make_strategy = _trend_strategy(replay, config, start_at)
+
     def strategy_factory(instruments, orders, units):
         nonlocal strategy
-        strategy = _TrendStrategy(
-            instruments,
-            orders,
-            units,
-            config=config,
-            start_at=start_at,
-            commission_bps=replay.commission_bps,
-        )
+        strategy = make_strategy(instruments, orders, units)
         return strategy
 
     strategy = None
     result = _run_replay(
-        msgspec.structs.replace(
-            replay,
-            quotes=quotes,
-            orders=(),
-            cash_dividends=tuple(
-                action for action in replay.cash_dividends if action.symbol == config.symbol
-            ),
-            stock_splits=tuple(
-                action for action in replay.stock_splits if action.symbol == config.symbol
-            ),
-        ),
+        fixture,
         through=end_at,
         strategy_factory=strategy_factory,
     )

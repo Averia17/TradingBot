@@ -137,6 +137,15 @@ def test_native_replay_keeps_reused_ticker_quotes_splits_and_positions_separate(
     assert report["ending_cash_usd"] == "906.00"
 
 
+def test_bound_replay_rejects_quote_time_that_would_round_into_the_cutoff():
+    jobs, wrapped, registry = identity_inputs()
+    first = wrapped["replay"]["quotes"][0]
+    first["available_at"] = first["available_at"].replace("Z", ".000000001Z")
+
+    with pytest.raises(ValueError, match="microsecond precision"):
+        replay_identity(jobs, wrapped, registry)
+
+
 def test_bound_replay_requires_verified_owner_registry_and_exact_tuple():
     jobs, wrapped, registry = identity_inputs()
     with pytest.raises(ValueError, match="identity registry"):

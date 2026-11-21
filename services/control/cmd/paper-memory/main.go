@@ -19,8 +19,8 @@ import (
 
 	"tradingbot/control/internal/contract"
 	"tradingbot/control/internal/ledger"
-	"tradingbot/control/internal/papermemory"
-	"tradingbot/control/internal/paperrisk"
+	"tradingbot/control/internal/paper_memory"
+	"tradingbot/control/internal/paper_risk"
 )
 
 var archiveName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
@@ -70,11 +70,11 @@ func run(ctx context.Context, dsn string, args []string, output io.Writer) error
 	if err != nil {
 		return fmt.Errorf("read paper policy: %w", err)
 	}
-	var policy paperrisk.Policy
+	var policy paper_risk.Policy
 	if err := contract.Decode(rawPolicy, contract.PaperRiskPolicy, &policy); err != nil {
 		return errors.New("invalid paper policy document")
 	}
-	raw, err := readFile(*inputPath, papermemory.MaxArchiveBytes)
+	raw, err := readFile(*inputPath, paper_memory.MaxArchiveBytes)
 	if err != nil {
 		return fmt.Errorf("read market archive: %w", err)
 	}
@@ -82,7 +82,7 @@ func run(ctx context.Context, dsn string, args []string, output io.Writer) error
 	if *durable {
 		err = ledger.WithReadSnapshot(ctx, dsn, func(snapshot ledger.ReadSnapshot) error {
 			var err error
-			archive, err = papermemory.ExportArchiveWithLessons(ctx, snapshot, *account, asOf, policy, raw, *inputDigest)
+			archive, err = paper_memory.ExportArchiveWithLessons(ctx, snapshot, *account, asOf, policy, raw, *inputDigest)
 			return err
 		})
 	} else {
@@ -91,7 +91,7 @@ func run(ctx context.Context, dsn string, args []string, output io.Writer) error
 			return errors.New("paper ledger startup failed")
 		}
 		defer store.Close()
-		archive, err = papermemory.ExportArchive(ctx, store, *account, asOf, policy, raw, *inputDigest)
+		archive, err = paper_memory.ExportArchive(ctx, store, *account, asOf, policy, raw, *inputDigest)
 	}
 	if err != nil {
 		return err

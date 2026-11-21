@@ -76,33 +76,41 @@ func (s *Store) account(ctx context.Context, event AccountEvent) error {
 			return err
 		}
 		var seen int64
-		state := newState()
 		var data []byte
 		if err := tx.QueryRow(ctx, `SELECT seen_version, state FROM analytics_accounts WHERE account_id=$1 FOR UPDATE`,
 			event.AccountID).Scan(&seen, &data); err != nil {
 			return err
 		}
+		state := newState()
 		if len(data) != 0 {
 			if err := json.Unmarshal(data, &state); err != nil {
 				return err
 			}
 		}
-		var prior []byte
-		err := tx.QueryRow(ctx, `SELECT digest FROM analytics_account_events
-			WHERE account_id=$1 AND (account_version=$2 OR event_id=$3) LIMIT 1`,
-			event.AccountID, event.AccountVersion, event.EventID).Scan(&prior)
-		switch {
-		case err == nil && bytes.Equal(prior, hash[:]):
-			return nil
-		case err == nil:
-			return ErrConflict
-		case !errors.Is(err, pgx.ErrNoRows):
+		inserted, err := tx.Exec(ctx, `INSERT INTO analytics_account_events
+			(account_id, account_version, event_id, digest, payload) VALUES ($1,$2,$3,$4,$5)
+			ON CONFLICT DO NOTHING`, event.AccountID, event.AccountVersion, event.EventID, hash[:], body)
+		if err != nil {
 			return err
 		}
-		if _, err := tx.Exec(ctx, `INSERT INTO analytics_account_events
-			(account_id, account_version, event_id, digest, payload) VALUES ($1,$2,$3,$4,$5)`,
-			event.AccountID, event.AccountVersion, event.EventID, hash[:], body); err != nil {
-			return err
+		if inserted.RowsAffected() == 0 {
+			var prior []byte
+			if err := tx.QueryRow(ctx, `SELECT digest FROM analytics_account_events
+				WHERE account_id=$1 AND (account_version=$2 OR event_id=$3) LIMIT 1`,
+				event.AccountID, event.AccountVersion, event.EventID).Scan(&prior); err != nil {
+				return err
+			}
+			if !bytes.Equal(prior, hash[:]) {
+				return ErrConflict
+			}
+			return nil
+		}
+		if event.AccountVersion == state.Version+1 {
+			// The next event is already decoded. Only previously staged successors
+			// need to be read back after closing a gap.
+			if err := state.apply(event); err != nil {
+				return err
+			}
 		}
 		seen = max(seen, event.AccountVersion)
 		if err := applyAvailable(ctx, tx, event.AccountID, &state, seen); err != nil {

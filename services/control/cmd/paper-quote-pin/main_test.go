@@ -22,10 +22,10 @@ import (
 	"tradingbot/control/internal/contract"
 	"tradingbot/control/internal/jobs"
 	"tradingbot/control/internal/ledger"
-	"tradingbot/control/internal/paperapply"
-	"tradingbot/control/internal/paperquotes"
-	"tradingbot/control/internal/paperrisk"
-	"tradingbot/control/internal/papersim"
+	"tradingbot/control/internal/paper_quotes"
+	"tradingbot/control/internal/paper_risk"
+	"tradingbot/control/internal/paper_sim"
+	"tradingbot/control/internal/paper_workflow"
 )
 
 const (
@@ -61,10 +61,10 @@ func TestPublishedTapeAndStrictPostCompletionWindow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := paperquotes.DecodeTape(raw, strings.Repeat("a", 64), testJobID, ""); err == nil {
+	if _, err := paper_quotes.DecodeTape(raw, strings.Repeat("a", 64), testJobID, ""); err == nil {
 		t.Fatal("expected digest mismatch")
 	}
-	tape, err := paperquotes.DecodeTape(raw, sha256Hex(raw), testJobID, "")
+	tape, err := paper_quotes.DecodeTape(raw, sha256Hex(raw), testJobID, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,7 +73,7 @@ func TestPublishedTapeAndStrictPostCompletionWindow(t *testing.T) {
 		t.Fatal(err)
 	}
 	obs := document.Observations[0]
-	quote, err := papersim.ParseQuote(obs.Raw)
+	quote, err := paper_sim.ParseQuote(obs.Raw)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,7 +93,7 @@ func TestPublishedTapeAndStrictPostCompletionWindow(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			_, err := tape.Verify(obs.Raw, test.completion, test.now, test.deadline)
-			if (err == nil) != test.want || err != nil && !errors.Is(err, paperquotes.ErrQuoteUnavailable) {
+			if (err == nil) != test.want || err != nil && !errors.Is(err, paper_quotes.ErrQuoteUnavailable) {
 				t.Fatalf("eligibility error = %v", err)
 			}
 		})
@@ -106,17 +106,17 @@ func TestAccountTapeRejectsWrongHashAndBinding(t *testing.T) {
 		t.Fatal(err)
 	}
 	digest := sha256Hex(raw)
-	tape, err := paperquotes.DecodeTape(raw, digest, "", testAccountID)
+	tape, err := paper_quotes.DecodeTape(raw, digest, "", testAccountID)
 	if err != nil || tape.AccountID() != testAccountID || tape.IdentityRegistrySHA256() != "" {
 		t.Fatalf("account tape = %+v, %v", tape, err)
 	}
-	if _, err := paperquotes.DecodeTape(raw, digest, "", "77777777-7777-4777-8777-777777777777"); err == nil {
+	if _, err := paper_quotes.DecodeTape(raw, digest, "", "77777777-7777-4777-8777-777777777777"); err == nil {
 		t.Fatal("accepted tape for a different account")
 	}
-	if _, err := paperquotes.DecodeTape(raw, digest, testJobID, ""); err == nil {
+	if _, err := paper_quotes.DecodeTape(raw, digest, testJobID, ""); err == nil {
 		t.Fatal("accepted an account tape in single-job mode")
 	}
-	if _, err := paperquotes.DecodeTape(append(raw, '\n'), digest, "", testAccountID); err == nil {
+	if _, err := paper_quotes.DecodeTape(append(raw, '\n'), digest, "", testAccountID); err == nil {
 		t.Fatal("accepted changed archive bytes")
 	}
 	var document quoteTape
@@ -125,7 +125,7 @@ func TestAccountTapeRejectsWrongHashAndBinding(t *testing.T) {
 	}
 	document.JobID = testJobID
 	mixed := testJSON(t, document)
-	if _, err := paperquotes.DecodeTape(mixed, sha256Hex(mixed), testJobID, testAccountID); err == nil {
+	if _, err := paper_quotes.DecodeTape(mixed, sha256Hex(mixed), testJobID, testAccountID); err == nil {
 		t.Fatal("accepted a tape with mixed account and job bindings")
 	}
 }
@@ -135,27 +135,27 @@ func TestIdentityTapeRequiresExactDurableApplicationPins(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tape, err := paperquotes.DecodeTape(raw, sha256Hex(raw), "", testAccountID)
+	tape, err := paper_quotes.DecodeTape(raw, sha256Hex(raw), "", testAccountID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	request := paperapply.Request{
-		SnapshotContext: paperapply.SnapshotContext{AccountID: testAccountID},
-		Identity: &paperapply.IdentityBinding{
-			OwnerIdentity: paperapply.OwnerIdentity{
-				Registry:  paperapply.ArchiveReference{SHA256: tape.IdentityRegistrySHA256()},
-				QuoteTape: paperapply.ArchiveReference{SHA256: tape.SHA256()},
+	request := paper_workflow.Request{
+		SnapshotContext: paper_workflow.SnapshotContext{AccountID: testAccountID},
+		Identity: &paper_workflow.IdentityBinding{
+			OwnerIdentity: paper_workflow.OwnerIdentity{
+				Registry:  paper_workflow.ArchiveReference{SHA256: tape.IdentityRegistrySHA256()},
+				QuoteTape: paper_workflow.ArchiveReference{SHA256: tape.SHA256()},
 			},
 		},
 	}
 	if err := checkTapeBinding(tape, request); err != nil {
 		t.Fatal(err)
 	}
-	for _, alter := range []func(*paperapply.Request){
-		func(r *paperapply.Request) { r.Identity = nil },
-		func(r *paperapply.Request) { r.Identity.Registry.SHA256 = strings.Repeat("0", 64) },
-		func(r *paperapply.Request) { r.Identity.QuoteTape.SHA256 = strings.Repeat("1", 64) },
-		func(r *paperapply.Request) { r.SnapshotContext.AccountID = testJobID },
+	for _, alter := range []func(*paper_workflow.Request){
+		func(r *paper_workflow.Request) { r.Identity = nil },
+		func(r *paper_workflow.Request) { r.Identity.Registry.SHA256 = strings.Repeat("0", 64) },
+		func(r *paper_workflow.Request) { r.Identity.QuoteTape.SHA256 = strings.Repeat("1", 64) },
+		func(r *paper_workflow.Request) { r.SnapshotContext.AccountID = testJobID },
 	} {
 		changed, identity := request, *request.Identity
 		changed.Identity = &identity
@@ -193,20 +193,20 @@ func checkLocalTapeCLI(t *testing.T, accountArchive bool) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	config := paperapply.SnapshotContext{
+	config := paper_workflow.SnapshotContext{
 		AccountID: account.ID, SnapshotVersion: account.Version,
-		Policy: paperrisk.Policy{
+		Policy: paper_risk.Policy{
 			Version: "quote-tape-test", MaxOrderUSD: "120", MinFreeCashUSD: "100",
 			MaxPositionBPS: 2500, MaxGroupBPS: 5000, MaxGrossBPS: 9000, MaxFeeBPS: 30, MaxMarkAgeSeconds: 60,
-			Instruments: []paperrisk.InstrumentRule{{Instrument: instrument, Symbol: "TSLA", Group: "tech"}},
+			Instruments: []paper_risk.InstrumentRule{{Instrument: instrument, Symbol: "TSLA", Group: "tech"}},
 		},
-		Marks: []paperrisk.Mark{{Instrument: instrument, PriceUSD: "20", At: asOf, AvailableAt: asOf}},
+		Marks: []paper_risk.Mark{{Instrument: instrument, PriceUSD: "20", At: asOf, AvailableAt: asOf}},
 	}
-	portfolio, err := paperapply.Snapshot(account, config, asOf)
+	portfolio, err := paper_workflow.Snapshot(account, config, asOf)
 	if err != nil {
 		t.Fatal(err)
 	}
-	request := paperapply.Request{Version: paperapply.Version, JobID: testJobID, SnapshotContext: config}
+	request := paper_workflow.Request{Version: paper_workflow.Version, JobID: testJobID, SnapshotContext: config}
 	snapshot := testJSON(t, portfolio)
 	_, _, err = research.Create(ctx, jobs.CreateJob{
 		ID: testJobID, SnapshotID: portfolio.ID, Snapshot: snapshot,
@@ -220,7 +220,7 @@ func checkLocalTapeCLI(t *testing.T, accountArchive bool) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tape := quoteTape{Version: "0.1", Source: papersim.Source, JobID: testJobID, Scope: &tapeScope{instrument, "BUY", "500"}, Observations: []observation{}}
+	tape := quoteTape{Version: "0.1", Source: paper_sim.Source, JobID: testJobID, Scope: &tapeScope{instrument, "BUY", "500"}, Observations: []observation{}}
 	dir := t.TempDir()
 	quoteDir := filepath.Join(dir, "quotes")
 	if err := os.Mkdir(quoteDir, 0700); err != nil {
@@ -237,7 +237,7 @@ func checkLocalTapeCLI(t *testing.T, accountArchive bool) {
 		binding := []string{"--job", testJobID}
 		if accountArchive {
 			raw = testJSON(t, map[string]any{
-				"paper_quote_tape_schema_version": "0.2", "source_mode": papersim.Source,
+				"paper_quote_tape_schema_version": "0.2", "source_mode": paper_sim.Source,
 				"account_id": scanAccountID, "observations": tape.Observations,
 			})
 			binding = []string{"--account", scanAccountID}
@@ -317,12 +317,12 @@ func checkLocalTapeCLI(t *testing.T, accountArchive bool) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	base := papersim.Quote{
-		Version: "0.1", Source: papersim.Source, Instrument: instrument, Side: "BUY", QuantityRaw: "500",
+	base := paper_sim.Quote{
+		Version: "0.1", Source: paper_sim.Source, Instrument: instrument, Side: "BUY", QuantityRaw: "500",
 		GrossUSD: "100", FeeBPS: new(20), FixedFeeUSD: "0", ExpiresAt: batch.Expires, Execution: "fill",
 	}
 	at := receipt.CompletedAt
-	makeObservation := func(quote papersim.Quote, delta, lag time.Duration, firmness string) observation {
+	makeObservation := func(quote paper_sim.Quote, delta, lag time.Duration, firmness string) observation {
 		quote.ObservedAt = at.Add(delta)
 		return observation{quote.ObservedAt.Add(lag), firmness, testJSON(t, quote)}
 	}
@@ -370,7 +370,7 @@ func checkLocalTapeCLI(t *testing.T, accountArchive bool) {
 		!first.ObservedAt.After(at) || !first.AvailableAt.Before(*first.CheckedAt) || first.Quote == nil {
 		t.Fatalf("first pin = %+v, %v", first, err)
 	}
-	pin, err := readPin(root, testJobID)
+	pin, err := readQuotePin(root, testJobID)
 	ref := quoteFilename(digest, sha256Hex(earliest.Raw))
 	if accountArchive {
 		ref = testJobID + "-" + ref
@@ -378,7 +378,7 @@ func checkLocalTapeCLI(t *testing.T, accountArchive bool) {
 	if err != nil || pin.Quote != *first.Quote || pin.Quote.Ref != ref {
 		t.Fatalf("published pin = %+v, %v", pin, err)
 	}
-	loaded, err := readRoot(root, pin.Quote.Ref, papersim.MaxInputBytes)
+	loaded, err := readRoot(root, pin.Quote.Ref, paper_sim.MaxInputBytes)
 	if err != nil || !bytes.Equal(loaded, earliest.Raw) {
 		t.Fatalf("quote bytes changed: %v", err)
 	}
@@ -386,7 +386,7 @@ func checkLocalTapeCLI(t *testing.T, accountArchive bool) {
 		t.Fatalf("replayed pin = %+v, %v", replay, err)
 	}
 	if !accountArchive {
-		verifiedTape, err := paperquotes.DecodeTape(testJSON(t, tape), digest, testJobID, "")
+		verifiedTape, err := paper_quotes.DecodeTape(testJSON(t, tape), digest, testJobID, "")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -402,12 +402,12 @@ func checkLocalTapeCLI(t *testing.T, accountArchive bool) {
 	if err != nil || len(entries) != 2 {
 		t.Fatalf("replay wrote additional files: %v, %v", entries, err)
 	}
-	followed, err := paperapply.Follow(ctx, research, paper, request, func(_ context.Context, jobID string) ([]byte, error) {
-		pin, err := readPin(root, jobID)
+	followed, err := paper_workflow.Follow(ctx, research, paper, request, func(_ context.Context, jobID string) ([]byte, error) {
+		pin, err := readQuotePin(root, jobID)
 		if err != nil {
 			return nil, err
 		}
-		return readRoot(root, pin.Quote.Ref, papersim.MaxInputBytes)
+		return readRoot(root, pin.Quote.Ref, paper_sim.MaxInputBytes)
 	}, *first.CheckedAt)
 	if err != nil || followed.Status != "applied" || followed.Application == nil || followed.Application.Execution == nil ||
 		followed.Application.Execution.QuoteSHA256 != pin.Quote.SHA256 || followed.Application.Execution.Order.Status != "filled" {
@@ -441,7 +441,7 @@ func TestConcurrentPublicationKeepsOneImmutablePin(t *testing.T) {
 	}
 	defer root.Close()
 	type outcome struct {
-		pin     quotePin
+		pin     paper_quotes.QuotePin
 		body    []byte
 		created bool
 		err     error
@@ -452,10 +452,11 @@ func TestConcurrentPublicationKeepsOneImmutablePin(t *testing.T) {
 	for _, body := range [][]byte{[]byte(`{"first":true}`), []byte(`{"first":false}`)} {
 		go func() {
 			digest := sha256Hex(body)
-			pin := quotePin{"0.1", testJobID, pinQuote{quoteFilename(digest, digest), digest}}
+			pin := paper_quotes.QuotePin{Version: "0.1", JobID: testJobID,
+				Quote: paper_quotes.QuoteReference{Ref: quoteFilename(digest, digest), SHA256: digest}}
 			ready.Done()
 			ready.Wait()
-			created, err := publishPin(t.Context(), root, pin, body)
+			created, err := publishQuotePin(t.Context(), root, pin, body)
 			results <- outcome{pin, body, created, err}
 		}()
 	}
@@ -466,15 +467,15 @@ func TestConcurrentPublicationKeepsOneImmutablePin(t *testing.T) {
 	if !first.created || first.err != nil || second.created || !errors.Is(second.err, ledger.ErrConflict) {
 		t.Fatalf("publication race = %+v and %+v", first, second)
 	}
-	pin, err := readPin(root, testJobID)
+	pin, err := readQuotePin(root, testJobID)
 	if err != nil || *pin != first.pin {
 		t.Fatalf("winner pin = %+v, %v", pin, err)
 	}
-	body, err := readRoot(root, pin.Quote.Ref, papersim.MaxInputBytes)
+	body, err := readRoot(root, pin.Quote.Ref, paper_sim.MaxInputBytes)
 	if err != nil || !bytes.Equal(body, first.body) {
 		t.Fatalf("winning bytes = %s, %v", body, err)
 	}
-	if _, err := readRoot(root, second.pin.Quote.Ref, papersim.MaxInputBytes); !errors.Is(err, os.ErrNotExist) {
+	if _, err := readRoot(root, second.pin.Quote.Ref, paper_sim.MaxInputBytes); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("losing bytes still present: %v", err)
 	}
 }
@@ -488,7 +489,7 @@ func (c testClock) Now(context.Context) (time.Time, error) { return c.at, nil }
 
 func assertNoPin(t *testing.T, root *os.Root) {
 	t.Helper()
-	if _, err := readPin(root, testJobID); !errors.Is(err, os.ErrNotExist) {
+	if _, err := readQuotePin(root, testJobID); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("unexpected pin or error: %v", err)
 	}
 }

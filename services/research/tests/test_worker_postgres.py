@@ -368,7 +368,7 @@ def settle_paper_round_trip(port, account_id, instrument):
 def test_python_graph_result_is_persisted_by_go_control(tmp_path, archive_mode):
     executable = build_go_command(tmp_path, "control")
     if archive_mode:
-        paper_apply = build_go_command(tmp_path, "paper-apply")
+        paper_apply = build_go_command(tmp_path, "paper")
         paper_memory = build_go_command(tmp_path, "paper-memory")
         policy_path = ROOT / "contracts/valid-paper-policy.json"
         policy = json.loads(policy_path.read_text(encoding="utf-8"))
@@ -646,7 +646,7 @@ def test_python_graph_result_is_persisted_by_go_control(tmp_path, archive_mode):
 
 def test_archived_catalyst_requeues_an_open_paper_position_for_offline_worker(tmp_path):
     control_exe = build_go_command(tmp_path, "control")
-    paper_apply = build_go_command(tmp_path, "paper-apply")
+    paper_apply = build_go_command(tmp_path, "paper")
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
         listener.bind(("127.0.0.1", 0))
         port = listener.getsockname()[1]

@@ -8,7 +8,7 @@ import (
 	"log/slog"
 	"os"
 
-	"tradingbot/control/internal/paperquotes"
+	"tradingbot/control/internal/paper_quotes"
 )
 
 func main() {
@@ -33,14 +33,14 @@ func run(path string, positionalArgs int, output io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if !info.Mode().IsRegular() || info.Size() > paperquotes.MaxInputBytes {
+	if !info.Mode().IsRegular() || info.Size() > paper_quotes.MaxInputBytes {
 		return errors.New("comparison input must be a bounded regular file")
 	}
-	data, err := io.ReadAll(io.LimitReader(f, paperquotes.MaxInputBytes+1))
+	data, err := io.ReadAll(io.LimitReader(f, paper_quotes.MaxInputBytes+1))
 	if err != nil {
 		return err
 	}
-	result, err := paperquotes.Compare(data)
+	result, err := paper_quotes.Compare(data)
 	if err != nil {
 		return err
 	}

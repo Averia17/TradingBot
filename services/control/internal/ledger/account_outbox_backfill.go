@@ -34,46 +34,101 @@ func backfillAccountOutbox(ctx context.Context, tx pgx.Tx) error {
 
 func backfillAccountHistory(ctx context.Context, tx pgx.Tx, accountID string) error {
 	history := accountHistory{
-		orders:    make(map[string]*historicOrder),
+		orders:    make(map[string]orderAccounting),
 		positions: make(map[string]Position),
 	}
 	var version int64
 	for {
-		events, err := readEvents(ctx, tx, accountID, version, 100)
+		events, err := readBackfillPage(ctx, tx, accountID, version)
 		if err != nil {
 			return err
 		}
 		if len(events) == 0 {
 			return history.reconcile(ctx, tx, accountID, version)
 		}
+		var outbox pgx.Batch
+		firstVersion := version + 1
 		for _, event := range events {
 			if event.AccountVersion != version+1 {
 				return fmt.Errorf("paper ledger account version gap after %d", version)
 			}
-			if err := history.append(ctx, tx, accountID, event); err != nil {
+			projected, err := history.project(accountID, event)
+			if err != nil {
 				return fmt.Errorf("paper ledger version %d: %w", event.AccountVersion, err)
 			}
+			payload, err := encodeAccountOutboxEvent(projected)
+			if err != nil {
+				return err
+			}
+			outbox.Queue(insertAccountOutboxSQL, projected.AccountID, projected.AccountVersion,
+				projected.EventID, payload, projected.RecordedAt)
 			version = event.AccountVersion
+		}
+		if err := writeBackfillPage(ctx, tx, &outbox, firstVersion); err != nil {
+			return err
 		}
 	}
 }
 
+type backfillEvent struct {
+	Event
+	bookedOrderID string
+	bookedFill    Fill
+}
+
+func readBackfillPage(ctx context.Context, tx pgx.Tx, accountID string, afterVersion int64) ([]backfillEvent, error) {
+	const pageSize = 100
+	rows, err := tx.Query(ctx, `SELECT e.event_id::text, e.account_version, e.kind, e.payload, e.recorded_at,
+		COALESCE(f.order_id::text,''), COALESCE(f.quantity_raw::text,''),
+		COALESCE(trim_scale(f.gross_usd)::text,''), COALESCE(trim_scale(f.fee_usd)::text,''), f.observed_at
+		FROM (SELECT account_id, event_id, account_version, kind, payload, recorded_at FROM paper_events
+			WHERE account_id=$1 AND account_version>$2 ORDER BY account_version LIMIT $3) e
+		LEFT JOIN paper_fills f USING (account_id,event_id) ORDER BY e.account_version`, accountID, afterVersion, pageSize)
+	if err != nil {
+		return nil, fmt.Errorf("query paper events for backfill: %w", err)
+	}
+	defer rows.Close()
+	var page []backfillEvent
+	for rows.Next() {
+		var event backfillEvent
+		var observedAt *time.Time
+		fill := &event.bookedFill
+		if err := rows.Scan(&event.ID, &event.AccountVersion, &event.Kind, &event.Payload, &event.RecordedAt,
+			&event.bookedOrderID, &fill.QuantityRaw, &fill.GrossUSD, &fill.FeeUSD, &observedAt); err != nil {
+			return nil, fmt.Errorf("read paper event for backfill: %w", err)
+		}
+		event.RecordedAt = event.RecordedAt.UTC()
+		if observedAt != nil {
+			fill.EventID, fill.ObservedAt = event.ID, observedAt.UTC()
+		}
+		page = append(page, event)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read paper events for backfill: %w", err)
+	}
+	return page, nil
+}
+
+func writeBackfillPage(ctx context.Context, tx pgx.Tx, outbox *pgx.Batch, firstVersion int64) error {
+	results := tx.SendBatch(ctx, outbox)
+	defer results.Close()
+	for index := range outbox.Len() {
+		if _, err := results.Exec(); err != nil {
+			return fmt.Errorf("enqueue paper account analytics version %d: %w", firstVersion+int64(index), err)
+		}
+	}
+	return results.Close()
+}
+
 type accountHistory struct {
 	cash, reservedCash big.Rat
-	orders             map[string]*historicOrder
+	orders             map[string]orderAccounting
 	positions          map[string]Position
 }
 
-type historicOrder struct {
-	request   ReservationRequest
-	remaining *big.Int
-	feeBudget *big.Rat
-	unknown   bool
-}
-
-func (h *accountHistory) append(ctx context.Context, tx pgx.Tx, accountID string, e Event) error {
+func (h *accountHistory) project(accountID string, e backfillEvent) (accountAnalyticsEvent, error) {
 	if e.RecordedAt.IsZero() || (e.AccountVersion == 1) != (e.Kind == "paper_account.created") {
-		return errors.New("invalid event metadata")
+		return accountAnalyticsEvent{}, errors.New("invalid event metadata")
 	}
 	wire := accountAnalyticsEvent{
 		Version: "1.0", AccountID: accountID, EventID: e.ID, AccountVersion: e.AccountVersion, Kind: e.Kind, RecordedAt: e.RecordedAt.UTC(),
@@ -82,39 +137,50 @@ func (h *accountHistory) append(ctx context.Context, tx pgx.Tx, accountID string
 	case "paper_account.created":
 		var funded CreateAccount
 		if json.Unmarshal(e.Payload, &funded) != nil || funded.ID != accountID || e.ID != accountID || !moneyPattern.MatchString(funded.InitialCashUSD) {
-			return errors.New("invalid initial funding event")
+			return accountAnalyticsEvent{}, errors.New("invalid initial funding event")
 		}
 		h.cash.Set(amount(funded.InitialCashUSD))
 	case "paper_order.reserved":
 		var request ReservationRequest
 		if json.Unmarshal(e.Payload, &request) != nil || request.AccountID != accountID || request.OrderID != e.ID ||
 			request.SnapshotVersion != e.AccountVersion-1 || !request.valid() {
-			return errors.New("invalid reservation event")
+			return accountAnalyticsEvent{}, errors.New("invalid reservation event")
 		}
 		position, err := h.reserve(request)
 		if err != nil {
-			return err
+			return accountAnalyticsEvent{}, err
 		}
 		wire.Position = &position
 	case "paper_order.partially_filled", "paper_order.filled", "paper_order.cancelled", "paper_order.unknown":
 		var resolution ResolutionRequest
 		if json.Unmarshal(e.Payload, &resolution) != nil || resolution.AccountID != accountID || resolution.EventID != e.ID ||
 			"paper_order."+resolution.Outcome != e.Kind || !resolution.valid() {
-			return errors.New("invalid resolution event")
+			return accountAnalyticsEvent{}, errors.New("invalid resolution event")
 		}
-		position, fill, err := h.resolve(ctx, tx, e, resolution)
+		order, exists := h.orders[resolution.OrderID]
+		if !exists {
+			return accountAnalyticsEvent{}, errors.New("resolution lacks an open reservation")
+		}
+		var fill *Fill
+		if resolution.isFill() {
+			booked, err := e.validateBookedFill(resolution)
+			if err != nil {
+				return accountAnalyticsEvent{}, err
+			}
+			fill = &booked
+			analytics := accountFill(order.request, booked)
+			wire.Fill = &analytics
+		}
+		position, err := h.resolve(order, resolution.Outcome, fill)
 		if err != nil {
-			return err
+			return accountAnalyticsEvent{}, err
 		}
-		wire.Position, wire.Fill = &position, fill
+		wire.Position = &position
 	default:
-		return fmt.Errorf("unsupported paper ledger kind %q", e.Kind)
-	}
-	if h.cash.Sign() < 0 || h.reservedCash.Sign() < 0 || h.reservedCash.Cmp(&h.cash) > 0 {
-		return errors.New("inconsistent settled or reserved cash")
+		return accountAnalyticsEvent{}, fmt.Errorf("unsupported paper ledger kind %q", e.Kind)
 	}
 	wire.CashUSD, wire.ReservedCashUSD = analyticsCash(&h.cash), analyticsCash(&h.reservedCash)
-	return writeAccountOutbox(ctx, tx, wire)
+	return wire, nil
 }
 
 func (h *accountHistory) reserve(request ReservationRequest) (Position, error) {
@@ -125,101 +191,61 @@ func (h *accountHistory) reserve(request ReservationRequest) (Position, error) {
 		}
 		position = Position{Instrument: request.Instrument, QuantityRaw: "0", ReservedQuantityRaw: "0"}
 	}
-	if position.Instrument != request.Instrument || h.orders[request.OrderID] != nil {
+	if _, exists := h.orders[request.OrderID]; exists || position.Instrument != request.Instrument {
 		return Position{}, errors.New("conflicting reservation or held instrument")
 	}
-	order := &historicOrder{request: request, remaining: rawUnits(request.QuantityRaw), feeBudget: amount(request.MaxFeeUSD)}
-	if request.Side == "BUY" {
-		h.reservedCash.Add(&h.reservedCash, buyReservation(Order{ReservationRequest: request}, order.remaining, order.feeBudget))
-	} else {
-		reserved := new(big.Int).Add(rawUnits(position.ReservedQuantityRaw), order.remaining)
-		if reserved.Cmp(rawUnits(position.QuantityRaw)) > 0 {
-			return Position{}, errors.New("sell reservation exceeds held quantity")
-		}
-		position.ReservedQuantityRaw = reserved.String()
+	order, change := reserveOrder(request)
+	position, err := h.apply(position, change)
+	if err != nil {
+		return Position{}, err
 	}
 	h.orders[request.OrderID] = order
+	return position, nil
+}
+
+func (h *accountHistory) resolve(order orderAccounting, outcome string, fill *Fill) (Position, error) {
+	next, change, err := order.resolve(outcome, fill)
+	if err != nil {
+		return Position{}, err
+	}
+	position, err := h.apply(h.positions[order.request.Instrument.ID], change)
+	if err != nil {
+		return Position{}, err
+	}
+	if next.closed() {
+		delete(h.orders, order.request.OrderID)
+	} else {
+		h.orders[order.request.OrderID] = next
+	}
+	return position, nil
+}
+
+func (h *accountHistory) apply(position Position, change balanceChange) (Position, error) {
+	quantity := new(big.Int).Add(rawUnits(position.QuantityRaw), change.quantity)
+	reservedQuantity := new(big.Int).Add(rawUnits(position.ReservedQuantityRaw), change.reservedQuantity)
+	if reservedQuantity.Sign() < 0 || quantity.Cmp(reservedQuantity) < 0 {
+		return Position{}, errors.New("inconsistent settled or reserved quantity")
+	}
+	cash := new(big.Rat).Add(&h.cash, change.cash)
+	reservedCash := new(big.Rat).Add(&h.reservedCash, change.reservedCash)
+	if reservedCash.Sign() < 0 || cash.Cmp(reservedCash) < 0 {
+		return Position{}, errors.New("inconsistent settled or reserved cash")
+	}
+	position.QuantityRaw, position.ReservedQuantityRaw = quantity.String(), reservedQuantity.String()
+	h.cash.Set(cash)
+	h.reservedCash.Set(reservedCash)
 	h.positions[position.ID] = position
 	return position, nil
 }
 
-func (h *accountHistory) resolve(ctx context.Context, tx pgx.Tx, event Event, r ResolutionRequest) (Position, *accountAnalyticsFill, error) {
-	order := h.orders[r.OrderID]
-	if order == nil {
-		return Position{}, nil, errors.New("resolution lacks an open reservation")
-	}
-	position := h.positions[order.request.Instrument.ID]
-	if r.Outcome == "unknown" {
-		if order.unknown {
-			return Position{}, nil, errors.New("repeated unknown resolution")
-		}
-		order.unknown = true
-		return position, nil, nil
-	}
-	quantity, gross, fee := new(big.Int), new(big.Rat), new(big.Rat)
-	var wireFill *accountAnalyticsFill
-	if r.isFill() {
-		fill, err := readHistoricFill(ctx, tx, order.request, event, r)
-		if err != nil {
-			return Position{}, nil, err
-		}
-		wireFill = &fill
-		quantity, gross, fee = rawUnits(fill.QuantityRaw), amount(fill.GrossUSD), amount(fill.FeeUSD)
-		comparison := quantity.Cmp(order.remaining)
-		if (r.Outcome == "filled" && comparison != 0) || (r.Outcome == "partially_filled" && comparison >= 0) || fee.Cmp(order.feeBudget) > 0 {
-			return Position{}, nil, errors.New("fill does not match remaining reserve")
-		}
-	}
-	if order.request.Side == "BUY" {
-		authorized := Order{ReservationRequest: order.request}
-		released := buyReservation(authorized, order.remaining, order.feeBudget)
-		if r.Outcome == "partially_filled" {
-			order.remaining.Sub(order.remaining, quantity)
-			order.feeBudget.Sub(order.feeBudget, fee)
-			released.Sub(released, buyReservation(authorized, order.remaining, order.feeBudget))
-		}
-		h.reservedCash.Sub(&h.reservedCash, released)
-		h.cash.Sub(&h.cash, gross).Sub(&h.cash, fee)
-		position.QuantityRaw = new(big.Int).Add(rawUnits(position.QuantityRaw), quantity).String()
-	} else {
-		released := order.remaining
-		if r.Outcome == "partially_filled" {
-			released = quantity
-			order.remaining.Sub(order.remaining, quantity)
-			order.feeBudget.Sub(order.feeBudget, fee)
-		}
-		remaining := new(big.Int).Sub(rawUnits(position.QuantityRaw), quantity)
-		reserved := new(big.Int).Sub(rawUnits(position.ReservedQuantityRaw), released)
-		if reserved.Sign() < 0 || remaining.Cmp(reserved) < 0 || gross.Cmp(fee) < 0 {
-			return Position{}, nil, errors.New("inconsistent sell reservation or proceeds")
-		}
-		position.QuantityRaw, position.ReservedQuantityRaw = remaining.String(), reserved.String()
-		h.cash.Add(&h.cash, gross).Sub(&h.cash, fee)
-	}
-	if r.Outcome == "partially_filled" {
-		order.unknown = false
-	} else {
-		delete(h.orders, r.OrderID)
-	}
-	h.positions[position.ID] = position
-	return position, wireFill, nil
-}
-
-func readHistoricFill(ctx context.Context, tx pgx.Tx, order ReservationRequest, event Event, r ResolutionRequest) (accountAnalyticsFill, error) {
-	fill := accountAnalyticsFill{Side: order.Side, OrderID: order.OrderID, DecisionID: order.DecisionID,
-		QuoteID: order.QuoteID, ResearchJobID: order.ResearchJobID}
-	err := tx.QueryRow(ctx, `SELECT quantity_raw::text, trim_scale(gross_usd)::text, trim_scale(fee_usd)::text, observed_at
-		FROM paper_fills WHERE account_id=$1 AND order_id=$2 AND event_id=$3`, order.AccountID, order.OrderID, event.ID).
-		Scan(&fill.QuantityRaw, &fill.GrossUSD, &fill.FeeUSD, &fill.ObservedAt)
-	if err != nil {
-		return accountAnalyticsFill{}, fmt.Errorf("read booked fill: %w", err)
-	}
-	fill.ObservedAt = fill.ObservedAt.UTC()
-	if !rawPattern.MatchString(fill.QuantityRaw) || (r.QuantityRaw != "" && fill.QuantityRaw != r.QuantityRaw) ||
+func (e backfillEvent) validateBookedFill(r ResolutionRequest) (Fill, error) {
+	fill := e.bookedFill
+	if e.bookedOrderID != r.OrderID || fill.EventID != e.ID ||
+		!rawPattern.MatchString(fill.QuantityRaw) || (r.QuantityRaw != "" && fill.QuantityRaw != r.QuantityRaw) ||
 		!moneyPattern.MatchString(fill.GrossUSD) || !moneyPattern.MatchString(fill.FeeUSD) ||
 		compareAmounts(fill.GrossUSD, r.GrossUSD) != 0 || compareAmounts(fill.FeeUSD, r.FeeUSD) != 0 ||
-		!fill.ObservedAt.Equal(r.ObservedAt.UTC().Truncate(time.Microsecond)) || fill.ObservedAt.After(event.RecordedAt) {
-		return accountAnalyticsFill{}, errors.New("booked fill disagrees with its ledger event")
+		!fill.ObservedAt.Equal(r.ObservedAt.UTC().Truncate(time.Microsecond)) || fill.ObservedAt.After(e.RecordedAt) {
+		return Fill{}, errors.New("booked fill disagrees with its ledger event")
 	}
 	return fill, nil
 }

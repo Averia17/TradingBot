@@ -4,6 +4,8 @@
 
 **Дата проверки: 04.10.2026.** Запрос выполнен как исследование и проектирование без implementation trading code. Primary sources: official repository/source/API, issuer documentation, fee schedules, papers. GitHub issue — сообщение автора issue, не автоматически подтверждённый bug; README performance — author claim. API schema — возможность интеграции, не подтверждение account eligibility. Published fee — не executable all-in quote.
 
+Копии страниц xStocks и Ondo и индекс Ondo доступны в [снимке исходных материалов](https://github.com/Averia17/TradingBot/tree/1ca3990341a40726b8197eb06fb1d13310e51673/docs/research).
+
 Main deliverables: [план](../planning/plan.md), [backlog](../planning/todo.md), [threat model](../threat-model.md). Paths относительно этого файла. Локальные clones скачаны только для чтения, их код не устанавливался и не запускался; они содержат собственные `.git` directories. Их не следует рекурсивно добавлять в будущий application repo. Большие datasets, keys и реальные funds не использовались.
 
 ## 1. Pinned repository snapshots
@@ -80,7 +82,7 @@ No qualified independent all-cost replication of the chosen TA version was locat
 | [Developers](https://docs.xstocks.fi/developers) | Metadata/multiplier/PoR/action/chain interfaces; chain-by-asset registry authoritative |
 | [FAQ](https://docs.xstocks.fi/docs/frequently-asked-questions) | General redemption/dividend/custody conditions, not all series-specific resolution |
 
-Saved selected documentation: [xstocks-legal.md](xstocks-legal.md), [xstocks-faq.md](xstocks-faq.md). Supported multiple EVM/Solana implementations do not imply each token tradable on every chain or aggregator. Token contract authority/upgrade/freeze controls, decimals/extensions и asset terms должны проверяться по actual registry/address в P0/P6; здесь contract audit не проводился.
+Supported multiple EVM/Solana implementations do not imply each token tradable on every chain or aggregator. Token contract authority/upgrade/freeze controls, decimals/extensions и asset terms должны проверяться по actual registry/address в P0/P6; здесь contract audit не проводился.
 
 **Unknown:** authenticated API rate limits/SLAs for our account, current min/max each instrument, executable BUY/SELL prices all40 cells, hard-quote reservation terms, legal permitted DEX access, delisting/spinoff recovery specifics. Это experimental/onboarding gates.
 
@@ -101,7 +103,7 @@ Saved selected documentation: [xstocks-legal.md](xstocks-legal.md), [xstocks-faq
 | [API overview](https://docs.ondo.finance/api-reference/overview) | REST/OpenAPI and gRPC; access/limits require onboarding |
 | [Mint/redeem attestation](https://docs.ondo.finance/api-reference/attestations/request-a-mint-or-redeem-attestation) | Attestation validity/settlement specification; our executable quote UNKNOWN |
 
-Selected markdown copies `ondo-*.md` and [index](ondo-index.txt) saved locally. API provider documentation does not prove direct retail eligibility. Rate limits, exact minimum, live quote spreads and after-hours capacity **UNKNOWN** for our account.
+API provider documentation does not prove direct retail eligibility. Rate limits, exact minimum, live quote spreads and after-hours capacity **UNKNOWN** for our account.
 
 ## 7. Other protocols/distributors and brokers
 

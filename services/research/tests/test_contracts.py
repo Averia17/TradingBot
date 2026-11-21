@@ -10,6 +10,7 @@ from pydantic import ValidationError
 from tradingbot.contracts import (
     DecisionBatch,
     IntentProposal,
+    IntentProposals,
     PortfolioSnapshot,
     Position,
     validate_proposals,
@@ -38,6 +39,16 @@ def test_serialized_amount_preserves_all_significant_digits():
 
     assert book.model_dump(mode="json")["cash_usd"] == amount
     assert PortfolioSnapshot.model_validate_json(book.model_dump_json()).cash_usd == book.cash_usd
+
+
+def test_structured_allocation_uses_the_wire_decimal_schema():
+    def amount_schema(mode):
+        schema = IntentProposals.model_json_schema(mode=mode)
+        return schema["$defs"]["IntentProposal"]["properties"]["notional_usd"]
+
+    emitted_amount = amount_schema("serialization")
+    assert emitted_amount["type"] == "string"
+    assert amount_schema("validation") == emitted_amount
 
 
 @pytest.mark.parametrize(

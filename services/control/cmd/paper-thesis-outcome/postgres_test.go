@@ -21,7 +21,7 @@ import (
 	"tradingbot/control/internal/control"
 	"tradingbot/control/internal/jobs"
 	"tradingbot/control/internal/ledger"
-	"tradingbot/control/internal/paperthesis"
+	"tradingbot/control/internal/paper_thesis"
 )
 
 func TestReportCLIReadsReconciledFillsAndDecisionFromReadOnlyPostgres(t *testing.T) {
@@ -136,9 +136,9 @@ func TestReportCLIReadsReconciledFillsAndDecisionFromReadOnlyPostgres(t *testing
 	}
 	settle(10, 1, "BUY", "3", "60", "0", jobID, batch.Intents[0].ID)
 	settle(20, 3, "SELL", "1", "24", "1", "", testUUID(23))
-	req := paperthesis.OutcomeRequest{
+	req := paper_thesis.OutcomeRequest{
 		Version: "0.1", Source: "synthetic_fixture", AccountID: accountID, OpeningOrderID: testUUID(10),
-		AsOf: clock(), MaxObservationAgeSeconds: 120, ExitObservations: []paperthesis.ExitObservation{},
+		AsOf: clock(), MaxObservationAgeSeconds: 120, ExitObservations: []paper_thesis.ExitObservation{},
 	}
 	raw, err = json.Marshal(req)
 	if err != nil {
@@ -158,7 +158,7 @@ func TestReportCLIReadsReconciledFillsAndDecisionFromReadOnlyPostgres(t *testing
 	if err := run(ctx, dsn.String(), flags, &repeat); err != nil || !bytes.Equal(report.Bytes(), repeat.Bytes()) {
 		t.Fatalf("report is not reproducible: %v", err)
 	}
-	var value paperthesis.OutcomeReport
+	var value paper_thesis.OutcomeReport
 	if err := contract.Decode(report.Bytes(), contract.PaperThesisOutcomeReport, &value); err != nil {
 		t.Fatal(err)
 	}

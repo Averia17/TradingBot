@@ -5,7 +5,8 @@ import json
 import math
 import re
 from collections import defaultdict
-from datetime import timedelta
+from collections.abc import Sequence
+from datetime import datetime, timedelta
 from decimal import Decimal, localcontext
 from importlib.metadata import version
 from itertools import pairwise
@@ -18,9 +19,9 @@ from pydantic import Field, TypeAdapter, ValidationError
 from tradingbot.contracts import Contract, Money, PortfolioSnapshot, Symbol
 from tradingbot.security_identity import (
     IdentityProjectionError,
+    IdentitySnapshotProjector,
     SecurityBinding,
     load_identity_registry,
-    project_identity_snapshot,
 )
 from tradingbot.snapshots import (
     MAX_ARCHIVE_BYTES,
@@ -85,7 +86,7 @@ SELECTION_INPUT = TypeAdapter(
 )
 
 
-def _price(value) -> Decimal:
+def _positive_market_price(value: object) -> Decimal:
     if not isinstance(value, str) or PRICE.fullmatch(value) is None:
         raise ValueError("market price is not a decimal string")
     result = Decimal(value)
@@ -94,21 +95,21 @@ def _price(value) -> Decimal:
     return result
 
 
-def _momentum(closes: list[Decimal], periods: int) -> str:
-    from pandas import DataFrame
-    from stockstats import wrap
+def _momentum_basis_points(closes: list[Decimal], periods: int) -> str:
+    from pandas import Series
+    from stockstats import StockDataFrame
 
-    # The pinned TradingAgents indicator library supplies ROC. The float is
-    # used solely to rank, never to compute money, positions, or fee limits.
-    latest = wrap(DataFrame({"close": [float(price) for price in closes]}))[
-        f"close_{periods}_roc"
-    ].iloc[-1]
+    # Use the same pinned indicator without wrapping each price column into a frame.
+    # The float result is used solely to rank candidates.
+    latest = StockDataFrame.roc(Series([float(price) for price in closes]), periods).iat[-1]
     if not math.isfinite(latest):
         raise ValueError("nonfinite momentum indicator")
     return f"{latest * 100:.6f}"
 
 
-def _actions_in_window(records: list[ArchiveRecord], first, last) -> bool:
+def _corporate_action_blocks_window(
+    records: Sequence[ArchiveRecord], first: datetime, last: datetime
+) -> bool:
     for item in records:
         if item.kind != "action":
             continue
@@ -125,8 +126,8 @@ def _actions_in_window(records: list[ArchiveRecord], first, last) -> bool:
     return False
 
 
-def _score(
-    config: SelectionRequest, candidate: Candidate, records: list[ArchiveRecord], held: set[str]
+def _score_candidate(
+    config: SelectionRequest, candidate: Candidate, records: Sequence[ArchiveRecord], held: set[str]
 ) -> dict:
     row = {"symbol": candidate.symbol}
     if not candidate.allowed:
@@ -151,7 +152,7 @@ def _score(
     latest = bars[-1]
     if as_of - latest.event_time > timedelta(seconds=config.max_bar_age_seconds):
         return row | {"status": "stale_bar"}
-    if _actions_in_window(records, bars[0].event_time, latest.event_time):
+    if _corporate_action_blocks_window(records, bars[0].event_time, latest.event_time):
         return row | {"status": "corporate_action_in_window"}
     if any(
         row.payload.get("currency") != "USD" or row.payload.get("price_basis") != "raw"
@@ -159,9 +160,9 @@ def _score(
     ):
         return row | {"status": "unverified_bar_basis"}
     try:
-        closes = [_price(item.payload.get("close")) for item in bars]
-        bid = _price(latest.payload.get("bid"))
-        ask = _price(latest.payload.get("ask"))
+        closes = [_positive_market_price(item.payload.get("close")) for item in bars]
+        bid = _positive_market_price(latest.payload.get("bid"))
+        ask = _positive_market_price(latest.payload.get("ask"))
         volume = latest.payload.get("volume")
         if ask < bid or type(volume) is not int or not 0 < volume < 10**20:
             raise ValueError("invalid quote or volume")
@@ -184,7 +185,7 @@ def _score(
     return row | {
         "status": "ranked",
         "priority": "held_catalyst" if candidate.symbol in held and catalyst else "momentum",
-        "momentum_bps": _momentum(closes, config.roc_periods),
+        "momentum_bps": _momentum_basis_points(closes, config.roc_periods),
         "latest_bar_sha256": latest.sha256,
     }
 
@@ -192,9 +193,9 @@ def _score(
 def _roster_status(
     candidate: RosterCandidate,
     roster: dict[str, UniverseEntry],
-    live: set[str],
-    historical: set[str],
-    records: list[ArchiveRecord],
+    listed_ids: set[str],
+    historical_ids: set[str],
+    records: Sequence[ArchiveRecord],
     *,
     already_held: bool,
 ) -> str | None:
@@ -205,10 +206,10 @@ def _roster_status(
         return "security_delisted"
     if state.evidence.symbol != candidate.symbol:
         return "universe_symbol_mismatch"
-    if len(live) > 1:
+    if len(listed_ids) > 1:
         return "ambiguous_universe_symbol"
     # The job's portfolio uses ticker and a separate instrument identifier.
-    if already_held and len(historical) > 1:
+    if already_held and len(historical_ids) > 1:
         return "ambiguous_held_security"
     for record in records:
         if record.kind not in ("bar", "action", "news", "filing"):
@@ -216,7 +217,7 @@ def _roster_status(
         identity = record.payload.get("security_id")
         if identity == candidate.security_id:
             continue
-        if identity is not None or record.kind in ("bar", "action") or len(historical) > 1:
+        if identity is not None or record.kind in ("bar", "action") or len(historical_ids) > 1:
             return "ambiguous_security_history"
     return None
 
@@ -240,67 +241,69 @@ def plan_research(
     symbols = sorted(candidate.symbol for candidate in config.candidates)
     if len(set(symbols)) != len(symbols):
         raise ValueError("duplicate research candidate symbol")
-    stable = isinstance(config, IdentitySelectionRequest)
-    guarded = isinstance(config, RosterSelectionRequest) and not stable
-    registry = load_identity_registry(root, config.identity_registry) if stable else None
+    identity_bound = isinstance(config, IdentitySelectionRequest)
+    roster_guarded = isinstance(config, RosterSelectionRequest) and not identity_bound
+    registry = load_identity_registry(root, config.identity_registry) if identity_bound else None
     if registry is not None and registry.universe_provider != config.universe_provider:
         raise ValueError("owner registry and selection universe providers disagree")
     snapshot = load_snapshot(
         root,
         config.data_manifest,
         config.portfolio.as_of,
-        symbols=None if guarded or stable else symbols,
+        symbols=None if roster_guarded or identity_bound else symbols,
         visibility="locally_ingested",
     )
-    records: dict[str, list[ArchiveRecord]] = defaultdict(list)
-    historical: dict[str, set[str]] = defaultdict(set)
-    for item in snapshot.records:
-        if item.symbol is not None:
-            records[item.symbol].append(item)
-            if (
-                guarded
-                and item.kind == "listing"
-                and item.provider == config.universe_provider
-                and _utc(item.payload["effective_at"]) <= snapshot.as_of
-            ):
-                historical[item.symbol].add(item.payload["security_id"])
+    records_by_symbol: dict[str, list[ArchiveRecord]] = defaultdict(list)
+    historical_ids: dict[str, set[str]] = defaultdict(set)
+    if registry is None:
+        for item in snapshot.records:
+            if item.symbol is not None:
+                records_by_symbol[item.symbol].append(item)
+                if (
+                    roster_guarded
+                    and item.kind == "listing"
+                    and item.provider == config.universe_provider
+                    and _utc(item.payload["effective_at"]) <= snapshot.as_of
+                ):
+                    historical_ids[item.symbol].add(item.payload["security_id"])
     roster = {}
-    live: dict[str, set[str]] = defaultdict(set)
-    if guarded:
+    listed_ids: dict[str, set[str]] = defaultdict(set)
+    if roster_guarded:
         projection = _project_universe(snapshot, config.universe_provider)
         roster = {entry.security_id: entry for entry in projection.entries}
         for state in projection.entries:
             if state.status == "listed" and state.evidence is not None:
-                live[state.evidence.symbol].add(state.security_id)
+                listed_ids[state.evidence.symbol].add(state.security_id)
+
+    identity_projection = (
+        IdentitySnapshotProjector(
+            snapshot, registry, config.identity_registry, positions=config.portfolio.positions
+        )
+        if registry is not None and any(candidate.allowed for candidate in config.candidates)
+        else None
+    )
 
     held = {item.symbol for item in config.portfolio.positions}
     ranked, rejected = [], []
     for candidate in config.candidates:
         symbol = candidate.symbol
-        group = records[symbol]
-        if registry is not None and candidate.allowed:
+        symbol_records: Sequence[ArchiveRecord] = records_by_symbol.get(symbol, ())
+        if identity_projection is not None and candidate.allowed:
             binding = SecurityBinding(symbol=symbol, security_id=candidate.security_id)
             try:
-                scoped = project_identity_snapshot(
-                    snapshot,
-                    registry,
-                    config.identity_registry,
-                    (binding,),
-                    positions=config.portfolio.positions,
-                )
+                symbol_records = identity_projection.records_for(binding)
             except IdentityProjectionError as exc:
                 rejected.append(
                     {"symbol": symbol, "security_id": candidate.security_id, "status": exc.reason}
                 )
                 continue
-            group = [item for item in scoped.records if item.symbol == symbol]
-        elif guarded and candidate.allowed:
+        elif roster_guarded and candidate.allowed:
             status = _roster_status(
                 candidate,
                 roster,
-                live[symbol],
-                historical[symbol],
-                records[symbol],
+                listed_ids[symbol],
+                historical_ids[symbol],
+                symbol_records,
                 already_held=symbol in held,
             )
             if status is not None:
@@ -308,7 +311,7 @@ def plan_research(
                     {"symbol": symbol, "security_id": candidate.security_id, "status": status}
                 )
                 continue
-        row = _score(config, candidate, group, held)
+        row = _score_candidate(config, candidate, symbol_records, held)
         if isinstance(candidate, RosterCandidate):
             row["security_id"] = candidate.security_id
         if row["status"] == "ranked":
@@ -342,25 +345,19 @@ def plan_research(
             "requested_symbols": selected,
             "max_llm_calls": ALLOCATION_CALLS + len(selected) * config.calls_per_symbol,
         }
-        if registry is not None:
+        if identity_projection is not None:
             bindings = tuple(
                 SecurityBinding(symbol=row["symbol"], security_id=row["security_id"])
                 for row in ranked[:capacity]
             )
-            receipt_snapshot = project_identity_snapshot(
-                snapshot,
-                registry,
-                config.identity_registry,
-                bindings,
-                positions=config.portfolio.positions,
-            )
+            receipt_snapshot = identity_projection.project(bindings)
             job |= {
                 "job_schema_version": "0.2",
                 "identity_registry": config.identity_registry.model_dump(mode="json"),
                 "security_bindings": [binding.model_dump(mode="json") for binding in bindings],
             }
     return {
-        "selection_schema_version": "0.2" if stable else "0.1",
+        "selection_schema_version": "0.2" if identity_bound else "0.1",
         "source_mode": snapshot.source_mode,
         "snapshot_sha256": receipt_snapshot.sha256,
         "stockstats_version": version("stockstats"),

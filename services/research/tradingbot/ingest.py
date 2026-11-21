@@ -489,7 +489,45 @@ def _market_records(capture: MarketCapture, response: JsonValue) -> list[Archive
     return records
 
 
+def _capture_records(
+    root: Path, capture: SECCapture | ALFREDCapture | BLSCapture | MarketCapture
+) -> list[ArchiveRecord]:
+    response = read_pinned_json(root, capture.source)
+    if isinstance(capture, SECCapture):
+        return _sec_records(capture, response)
+    if isinstance(capture, ALFREDCapture):
+        return _alfred_records(capture, response)
+    if isinstance(capture, BLSCapture):
+        return [_bls_record(capture, response)]
+    return _market_records(capture, response)
+
+
+def _source_revisions(records: list[ArchiveRecord]) -> list[ArchiveRecord]:
+    if len(records) > 1:
+        source = records[0]
+        if source.kind == "filing":
+            raise ValueError("duplicate SEC accession in the requested archive")
+        vintage_key = "released_at" if source.provider == "bls" else "vintage_date"
+        if source.provider == "bls":
+            records.sort(key=lambda row: _utc(str(row.payload[vintage_key])))
+        else:
+            records.sort(key=lambda row: str(row.payload[vintage_key]))
+        provider = source.provider.upper()
+        for earlier, later in pairwise(records):
+            if earlier.payload[vintage_key] == later.payload[vintage_key]:
+                raise ValueError(f"duplicate {provider} observation in the same vintage")
+            if earlier.available_at > later.available_at:
+                raise ValueError(f"{provider} capture times must follow vintage order")
+    return [
+        item.model_copy(update={"revision": revision})
+        for revision, item in enumerate(records, start=1)
+    ]
+
+
 def _market_revisions(records: list[ArchiveRecord]) -> list[ArchiveRecord]:
+    identities = {(item.kind, item.symbol, item.payload.get("security_id")) for item in records}
+    if len(identities) != 1:
+        raise ValueError("market record revisions must preserve instrument and record identity")
     ordered = sorted(records, key=lambda item: item.revision)
     for earlier, later in pairwise(ordered):
         if earlier.revision == later.revision:
@@ -503,67 +541,41 @@ def _market_revisions(records: list[ArchiveRecord]) -> list[ArchiveRecord]:
 
 def build_archive(root: Path, manifest: JsonValue) -> dict:
     inputs = CaptureManifest.model_validate(manifest)
-    by_key: dict[tuple[str, str, str, str], list[ArchiveRecord]] = defaultdict(list)
-    market: dict[tuple[str, str], list[ArchiveRecord]] = defaultdict(list)
+    source_series: dict[tuple[str, str, str, str], list[ArchiveRecord]] = defaultdict(list)
+    market_series: dict[tuple[str, str], list[ArchiveRecord]] = defaultdict(list)
     submissions: dict[tuple[str, str, str], ArchiveRecord] = {}
+    fact_captures = []
     total = 0
     for capture in inputs.captures:
         if isinstance(capture, SECFactsCapture):
+            fact_captures.append(capture)
             continue
-        raw = read_pinned_json(root, capture.source)
-        if isinstance(capture, SECCapture):
-            records = _sec_records(capture, raw)
-        elif isinstance(capture, ALFREDCapture):
-            records = _alfred_records(capture, raw)
-        elif isinstance(capture, BLSCapture):
-            records = [_bls_record(capture, raw)]
-        else:
-            records = _market_records(capture, raw)
+        records = _capture_records(root, capture)
         total += len(records)
         if total > MAX_RECORDS:
             raise ValueError("combined archive has too many observations")
+        if isinstance(capture, MarketCapture):
+            for item in records:
+                market_series[item.provider, item.record_id].append(item)
+            continue
         for item in records:
-            if isinstance(capture, MarketCapture):
-                market[item.provider, item.record_id].append(item)
-            else:
-                by_key[item.key()].append(item)
-            if isinstance(capture, SECCapture):
-                submissions[capture.cik, capture.symbol, item.record_id] = item
+            source_series[item.key()].append(item)
+        if isinstance(capture, SECCapture):
+            submissions.update(
+                ((capture.cik, capture.symbol, item.record_id), item) for item in records
+            )
     output = []
-    for _, revisions in sorted(by_key.items()):
-        if len(revisions) > 1:
-            provider = revisions[0].provider
-            if revisions[0].kind == "filing":
-                raise ValueError("duplicate SEC accession in the requested archive")
-            vintage_key = "released_at" if provider == "bls" else "vintage_date"
-            if provider == "bls":
-                revisions.sort(key=lambda row: _utc(str(row.payload["released_at"])))
-            else:
-                revisions.sort(key=lambda row: str(row.payload["vintage_date"]))
-            for earlier, later in pairwise(revisions):
-                if earlier.payload[vintage_key] == later.payload[vintage_key]:
-                    raise ValueError(
-                        f"duplicate {provider.upper()} observation in the same vintage"
-                    )
-                if earlier.available_at > later.available_at:
-                    raise ValueError(f"{provider.upper()} capture times must follow vintage order")
-        for revision, item in enumerate(revisions, start=1):
-            output.append(item.model_copy(update={"revision": revision}))
-    for revisions in market.values():
-        identities = {
-            (item.kind, item.symbol, item.payload.get("security_id")) for item in revisions
-        }
-        if len(identities) != 1:
-            raise ValueError("market record revisions must preserve instrument and record identity")
+    for _, revisions in sorted(source_series.items()):
+        output.extend(_source_revisions(revisions))
+    for revisions in market_series.values():
         output.extend(_market_revisions(revisions))
     enriched = set()
-    for capture in inputs.captures:
-        if isinstance(capture, SECFactsCapture):
-            for item in _sec_fact_records(root, capture, submissions):
-                if item.key() in enriched:
-                    raise ValueError("duplicate SEC Company Facts capture for the same accession")
-                enriched.add(item.key())
-                output.append(item)
+    for capture in fact_captures:
+        for item in _sec_fact_records(root, capture, submissions):
+            if item.key() in enriched:
+                raise ValueError("duplicate SEC Company Facts capture for the same accession")
+            enriched.add(item.key())
+            output.append(item)
     if len(output) > MAX_RECORDS:
         raise ValueError("combined archive has too many observations")
     output.sort(key=lambda item: (item.key(), item.revision))

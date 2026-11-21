@@ -14,7 +14,7 @@ import (
 	"time"
 
 	"tradingbot/control/internal/ledger"
-	"tradingbot/control/internal/papersim"
+	"tradingbot/control/internal/paper_sim"
 )
 
 func main() {
@@ -39,7 +39,7 @@ func run(ctx context.Context, dsn, intentPath, quotePath string, output io.Write
 	if err != nil {
 		return fmt.Errorf("read paper intent: %w", err)
 	}
-	intent, err := papersim.ParseIntent(data)
+	intent, err := paper_sim.ParseIntent(data)
 	if err != nil {
 		return err
 	}
@@ -52,7 +52,7 @@ func run(ctx context.Context, dsn, intentPath, quotePath string, output io.Write
 		return errors.New("paper ledger startup failed; check the PostgreSQL configuration")
 	}
 	defer store.Close()
-	receipt, err := papersim.Run(ctx, store, intent, quote, time.Now().UTC())
+	receipt, err := paper_sim.Run(ctx, store, intent, quote, time.Now().UTC())
 	if err != nil {
 		return err
 	}
@@ -69,14 +69,14 @@ func readInput(path string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !info.Mode().IsRegular() || info.Size() > papersim.MaxInputBytes {
+	if !info.Mode().IsRegular() || info.Size() > paper_sim.MaxInputBytes {
 		return nil, errors.New("paper fixture must be a bounded regular file")
 	}
-	data, err := io.ReadAll(io.LimitReader(input, papersim.MaxInputBytes+1))
+	data, err := io.ReadAll(io.LimitReader(input, paper_sim.MaxInputBytes+1))
 	if err != nil {
 		return nil, err
 	}
-	if len(data) > papersim.MaxInputBytes {
+	if len(data) > paper_sim.MaxInputBytes {
 		return nil, errors.New("paper fixture exceeds the file size limit")
 	}
 	return data, nil

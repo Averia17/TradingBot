@@ -105,14 +105,11 @@ func (s *Store) FinishPaperDispatch(ctx context.Context, task PaperDispatchTask,
 	default:
 		return errors.New("paper dispatch status is not terminal")
 	}
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+	tx, err := s.beginWrite(ctx)
 	if err != nil {
 		return fmt.Errorf("begin paper dispatch acknowledgement: %w", err)
 	}
 	defer rollback(tx)
-	if _, err := tx.Exec(ctx, `SET LOCAL synchronous_commit = 'on'`); err != nil {
-		return fmt.Errorf("configure paper dispatch durability: %w", err)
-	}
 	result, err := tx.Exec(ctx, `UPDATE research_paper_dispatch
 		SET finished_status=$4, finished_at=clock_timestamp()
 		WHERE job_id=$1 AND account_id=$2 AND request_sha256=$3 AND finished_status IS NULL

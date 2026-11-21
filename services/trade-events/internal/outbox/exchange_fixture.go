@@ -57,7 +57,7 @@ func (o *Outbox) RecordExchangeFixture(ctx context.Context, event fill_event.Eve
 		}
 		created = result.RowsAffected() == 1
 		if created {
-			_, err := o.EnqueueTx(ctx, tx, event)
+			_, err := enqueueExactTask(ctx, tx, queueName, event.ID, payload)
 			return err
 		}
 		// READ COMMITTED gives this statement a fresh view after a concurrent INSERT.

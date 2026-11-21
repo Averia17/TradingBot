@@ -35,51 +35,39 @@ type Result struct {
 // event. verify performs local contract validation against the immutable job.
 // An identical replay from the completing attempt bypasses time-varying checks.
 func (s *Store) Complete(ctx context.Context, input CompleteJob, verify func(job Job, dbNow time.Time) error) (Result, bool, error) {
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
-	if err != nil {
-		return Result{}, false, fmt.Errorf("begin research completion: %w", err)
-	}
-	defer rollback(tx)
-	if _, err := tx.Exec(ctx, `SET LOCAL synchronous_commit = 'on'`); err != nil {
-		return Result{}, false, fmt.Errorf("configure durable research completion: %w", err)
-	}
-	var jobID, status string
-	err = tx.QueryRow(ctx, `SELECT id::text, status FROM research_jobs WHERE id = $1 FOR UPDATE`, input.JobID).Scan(&jobID, &status)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return Result{}, false, ErrNotFound
-	}
-	if err != nil {
-		return Result{}, false, fmt.Errorf("lock research job for completion: %w", err)
-	}
-	if status == "completed" {
-		result, err := replayCompletion(ctx, tx, jobID, input)
-		return result, false, err
-	}
-	lease, _, err := currentLease(ctx, tx, jobID)
+	job, err := s.beginWorkerJob(ctx, input.JobID, "completion")
 	if err != nil {
 		return Result{}, false, err
 	}
-	if lease.WorkerID != input.WorkerID || lease.Token != input.Token ||
-		(input.ExpectedAttempt != 0 && lease.Attempt != input.ExpectedAttempt) {
+	defer rollback(job.tx)
+	if job.status == "completed" {
+		result, err := job.replayCompletion(ctx, input)
+		return result, false, err
+	}
+	lease, _, err := job.workerLease(ctx, input.WorkerID, input.Token)
+	if err != nil {
+		return Result{}, false, err
+	}
+	if input.ExpectedAttempt != 0 && job.attempt != input.ExpectedAttempt {
 		return Result{}, false, ErrLeaseConflict
 	}
 	if verify == nil {
 		return Result{}, false, errors.New("research completion requires local contract validation")
 	}
 	var permits int
-	if err := tx.QueryRow(ctx, `SELECT count(*) FROM research_call_permits WHERE job_id = $1 AND attempt = $2`,
-		jobID, lease.Attempt).Scan(&permits); err != nil {
+	if err := job.tx.QueryRow(ctx, `SELECT count(*) FROM research_call_permits WHERE job_id = $1 AND attempt = $2`,
+		job.id, job.attempt).Scan(&permits); err != nil {
 		return Result{}, false, fmt.Errorf("read research attempt call permits: %w", err)
 	}
 	if permits != input.ExpectedLLMCalls {
 		return Result{}, false, ErrCallPermitMismatch
 	}
-	job, _, err := claimInputs(ctx, tx, jobID)
+	inputs, err := readJobInputs(ctx, job.tx, job.id)
 	if err != nil {
 		return Result{}, false, err
 	}
 	var verifyTime time.Time
-	if err := tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&verifyTime); err != nil {
+	if err := job.tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&verifyTime); err != nil {
 		return Result{}, false, fmt.Errorf("read research validation clock: %w", err)
 	}
 	if !verifyTime.Before(lease.ExpiresAt) {
@@ -88,26 +76,26 @@ func (s *Store) Complete(ctx context.Context, input CompleteJob, verify func(job
 	if !verifyTime.Before(input.ExpiresAt) {
 		return Result{}, false, ErrResultExpired
 	}
-	if err := verify(job, verifyTime.UTC()); err != nil {
+	if err := verify(inputs.Job, verifyTime.UTC()); err != nil {
 		return Result{}, false, err
 	}
-	result, err := insertCompletion(ctx, tx, lease, input.Payload, input.ExpiresAt)
+	result, err := job.insertCompletion(ctx, input.Payload, input.ExpiresAt)
 	if err != nil {
 		return Result{}, false, err
 	}
-	if err := tx.Commit(ctx); err != nil {
+	if err := job.tx.Commit(ctx); err != nil {
 		return Result{}, false, fmt.Errorf("commit research completion: %w", err)
 	}
 	return result, true, nil
 }
 
-func insertCompletion(ctx context.Context, tx pgx.Tx, lease Lease, payload json.RawMessage, expiresAt time.Time) (Result, error) {
+func (j lockedJob) insertCompletion(ctx context.Context, payload json.RawMessage, expiresAt time.Time) (Result, error) {
 	digest := sha256.Sum256(payload)
-	result := Result{JobID: lease.Job.ID, Attempt: lease.Attempt, Payload: payload}
+	result := Result{JobID: j.id, Attempt: j.attempt, Payload: payload}
 	var leaseActive, batchFresh, inserted bool
 	// After local verification, check both expiry bounds at the exact time
 	// recorded on the receipt. Return the failed predicate without another clock read.
-	err := tx.QueryRow(ctx, `WITH receipt AS MATERIALIZED (
+	err := j.tx.QueryRow(ctx, `WITH receipt AS MATERIALIZED (
 			SELECT a.job_id, a.attempt, observed.recorded_at, a.expires_at > observed.recorded_at AS lease_active,
 			$5::timestamptz > observed.recorded_at AS batch_fresh
 			FROM research_job_attempts a CROSS JOIN (SELECT clock_timestamp() AS recorded_at) observed
@@ -134,10 +122,10 @@ func insertCompletion(ctx context.Context, tx pgx.Tx, lease Lease, payload json.
 	if !inserted {
 		return Result{}, errors.New("research result insert did not return a receipt")
 	}
-	if err := setJobStatus(ctx, tx, result.JobID, "completed"); err != nil {
+	if err := j.setStatus(ctx, "completed"); err != nil {
 		return Result{}, err
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO research_outbox (job_id, event_type, created_at) VALUES ($1, 'research_job.completed', $2)`,
+	if _, err := j.tx.Exec(ctx, `INSERT INTO research_outbox (job_id, event_type, created_at) VALUES ($1, 'research_job.completed', $2)`,
 		result.JobID, result.CompletedAt); err != nil {
 		return Result{}, fmt.Errorf("store completed research job event: %w", err)
 	}
@@ -145,19 +133,22 @@ func insertCompletion(ctx context.Context, tx pgx.Tx, lease Lease, payload json.
 	return result, nil
 }
 
-func replayCompletion(ctx context.Context, tx pgx.Tx, id string, input CompleteJob) (Result, error) {
+func (j lockedJob) replayCompletion(ctx context.Context, input CompleteJob) (Result, error) {
+	var result Result
+	var digest []byte
 	var workerID, token string
-	err := tx.QueryRow(ctx, `SELECT a.worker_id, a.lease_token::text FROM research_job_results r
-		JOIN research_jobs j ON j.id = r.job_id AND j.attempt_count = r.attempt
+	err := j.tx.QueryRow(ctx, `SELECT r.job_id::text, r.attempt, r.completed_at, r.payload, r.payload_sha256,
+		a.worker_id, a.lease_token::text FROM research_job_results r
 		JOIN research_job_attempts a ON r.job_id = a.job_id AND r.attempt = a.attempt
-		WHERE r.job_id = $1`, id).Scan(&workerID, &token)
+		WHERE r.job_id = $1 AND r.attempt = $2`, j.id, j.attempt).
+		Scan(&result.JobID, &result.Attempt, &result.CompletedAt, &result.Payload, &digest, &workerID, &token)
 	if err != nil {
 		return Result{}, fmt.Errorf("read completing research attempt: %w", err)
 	}
 	if workerID != input.WorkerID || token != input.Token {
 		return Result{}, ErrLeaseConflict
 	}
-	result, err := readResult(tx.QueryRow(ctx, selectResult, id))
+	result, err = verifyResultDigest(result, digest)
 	if err != nil {
 		return Result{}, err
 	}
@@ -188,6 +179,10 @@ func readResult(row pgx.Row) (Result, error) {
 	if err != nil {
 		return Result{}, fmt.Errorf("read research result: %w", err)
 	}
+	return verifyResultDigest(result, digest)
+}
+
+func verifyResultDigest(result Result, digest []byte) (Result, error) {
 	expected := sha256.Sum256(result.Payload)
 	if !bytes.Equal(expected[:], digest) {
 		return Result{}, errors.New("persisted research result does not match its hash")

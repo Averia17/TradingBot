@@ -1,0 +1,13 @@
+{
+  "paper_quote_fixture_schema_version": "0.1",
+  "input_mint": "USDC-fixture",
+  "output_mint": "TESTx-fixture",
+  "in_amount": "100000000",
+  "out_amount": "500",
+  "min_out_amount": "495",
+  "observed_at": "2026-11-18T14:31:01Z",
+  "available_at": "2026-11-18T14:31:02Z",
+  "expires_at": "2026-11-18T14:31:07Z",
+  "fee_bps": 20,
+  "fixed_fee_usd": "0.10"
+}

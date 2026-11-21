@@ -14,7 +14,7 @@ import (
 
 	"tradingbot/control/internal/jobs"
 	"tradingbot/control/internal/ledger"
-	"tradingbot/control/internal/paperthesis"
+	"tradingbot/control/internal/paper_thesis"
 )
 
 func main() {
@@ -41,7 +41,7 @@ func run(ctx context.Context, dsn string, args []string, output io.Writer) error
 		return errors.New("provide --input, --sha256 and TRADINGBOT_DATABASE_URL")
 	}
 	info, err := os.Stat(*path)
-	if err != nil || !info.Mode().IsRegular() || info.Size() > paperthesis.MaxOutcomeInputBytes {
+	if err != nil || !info.Mode().IsRegular() || info.Size() > paper_thesis.MaxOutcomeInputBytes {
 		return errors.New("paper thesis outcome input must be a bounded regular file")
 	}
 	file, err := os.Open(*path)
@@ -49,19 +49,19 @@ func run(ctx context.Context, dsn string, args []string, output io.Writer) error
 		return errors.New("open paper thesis outcome input failed")
 	}
 	defer file.Close()
-	raw, err := io.ReadAll(io.LimitReader(file, paperthesis.MaxOutcomeInputBytes+1))
+	raw, err := io.ReadAll(io.LimitReader(file, paper_thesis.MaxOutcomeInputBytes+1))
 	if err != nil {
 		return errors.New("read paper thesis outcome input failed")
 	}
-	input, err := paperthesis.ParseOutcomeRequest(raw, *digest)
+	input, err := paper_thesis.ParseOutcomeRequest(raw, *digest)
 	if err != nil {
 		return err
 	}
-	var report paperthesis.OutcomeReport
+	var report paper_thesis.OutcomeReport
 	err = ledger.WithReadSnapshot(ctx, dsn, func(snapshot ledger.ReadSnapshot) error {
 		// Research completions read here are immutable and the projection
 		// checks that their durable receipt predates the opening reservation.
-		report, err = paperthesis.BuildOutcomeFromArchive(ctx, &researchReceipt{dsn: dsn}, snapshot, input, snapshot.Cutoff(), *archiveRoot)
+		report, err = paper_thesis.BuildOutcomeFromArchive(ctx, &researchReceipt{dsn: dsn}, snapshot, input, snapshot.Cutoff(), *archiveRoot)
 		return err
 	})
 	if err != nil {

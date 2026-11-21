@@ -6,7 +6,7 @@ from importlib.metadata import version
 
 import msgspec
 
-from tradingbot_evaluation.benchmarks import run_benchmarks
+from tradingbot_evaluation.benchmarks import benchmark_nav_series
 from tradingbot_evaluation.replay import (
     MAX_PREFIX_EVENTS,
     MAX_PREFIX_SYMBOLS,
@@ -14,14 +14,12 @@ from tradingbot_evaluation.replay import (
     _nanoseconds,
     executable_quotes,
     replay_event_count,
-    replay_prefix,
+    replay_nav_series,
     replay_sha256,
-    run_replay,
 )
 from tradingbot_evaluation.replay_identity import ReplayIdentity
 from tradingbot_evaluation.research_replay import (
-    _reference_quote,
-    _tape_timeline,
+    _index_tape,
     prepare_research_replay,
 )
 from tradingbot_evaluation.statistics import (
@@ -32,9 +30,8 @@ from tradingbot_evaluation.statistics import (
     ReplayBenchmark,
     ReplayProvenance,
     ReplaySource,
-    _validate_protocol,
     load_evidence,
-    protocol_sha256,
+    verify_frozen_protocol,
 )
 from tradingbot_evaluation.trend import TrendConfig
 
@@ -95,10 +92,7 @@ def validate_identity_quotes(replay: Replay, identity: ReplayIdentity) -> None:
 def _frozen_replay_source(
     protocol: EvaluationProtocol, expected_protocol_sha256: str
 ) -> tuple[str, ReplaySource]:
-    frozen = protocol_sha256(protocol)
-    if expected_protocol_sha256 != frozen:
-        raise ValueError("Frozen protocol SHA-256 differs from the expected digest")
-    _validate_protocol(protocol)
+    frozen = verify_frozen_protocol(protocol, expected_protocol_sha256)
     source = protocol.replay_source
     if source is msgspec.UNSET:
         raise ValueError("A frozen synthetic replay source is required")
@@ -229,29 +223,32 @@ def native_daily_nav(
     # The anchor is initial funding. Orders and benchmark purchases can first
     # execute on quotes observed strictly after it.
     marks = [DailyNav(day=days[0], nav_usd=funding)]
-    timeline, splits = _tape_timeline(replay)
+    quote_index = _index_tape(replay)
+    strategy_marks = replay_nav_series(replay, cutoffs[1:])
+    benchmark_marks = (
+        benchmark_nav_series(
+            replay,
+            cutoffs[1:],
+            start_at=start_at,
+            buy_and_hold_symbol=buy_and_hold,
+            include_equal_weight=equal_weight,
+            trend=trend,
+            equal_weight_schedule=scheduled_equal_weight,
+        )
+        if needs_formation or trend is not None
+        else {}
+    )
     for cutoff in cutoffs[1:]:
-        prefix = replay_prefix(replay, cutoff)
         nav = funding.copy()
-        held = set()
-        if prefix.quotes:
-            result = run_replay(prefix, through=cutoff)
-            nav[strategy] = result["ending_bid_mark_nav_usd"]
-            held.update(result["open_positions"])
-        if prefix.quotes and (needs_formation or trend is not None):
-            report = run_benchmarks(
-                prefix,
-                start_at=start_at,
-                through=cutoff,
-                buy_and_hold_symbol=buy_and_hold,
-                include_equal_weight=equal_weight,
-                trend=trend,
-                equal_weight_schedule=scheduled_equal_weight,
-            )["benchmarks"]
-            for mapping in benchmarks:
-                result = report[mapping.kind]
-                nav[mapping.series_id] = result["ending_bid_mark_nav_usd"]
-                held.update(result["open_positions"])
+        mark = strategy_marks[cutoff]
+        nav[strategy] = mark.nav_usd
+        held = set(mark.held_symbols)
+        for mapping in benchmarks:
+            series = benchmark_marks.get(mapping.kind)
+            if series is not None:
+                mark = series[cutoff]
+                nav[mapping.series_id] = mark.nav_usd
+                held.update(mark.held_symbols)
         if mark_max_age_seconds is not None:
             max_age = timedelta(seconds=mark_max_age_seconds)
             for symbol in sorted(held):
@@ -259,9 +256,7 @@ def native_daily_nav(
                 if identity is not None:
                     _, active = identity.describe_holding(symbol, cutoff)
                     mark_floor = active.effective_at
-                quote = _reference_quote(
-                    timeline[symbol], splits[symbol], cutoff, mark_floor=mark_floor,
-                )
+                quote = quote_index[symbol].reference_at(cutoff, mark_floor=mark_floor)
                 if quote is None or cutoff - quote.observed_at > max_age:
                     source = "Walk-forward" if identity is None else "Identity replay"
                     raise ValueError(

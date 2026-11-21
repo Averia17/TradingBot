@@ -11,7 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"tradingbot/control/internal/ledger"
-	"tradingbot/control/internal/papermemory"
+	"tradingbot/control/internal/paper_memory"
 )
 
 var errReadEvents = errors.New("read paper events")
@@ -44,7 +44,7 @@ func checkAccount(ctx context.Context, tx pgx.Tx, unknownAfter time.Duration, r 
 	if err != nil {
 		return err
 	}
-	projection, err := papermemory.Load(ctx, paperEvents{tx: tx}, r.AccountID, r.CheckedAt)
+	projection, err := paper_memory.Load(ctx, paperEvents{tx: tx}, r.AccountID, r.CheckedAt)
 	if canceled := ctx.Err(); canceled != nil {
 		return canceled
 	}
@@ -69,7 +69,7 @@ func checkAccount(ctx context.Context, tx pgx.Tx, unknownAfter time.Duration, r 
 	return checkOrders(ctx, tx, unknownAfter, r)
 }
 
-func checkPositions(ctx context.Context, tx pgx.Tx, lots []papermemory.OpenLot, r *report) error {
+func checkPositions(ctx context.Context, tx pgx.Tx, lots []paper_memory.OpenLot, r *report) error {
 	projected := make(map[ledger.Instrument]*big.Int)
 	for _, lot := range lots {
 		quantity, ok := new(big.Int).SetString(lot.QuantityRaw, 10)

@@ -6,8 +6,12 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"time"
 
 	"github.com/jackc/pgx/v5"
+
+	"tradingbot/control/internal/control"
+	"tradingbot/control/internal/jobs"
 )
 
 type researchBudget struct {
@@ -25,10 +29,17 @@ type researchBudget struct {
 
 func checkBudget(ctx context.Context, tx pgx.Tx, r *report) error {
 	b := r.Research
-	var request, requestHash, completion, completionHash []byte
+	archivedJob := jobs.Job{ID: b.JobID}
+	archivedResult := jobs.Result{JobID: b.JobID}
+	var requestHash, completionHash []byte
+	var completedAt *time.Time
+	var registrySHA string
+	var attemptsMatchRegistry bool
 	var currentAttempt, completionPermits, distinctRemainders, minRemainder, maxRemainder int
 	err := tx.QueryRow(ctx, `SELECT j.status, j.attempt_count, j.legacy_budget_unknown, j.request, j.request_sha256,
-		r.payload, r.payload_sha256, r.attempt, permits.total, permits.completed, permits.distinct_remainders,
+		j.created_at, j.identity_registry_sha256,
+		NOT EXISTS(SELECT 1 FROM research_job_attempts a WHERE a.job_id=j.id AND a.identity_registry_sha256<>j.identity_registry_sha256),
+		r.payload, r.payload_sha256, r.attempt, r.completed_at, permits.total, permits.completed, permits.distinct_remainders,
 		permits.min_remainder, permits.max_remainder
 		FROM research_jobs j LEFT JOIN research_job_results r ON r.job_id=j.id
 		CROSS JOIN LATERAL (
@@ -38,8 +49,9 @@ func checkBudget(ctx context.Context, tx pgx.Tx, r *report) error {
 				COALESCE(min(p.remaining_llm_calls),0) AS min_remainder,
 				COALESCE(max(p.remaining_llm_calls),0) AS max_remainder
 			FROM research_call_permits p WHERE p.job_id=j.id
-		) permits WHERE j.id=$1`, b.JobID).Scan(&b.Status, &currentAttempt, &b.LegacyBudgetUnknown, &request, &requestHash,
-		&completion, &completionHash, &b.CompletedAttempt, &b.DurablePermits, &completionPermits, &distinctRemainders,
+		) permits WHERE j.id=$1`, b.JobID).Scan(&b.Status, &currentAttempt, &b.LegacyBudgetUnknown, &archivedJob.Request, &requestHash,
+		&archivedJob.CreatedAt, &registrySHA, &attemptsMatchRegistry, &archivedResult.Payload, &completionHash,
+		&b.CompletedAttempt, &completedAt, &b.DurablePermits, &completionPermits, &distinctRemainders,
 		&minRemainder, &maxRemainder)
 	if errors.Is(err, pgx.ErrNoRows) {
 		r.add("research_job_not_found")
@@ -52,11 +64,18 @@ func checkBudget(ctx context.Context, tx pgx.Tx, r *report) error {
 		r.add("research_budget_legacy_unknown")
 	}
 	var input struct {
-		Version string `json:"job_schema_version"`
-		ID      string `json:"job_id"`
-		Limit   int    `json:"max_llm_calls"`
+		Version  string          `json:"job_schema_version"`
+		ID       string          `json:"job_id"`
+		Limit    int             `json:"max_llm_calls"`
+		Registry json.RawMessage `json:"identity_registry"`
 	}
-	if !matchesDigest(request, requestHash) || json.Unmarshal(request, &input) != nil || input.Version != "0.1" ||
+	parsed := json.Unmarshal(archivedJob.Request, &input) == nil
+	bound := input.Version == "0.2" || registrySHA != ""
+	validBinding := input.Version == "0.1" && len(input.Registry) == 0
+	if bound {
+		validBinding = control.CheckArchivedIdentityRequest(archivedJob, registrySHA)
+	}
+	if !parsed || !matchesDigest(archivedJob.Request, requestHash) || !validBinding || !attemptsMatchRegistry ||
 		input.ID != b.JobID || input.Limit < 1 || input.Limit > 64 {
 		r.add("research_budget_invalid")
 	} else {
@@ -73,10 +92,13 @@ func checkBudget(ctx context.Context, tx pgx.Tx, r *report) error {
 	}
 
 	b.UnconfirmedPermits = b.DurablePermits
-	if (b.Status == "completed") != (b.CompletedAttempt != nil) || (b.CompletedAttempt != nil && *b.CompletedAttempt != currentAttempt) {
+	if (b.Status == "completed") != (b.CompletedAttempt != nil) ||
+		(b.CompletedAttempt != nil && (*b.CompletedAttempt != currentAttempt || completedAt == nil)) {
 		r.add("research_result_state_mismatch")
 	} else if b.CompletedAttempt != nil {
-		checkReportedUsage(r, completion, completionHash, completionPermits)
+		archivedJob.Status = b.Status
+		archivedResult.Attempt, archivedResult.CompletedAt = *b.CompletedAttempt, *completedAt
+		checkReportedUsage(r, archivedJob, archivedResult, completionHash, completionPermits, bound)
 	}
 	if b.UnconfirmedPermits > 0 {
 		r.add("research_permit_usage_unconfirmed")
@@ -84,7 +106,7 @@ func checkBudget(ctx context.Context, tx pgx.Tx, r *report) error {
 	return nil
 }
 
-func checkReportedUsage(r *report, payload, hash []byte, permits int) {
+func checkReportedUsage(r *report, job jobs.Job, receipt jobs.Result, hash []byte, permits int, bound bool) {
 	var result struct {
 		Version  string `json:"result_schema_version"`
 		Metadata struct {
@@ -92,20 +114,23 @@ func checkReportedUsage(r *report, payload, hash []byte, permits int) {
 			MissingUsage *int `json:"missing_usage_calls"`
 		} `json:"metadata"`
 	}
-	if !matchesDigest(payload, hash) || json.Unmarshal(payload, &result) != nil {
+	if !matchesDigest(receipt.Payload, hash) || json.Unmarshal(receipt.Payload, &result) != nil ||
+		bound != (result.Version == "0.3") ||
+		bound && (r.Research.Limit == nil || control.ValidateArchivedResearchResult(job, receipt) != nil) {
 		r.add("research_result_integrity_failed")
 		return
 	}
 	usage := result.Metadata
-	if (result.Version != "0.1" && result.Version != "0.2") || usage.Calls == nil || *usage.Calls < 0 || *usage.Calls > 64 ||
+	offline := result.Version == "0.2" || result.Version == "0.3"
+	if (result.Version != "0.1" && !offline) || usage.Calls == nil || *usage.Calls < 0 || *usage.Calls > 64 ||
 		(result.Version == "0.1" && *usage.Calls != 0) ||
-		(result.Version == "0.2" && (*usage.Calls == 0 || usage.MissingUsage == nil || *usage.MissingUsage < 0 || *usage.MissingUsage > *usage.Calls)) {
+		(offline && (*usage.Calls == 0 || usage.MissingUsage == nil || *usage.MissingUsage < 0 || *usage.MissingUsage > *usage.Calls)) {
 		r.add("research_usage_unknown")
 		return
 	}
 	b := r.Research
 	b.ReportedCalls = usage.Calls
-	if result.Version == "0.2" {
+	if offline {
 		b.MissingTokenCallUsage = usage.MissingUsage
 		if *usage.MissingUsage > 0 {
 			r.add("research_token_usage_missing")

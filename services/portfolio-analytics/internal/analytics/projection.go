@@ -26,7 +26,8 @@ type ledgerState struct {
 
 type holding struct {
 	Balance
-	Lots []lot `json:"lots"`
+	Lots               []lot `json:"lots"`
+	openCostBasisUnits *big.Int
 }
 
 type lot struct {
@@ -72,16 +73,19 @@ func (s *ledgerState) applyOrder(e AccountEvent) error {
 	if len(position.Lots) != 0 && position.Instrument != balance.Instrument {
 		return errors.New("held instrument identity changed")
 	}
-	expectedCash := usdAmount(s.CashUSD)
-	expectedQuantity := rawAmount(position.QuantityRaw)
-	if f := e.Fill; f != nil {
+	var balancesMatch bool
+	if f := e.Fill; f == nil {
+		balancesMatch = equalUSDAmounts(s.CashUSD, e.CashUSD) && equalRawAmounts(position.QuantityRaw, balance.QuantityRaw)
+	} else {
+		expectedCash := usdAmount(s.CashUSD)
+		expectedQuantity := rawAmount(position.QuantityRaw)
 		quantity := rawAmount(f.QuantityRaw)
 		gross, fee := usdAmount(f.GrossUSD), usdAmount(f.FeeUSD)
 		if f.Side == "BUY" {
 			basis := gross.Add(gross, fee)
 			expectedCash.Sub(expectedCash, basis)
 			expectedQuantity.Add(expectedQuantity, quantity)
-			position.Lots = append(position.Lots, lot{Quantity: f.QuantityRaw, Basis: amountString(basis), Consumed: "0"})
+			position.addLot(f.QuantityRaw, basis)
 		} else {
 			proceeds := gross.Sub(gross, fee)
 			expectedCash.Add(expectedCash, proceeds)
@@ -91,15 +95,16 @@ func (s *ledgerState) applyOrder(e AccountEvent) error {
 				return err
 			}
 			realized := usdAmount(s.RealizedUSD)
-			s.RealizedUSD = amountString(realized.Add(realized, proceeds.Sub(proceeds, basis)))
+			s.RealizedUSD = formatUSDUnits(realized.Add(realized, proceeds.Sub(proceeds, basis)))
 		}
-		s.FeesUSD = amountString(fee.Add(fee, usdAmount(s.FeesUSD)))
+		s.FeesUSD = formatUSDUnits(fee.Add(fee, usdAmount(s.FeesUSD)))
+		balancesMatch = expectedCash.Cmp(usdAmount(e.CashUSD)) == 0 && expectedQuantity.Cmp(rawAmount(balance.QuantityRaw)) == 0
 	}
-	if expectedCash.Cmp(usdAmount(e.CashUSD)) != 0 || expectedQuantity.Cmp(rawAmount(balance.QuantityRaw)) != 0 {
+	if !balancesMatch {
 		return fmt.Errorf("fill arithmetic disagrees with ledger at version %d", e.AccountVersion)
 	}
-	if e.Kind == "paper_order.unknown" && (usdAmount(s.ReservedCashUSD).Cmp(usdAmount(e.ReservedCashUSD)) != 0 ||
-		rawAmount(position.ReservedQuantityRaw).Cmp(rawAmount(balance.ReservedQuantityRaw)) != 0) {
+	if e.Kind == "paper_order.unknown" && (!equalUSDAmounts(s.ReservedCashUSD, e.ReservedCashUSD) ||
+		!equalRawAmounts(position.ReservedQuantityRaw, balance.ReservedQuantityRaw)) {
 		return errors.New("unknown resolution changed a reservation")
 	}
 	position.Balance = balance
@@ -109,6 +114,16 @@ func (s *ledgerState) applyOrder(e AccountEvent) error {
 		s.Positions[balance.InstrumentID] = position
 	}
 	return nil
+}
+
+func (p *holding) addLot(quantity string, basis *big.Int) {
+	switch {
+	case p.openCostBasisUnits != nil:
+		p.openCostBasisUnits = new(big.Int).Add(p.openCostBasisUnits, basis)
+	case len(p.Lots) == 0:
+		p.openCostBasisUnits = new(big.Int).Set(basis)
+	}
+	p.Lots = append(p.Lots, lot{Quantity: quantity, Basis: formatUSDUnits(basis), Consumed: "0"})
 }
 
 func (p *holding) sell(quantity *big.Int) (*big.Int, error) {
@@ -121,9 +136,9 @@ func (p *holding) sell(quantity *big.Int) (*big.Int, error) {
 		if take.Cmp(remaining) > 0 {
 			take.Set(remaining)
 		}
-		priorBasis := allocatedBasis(current, consumed)
+		priorBasis := cumulativeSoldBasis(current, consumed)
 		consumed.Add(consumed, take)
-		allocated := allocatedBasis(current, consumed)
+		allocated := cumulativeSoldBasis(current, consumed)
 		soldBasis.Add(soldBasis, allocated.Sub(allocated, priorBasis))
 		remaining.Sub(remaining, take)
 		if size.Cmp(consumed) == 0 {
@@ -136,21 +151,29 @@ func (p *holding) sell(quantity *big.Int) (*big.Int, error) {
 	if remaining.Sign() != 0 {
 		return nil, errors.New("sell exceeds open FIFO lots")
 	}
+	if p.openCostBasisUnits != nil {
+		p.openCostBasisUnits = new(big.Int).Sub(p.openCostBasisUnits, soldBasis)
+	}
 	return soldBasis, nil
 }
 
-func (p holding) basis() *big.Int {
+func (p holding) remainingCostBasis() *big.Int {
+	if p.openCostBasisUnits != nil {
+		return p.openCostBasisUnits
+	}
+	// Snapshots stored by PostgreSQL contain the FIFO lots. The running
+	// total is populated when an in-memory history starts from funding.
 	total := new(big.Int)
 	for _, current := range p.Lots {
 		open := usdAmount(current.Basis)
-		total.Add(total, open.Sub(open, allocatedBasis(&current, rawAmount(current.Consumed))))
+		total.Add(total, open.Sub(open, cumulativeSoldBasis(&current, rawAmount(current.Consumed))))
 	}
 	return total
 }
 
 // Match Control's fifo_recording_order_usd_scale8_v1. Each sale takes the
 // increment of the cumulatively rounded share, including the final remainder.
-func allocatedBasis(l *lot, consumed *big.Int) *big.Int {
+func cumulativeSoldBasis(l *lot, consumed *big.Int) *big.Int {
 	units := usdAmount(l.Basis)
 	return units.Quo(units.Mul(units, consumed), rawAmount(l.Quantity))
 }
@@ -171,8 +194,27 @@ func usdAmount(value string) *big.Int {
 	return rawAmount(whole + fraction + strings.Repeat("0", scaleDigits-len(fraction)))
 }
 
-func amountString(units *big.Int) string {
-	return decimalString(new(big.Rat).SetFrac(units, usdScale))
+func equalUSDAmounts(a, b string) bool { return a == b || usdAmount(a).Cmp(usdAmount(b)) == 0 }
+
+func equalRawAmounts(a, b string) bool { return a == b || rawAmount(a).Cmp(rawAmount(b)) == 0 }
+
+func formatUSDUnits(units *big.Int) string {
+	if units.Sign() == 0 {
+		return "0"
+	}
+	digits := units.String()
+	sign := ""
+	if digits[0] == '-' {
+		sign, digits = "-", digits[1:]
+	}
+	if wholeDigits := len(digits) - scaleDigits; wholeDigits > 0 {
+		fraction := strings.TrimRight(digits[wholeDigits:], "0")
+		if fraction == "" {
+			return sign + digits[:wholeDigits]
+		}
+		return sign + digits[:wholeDigits] + "." + fraction
+	}
+	return sign + "0." + strings.Repeat("0", scaleDigits-len(digits)) + strings.TrimRight(digits, "0")
 }
 
 func decimalString(value *big.Rat) string {

@@ -50,7 +50,7 @@ CMD ["worker"]
 FROM research-runtime AS paper-entry
 USER root
 RUN install -d -o 65532 -g 65532 -m 0700 /journal
-COPY --from=control-image /usr/local/bin/paper-apply /usr/local/bin/paper-apply
+COPY --from=control-image /usr/local/bin/paper /usr/local/bin/paper
 USER 65532:65532
 ENTRYPOINT ["python", "-m", "tradingbot.entry_cycles"]
 CMD ["--help"]

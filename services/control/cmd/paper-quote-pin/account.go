@@ -10,10 +10,10 @@ import (
 	"time"
 
 	"tradingbot/control/internal/jobs"
-	"tradingbot/control/internal/paperquotes"
+	"tradingbot/control/internal/paper_quotes"
 )
 
-func runAccount(ctx context.Context, research *jobs.Store, root *os.Root, tape *paperquotes.Tape, poll time.Duration, encoder *json.Encoder) error {
+func runAccount(ctx context.Context, research *jobs.Store, root *os.Root, tape *paper_quotes.Tape, poll time.Duration, encoder *json.Encoder) error {
 	after := ""
 	for {
 		page, cancel := context.WithTimeout(ctx, 30*time.Second)
@@ -48,7 +48,7 @@ func runAccount(ctx context.Context, research *jobs.Store, root *os.Root, tape *
 	}
 }
 
-func pinAccountPage(ctx context.Context, research *jobs.Store, root *os.Root, tape *paperquotes.Tape, after string) ([]pinResult, string, error) {
+func pinAccountPage(ctx context.Context, research *jobs.Store, root *os.Root, tape *paper_quotes.Tape, after string) ([]pinResult, string, error) {
 	tasks, err := research.ReadyPaperDispatch(ctx, tape.AccountID(), after)
 	if err != nil {
 		return nil, after, err

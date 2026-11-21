@@ -19,7 +19,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"tradingbot/control/internal/ledger"
-	"tradingbot/control/internal/papernav"
+	"tradingbot/control/internal/paper_nav"
 )
 
 const testAccount = "11111111-1111-4111-8111-111111111111"
@@ -47,10 +47,10 @@ func TestPaperNavReadsVersionedPostgresHistoryWithoutMigrations(t *testing.T) {
 	// exactly at midnight, so it belongs only to the next UTC valuation.
 	addEvent(t, ctx, conn, filled.EventID, 3, "paper_order.filled", last, filled)
 
-	req := papernav.Request{
+	req := paper_nav.Request{
 		Version: "0.1", AccountID: testAccount, StartDay: "2020-01-01", EndDay: "2020-01-03",
-		MarkMaxAgeSeconds: 3600, Source: papernav.Source{Kind: "synthetic_fixture", ID: "postgres-paper-fixture"},
-		Marks: []papernav.Mark{
+		MarkMaxAgeSeconds: 3600, Source: paper_nav.Source{Kind: "synthetic_fixture", ID: "postgres-paper-fixture"},
+		Marks: []paper_nav.Mark{
 			{ID: "closing", Instrument: instrument, PriceUSD: "32.00000008", ObservedAt: instant("2020-01-02T18:30:00-05:00"), AvailableAt: instant("2020-01-02T23:40:00Z")},
 			{ID: "missed", Instrument: instrument, PriceUSD: "100", ObservedAt: instant("2020-01-02T23:58:20Z"), AvailableAt: instant("2020-01-03T00:00:00Z")},
 		},
@@ -69,7 +69,7 @@ func TestPaperNavReadsVersionedPostgresHistoryWithoutMigrations(t *testing.T) {
 	if err := run(ctx, dsn, args, &firstRun); !errors.Is(err, errIncomplete) {
 		t.Fatalf("read-only NAV run: %v", err)
 	}
-	var report papernav.Report
+	var report paper_nav.Report
 	if err := json.Unmarshal(firstRun.Bytes(), &report); err != nil {
 		t.Fatal(err)
 	}

@@ -8,7 +8,7 @@ import (
 	"log/slog"
 	"os"
 
-	"tradingbot/control/internal/paperquotes"
+	"tradingbot/control/internal/paper_quotes"
 )
 
 func main() {
@@ -31,15 +31,15 @@ func run(args []string, output io.Writer) error {
 	if flags.NArg() != 0 || *plan == "" || *planSHA == "" || *archive == "" || *archiveSHA == "" {
 		return errors.New("provide --plan, --plan-sha256, --observations and --observations-sha256")
 	}
-	pinnedPlan, err := readDocument(*plan, paperquotes.MaxStudyPlanBytes)
+	pinnedPlan, err := readDocument(*plan, paper_quotes.MaxStudyPlanBytes)
 	if err != nil {
 		return err
 	}
-	pinnedArchive, err := readDocument(*archive, paperquotes.MaxStudyArchiveBytes)
+	pinnedArchive, err := readDocument(*archive, paper_quotes.MaxStudyArchiveBytes)
 	if err != nil {
 		return err
 	}
-	report, err := paperquotes.SummarizeStudy(pinnedPlan, *planSHA, pinnedArchive, *archiveSHA)
+	report, err := paper_quotes.SummarizeStudy(pinnedPlan, *planSHA, pinnedArchive, *archiveSHA)
 	if err != nil {
 		return err
 	}

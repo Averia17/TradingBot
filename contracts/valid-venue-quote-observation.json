@@ -1,0 +1,17 @@
+{
+  "network": "solana-mainnet",
+  "input_mint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+  "output_mint": "Xsc9qvGR1efVDFGLrVsmkzv3qi45LTBjeUKSPmx9qEh",
+  "in_amount": "100000000",
+  "provider": "jupiter",
+  "firmness": "indicative",
+  "out_amount": "67800123",
+  "min_out_amount": "67500000",
+  "swap_fee_bps": 10,
+  "swap_fee_mint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+  "route": "metis",
+  "provider_request_id": "example-request",
+  "requested_at": "2026-11-18T14:30:00Z",
+  "observed_at": "2026-11-18T14:30:00.2Z",
+  "provider_expires_at": null
+}

@@ -17,7 +17,7 @@ import (
 
 	"tradingbot/control/internal/contract"
 	"tradingbot/control/internal/jobs"
-	"tradingbot/control/internal/researchscheduler"
+	"tradingbot/control/internal/research_scheduler"
 )
 
 type coverageReport struct {
@@ -88,7 +88,7 @@ func run(ctx context.Context, dsn string, args []string, output io.Writer) error
 	}
 	defer file.Close()
 	hash := sha256.New()
-	schedule, err := researchscheduler.Load(io.TeeReader(file, hash))
+	schedule, err := research_scheduler.Load(io.TeeReader(file, hash))
 	if err != nil {
 		return err
 	}
