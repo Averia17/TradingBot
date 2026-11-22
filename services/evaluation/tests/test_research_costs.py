@@ -304,3 +304,49 @@ def test_published_permit_archive_schema_and_partial_costs(capsys):
     assert result["fully_valued_calls_cost_usd"] == "0.00373"
     assert result["estimated_cost_usd"] is None
     assert result["complete_archive_p95_usd"] is None
+
+
+def test_provider_permit_requires_real_callback_and_archived_rate_schedule(
+    tmp_path, capsys, archive, rates
+):
+    call = archive["calls"][0]
+    call.update(provider="openai", model="gpt-6-sol", role="portfolio_allocator")
+    rates["source_mode"] = "archived_schedule"
+    rates["rates"][0].update(provider=call["provider"], model=call["model"])
+    raw = msgspec.json.encode(call)
+    permit_archive = {
+        "schema_version": "0.1",
+        "source_mode": "provider_reported",
+        "job_id": "30000000-0000-4000-8000-000000000001",
+        "job_status": "completed",
+        "attempts": 1,
+        "legacy_budget_unknown": False,
+        "permit_history_known": True,
+        "permits": [{
+            "call_id": call["run_id"],
+            "attempt": 1,
+            "granted_at": "2026-11-18T12:19:58Z",
+            "callback_payload": msgspec.to_builtins(raw),
+            "callback_sha256": sha256(raw).hexdigest(),
+            "recorded_at": "2026-11-18T12:20:01Z",
+        }],
+    }
+    code, report = invoke(tmp_path, capsys, rates, permit_archives=(permit_archive,))
+    assert code == 0
+    assert report["source_mode"] == "provider_reported"
+    assert report["estimated_cost_usd"] == "0.0036"
+    assert report["actual_billed_cost_usd"] is None
+
+    rates["source_mode"] = "synthetic_fixture"
+    code, message = invoke(tmp_path, capsys, rates, permit_archives=(permit_archive,))
+    assert code == 2
+    assert "source differs" in message
+
+    rates["source_mode"] = "archived_schedule"
+    raw = msgspec.json.encode(call | {"provider": "offline", "model": "scripted-offline-v1"})
+    permit_archive["permits"][0].update(
+        callback_payload=msgspec.to_builtins(raw), callback_sha256=sha256(raw).hexdigest(),
+    )
+    code, message = invoke(tmp_path, capsys, rates, permit_archives=(permit_archive,))
+    assert code == 2
+    assert "does not match its provider permit" in message

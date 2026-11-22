@@ -21,6 +21,7 @@ var ResearchCallUsageRequest = compile(researchCallUsageSchema, "", linkedResear
 var ResearchCallUsageReceipt = compile(researchCallUsageSchema, "#/$defs/Receipt", linkedResearchLLMUsageSchema)
 
 var researchCallID = regexp.MustCompile(`^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$`)
+var researchModelID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 
 type ResearchLLMCall struct {
 	RunID        string    `json:"run_id"`
@@ -40,15 +41,33 @@ type ResearchLLMCall struct {
 // ValidateOfflineCall rejects unsupported identities, nonterminal callbacks and
 // inconsistencies between the inclusive totals and their nullable subsets.
 func (call ResearchLLMCall) ValidateOfflineCall() error {
+	if (call.Provider == nil) != (call.Model == nil) ||
+		(call.Provider != nil && (*call.Provider != "offline" || *call.Model != "scripted-offline-v1")) {
+		return errors.New("invalid offline research model identity")
+	}
+	return call.validateTerminal()
+}
+
+func (call ResearchLLMCall) ValidateProviderCall() error {
+	if call.Provider == nil || call.Model == nil ||
+		!ValidPreparedProviderModel(*call.Provider, *call.Model) ||
+		call.Role != "portfolio_allocator" {
+		return errors.New("invalid prepared research model identity")
+	}
+	return call.validateTerminal()
+}
+
+func ValidPreparedProviderModel(provider, model string) bool {
+	return (provider == "chatgpt" || provider == "openai") &&
+		researchModelID.MatchString(model) && model != "scripted-offline-v1"
+}
+
+func (call ResearchLLMCall) validateTerminal() error {
 	_, offset := call.StartedAt.Zone()
 	if !researchCallID.MatchString(call.RunID) || call.StartedAt.IsZero() || offset != 0 ||
 		(call.Status != "completed" && call.Status != "failed") ||
 		(call.Role != "research" && call.Role != "portfolio_allocator" && call.Role != "unknown") {
-		return errors.New("invalid terminal offline research callback")
-	}
-	if (call.Provider == nil) != (call.Model == nil) ||
-		(call.Provider != nil && (*call.Provider != "offline" || *call.Model != "scripted-offline-v1")) {
-		return errors.New("invalid offline research model identity")
+		return errors.New("invalid terminal research callback")
 	}
 	const maxTokens = 1000000000
 	for _, count := range []*int{call.InputTokens, call.OutputTokens, call.CacheRead, call.CacheWrite, call.Reasoning} {

@@ -1,0 +1,30 @@
+{
+  "job_schema_version": "0.3",
+  "analysis_mode": "prepared_provider",
+  "job_id": "f700cba3-c634-4204-8669-1acd78612431",
+  "portfolio": {
+    "snapshot_id": "00000000-0000-0000-0000-000000000001",
+    "as_of": "2026-10-04T12:00:00Z",
+    "currency": "USD",
+    "cash_asset": "USDC",
+    "cash_usd": "1000",
+    "reserved_cash_usd": "0",
+    "max_position_pct": "0.25",
+    "positions": []
+  },
+  "requested_symbols": ["TSLA", "NVDA"],
+  "data_manifest": {
+    "ref": "test/manifest.json",
+    "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "policy_version": "test-1",
+  "max_llm_calls": 1,
+  "identity_registry": {
+    "ref": "test/research-identity.json",
+    "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+  },
+  "security_bindings": [
+    {"symbol": "TSLA", "security_id": "fixture-tesla"},
+    {"symbol": "NVDA", "security_id": "fixture-nvidia"}
+  ]
+}

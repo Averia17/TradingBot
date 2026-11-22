@@ -22,6 +22,9 @@ func TestResearchResultWireContract(t *testing.T) {
 	t.Run("identity-bound", func(t *testing.T) {
 		checkResearchResultWireContract(t, fixture(t, identityResultFixture), fixture(t, identityJobFixture))
 	})
+	t.Run("prepared-provider", func(t *testing.T) {
+		checkResearchResultWireContract(t, fixture(t, preparedProviderResultFixture), preparedProviderJob(t))
+	})
 }
 
 func checkResearchResultWireContract(t *testing.T, request, jobRequest []byte) {

@@ -128,14 +128,15 @@ type perpQuote struct {
 }
 
 type Study struct {
-	Version    string     `json:"schema_version"`
-	Source     string     `json:"source_mode"`
-	AsOf       time.Time  `json:"as_of"`
-	Horizon    int        `json:"horizon_hours"`
-	Account    account    `json:"account"`
-	Policy     policy     `json:"policy"`
-	Securities []security `json:"securities"`
-	digest     string
+	Version     string     `json:"schema_version"`
+	Source      string     `json:"source_mode"`
+	InputSHA256 string     `json:"normalization_input_sha256,omitempty"`
+	AsOf        time.Time  `json:"as_of"`
+	Horizon     int        `json:"horizon_hours"`
+	Account     account    `json:"account"`
+	Policy      policy     `json:"policy"`
+	Securities  []security `json:"securities"`
+	digest      string
 }
 
 type StudyInfo struct {

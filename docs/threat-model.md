@@ -121,6 +121,12 @@ Local proposed focus paths are in the table below; they are not vulnerability fi
 6. Memory lessons are rewritten/backdated or outcome labels contain future data → strategy acquires fake edge → scale decision made on poisoned report. Barrier: immutable event history, available_at, hashed evidence, restore/replay independent of researcher output.
 7. Wrong mint/decimals/multiplier makes cheap fake token or oversized amount look legitimate. Barrier: issuer registry/versioned terms, raw integer arithmetic, Token-2022 decode, balance reconciliation.
 8. One RPC lies about finalized swap/balance → bot marks phantom profit/available cash. Barrier: independent view and canonical signatures/block commitments; unresolved mismatch freezes new risk.
+   Jupiter Adapter exposes a single RPC observation with separate context slots and a short TTL.
+   Its mainnet genesis check detects a mismatched cluster configuration. The live ledger still
+   requires independent confirmation and the slots relevant to the reconciled transaction.
+   Submission requires an independent approval signature over the exact signed transaction hash
+   and reservation identifier. A durable attempt claim precedes the provider call. Ambiguous
+   delivery stays unknown and a repeat cannot send that attempt again.
 9. Operator/update introduces broader module/delegate/admin power → custody boundary disappears. Barrier: signed config change, dependency pin/review, separate privileged owner actions and recovery exercise.
 10. Issuer redemption halt/stablecoin depeg collapses apparent NAV/exit availability. Barrier: exposure caps, multiple price/quote views, stressed marks, freeze new risk; cannot guarantee recovery.
 

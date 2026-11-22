@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from tradingbot.identity_audit import MAX_IDENTITY_EXPORT_BYTES, audit_identity_export
+from tradingbot.prepared_analysis import build_prepared_reports
 from tradingbot.security_identity import load_identity_snapshot
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -148,6 +149,71 @@ def test_audit_preserves_go_completion_order_for_distinct_jobs(tmp_path, case):
     assert [receipt["job_id"] for receipt in audit["jobs"]] == [other_id, job["job_id"]]
     with pytest.raises(ValueError, match="ordered by completion"):
         verify(export(first, earlier_id), tmp_path, owner)
+
+
+@pytest.mark.parametrize("source", ["local_archive", "synthetic_fixture"])
+def test_prepared_audit_rebuilds_reports_from_the_pinned_local_archive(tmp_path, case, source):
+    job, result, owner = case
+    archive_path = tmp_path / job["data_manifest"]["ref"]
+    archive = json.loads(archive_path.read_bytes())
+    archive["source_mode"] = source
+    template = next(record for record in archive["records"] if record["kind"] == "filing")
+    for binding in job["security_bindings"]:
+        for kind in ("filing", "news"):
+            symbol = binding["symbol"]
+            archive["records"].append(
+                template | {
+                    "kind": kind,
+                    "record_id": f"example-{kind}-{symbol}",
+                    "symbol": symbol,
+                    "payload": {"headline": "Archive evidence", "security_id": binding["security_id"]},
+                }
+            )
+    archive_bytes = encoded(archive)
+    archive_path.write_bytes(archive_bytes)
+    job["data_manifest"]["sha256"] = digest(archive_bytes)
+    job.update(job_schema_version="0.3", analysis_mode="prepared_provider", max_llm_calls=1)
+    projected = load_identity_snapshot(
+        tmp_path,
+        job["data_manifest"],
+        job["identity_registry"],
+        datetime.fromisoformat(job["portfolio"]["as_of"]),
+        job["security_bindings"],
+    )
+    result["result_schema_version"] = "0.4"
+    result["reports"] = build_prepared_reports(projected, job["requested_symbols"])
+    result["metadata"].update(
+        source_mode="prepared_archive_research", llm_calls=1, missing_usage_calls=1,
+    )
+    result["metadata"]["provenance"].update(
+        data_manifest=job["data_manifest"],
+        projected_snapshot_sha256=projected.sha256,
+        archive_source_mode="local_archive",
+        model_provider="openai",
+        model_id="gpt-6-sol",
+    )
+
+    def seal():
+        result["batch"]["evidence_hashes"] = {
+            f"{symbol}:{field}": digest(text.encode())
+            for symbol, reports in result["reports"].items()
+            for field, text in reports.items()
+        }
+        return export(row(job, result))
+
+    raw = seal()
+    if source == "synthetic_fixture":
+        with pytest.raises(ValueError, match="local archive"):
+            verify(raw, tmp_path, owner)
+        return
+    assert verify(raw, tmp_path, owner)["status"] == "verified"
+    result["reports"]["TSLA"]["market_report"] += "\nchanged"
+    with pytest.raises(ValueError, match="prepared reports differ"):
+        verify(seal(), tmp_path, owner)
+    job["job_schema_version"] = "0.2"
+    del job["analysis_mode"]
+    with pytest.raises(ValueError, match="result version"):
+        verify(seal(), tmp_path, owner)
 
 
 @pytest.mark.parametrize(

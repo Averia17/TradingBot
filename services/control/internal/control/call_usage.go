@@ -29,14 +29,15 @@ func (h callUsageHTTP) record(w http.ResponseWriter, r *http.Request, jobID stri
 		Call     contract.ResearchLLMCall `json:"call"`
 	}
 	if contract.Decode(body, contract.ResearchCallUsageRequest, &request) != nil ||
-		request.Call.ValidateOfflineCall() != nil {
+		(request.Version == "0.1" && request.Call.ValidateOfflineCall() != nil) ||
+		(request.Version == "0.2" && request.Call.ValidateProviderCall() != nil) {
 		writeError(w, http.StatusUnprocessableEntity, "invalid_call_usage")
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), jobStoreTimeout)
 	defer cancel()
 	receipt, created, err := h.store.RecordCallUsage(ctx, jobs.RecordResearchCallUsage{
-		JobID: jobID, WorkerID: request.WorkerID, Token: request.Token, Call: request.Call,
+		JobID: jobID, WorkerID: request.WorkerID, Token: request.Token, Call: request.Call, Provider: request.Version == "0.2",
 	})
 	switch {
 	case errors.Is(err, jobs.ErrNotFound):

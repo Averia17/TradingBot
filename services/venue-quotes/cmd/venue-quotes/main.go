@@ -61,7 +61,7 @@ func run(ctx context.Context) error {
 	}
 	server := &http.Server{
 		Handler: handler, ReadHeaderTimeout: 2 * time.Second,
-		ReadTimeout: 3 * time.Second, WriteTimeout: 10 * time.Second,
+		ReadTimeout: 3 * time.Second, WriteTimeout: 13 * time.Second,
 		IdleTimeout: 30 * time.Second, MaxHeaderBytes: 8 * 1024,
 	}
 	done := make(chan struct{})

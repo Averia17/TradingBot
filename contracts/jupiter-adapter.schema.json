@@ -1,0 +1,274 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Jupiter Adapter HTTP v1",
+  "oneOf": [
+    {"$ref": "#/$defs/Price"},
+    {"$ref": "#/$defs/Balances"},
+    {"$ref": "#/$defs/SwapRequest"},
+    {"$ref": "#/$defs/PreparedSwap"},
+    {"$ref": "#/$defs/ExecutionApproval"},
+    {"$ref": "#/$defs/ExecutionRequest"},
+    {"$ref": "#/$defs/ExecutionReceipt"},
+    {"$ref": "#/$defs/TransactionStatus"},
+    {"$ref": "#/$defs/Error"}
+  ],
+  "$defs": {
+    "Address": {"type": "string", "pattern": "^[1-9A-HJ-NP-Za-km-z]{32,44}$"},
+    "USDC": {"const": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"},
+    "AssetMint": {"$ref": "#/$defs/Address", "not": {"$ref": "#/$defs/USDC"}},
+    "RawAmount": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]{0,19})$",
+      "description": "Canonical uint64 string. The adapter enforces the uint64 upper bound."
+    },
+    "PositiveRawAmount": {"$ref": "#/$defs/RawAmount", "not": {"const": "0"}},
+    "Slot": {"type": "integer", "minimum": 1, "maximum": 18446744073709551615},
+    "Decimals": {"type": "integer", "minimum": 0, "maximum": 255},
+    "BasisPoints": {"type": "integer", "minimum": 0, "maximum": 10000},
+    "Time": {"type": "string", "format": "date-time"},
+    "Side": {"enum": ["BUY", "SELL"]},
+    "UUID": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "not": {"const": "00000000-0000-0000-0000-000000000000"}
+    },
+    "Hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "Signature": {"type": "string", "pattern": "^[1-9A-HJ-NP-Za-km-z]{64,88}$"},
+    "RequestID": {"type": "string", "pattern": "^[A-Za-z0-9_.:-]{1,128}$"},
+    "Price": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "network", "mint", "usd_price", "decimals", "block_id", "requested_at", "observed_at"],
+      "properties": {
+        "schema_version": {"const": "1"},
+        "network": {"const": "solana-mainnet"},
+        "mint": {"$ref": "#/$defs/Address"},
+        "usd_price": {
+          "type": "string",
+          "maxLength": 194,
+          "pattern": "^(0\\.[0-9]*[1-9]|[1-9][0-9]*(\\.[0-9]*[1-9])?)$"
+        },
+        "decimals": {"$ref": "#/$defs/Decimals"},
+        "block_id": {"$ref": "#/$defs/PositiveRawAmount"},
+        "requested_at": {"$ref": "#/$defs/Time"},
+        "observed_at": {"$ref": "#/$defs/Time"}
+      }
+    },
+    "Balances": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "network", "owner", "commitment", "requested_at", "observed_at", "expires_at", "native", "token_programs"],
+      "properties": {
+        "schema_version": {"const": "1"},
+        "network": {"const": "solana-mainnet"},
+        "owner": {"$ref": "#/$defs/Address"},
+        "commitment": {"const": "finalized"},
+        "requested_at": {"$ref": "#/$defs/Time"},
+        "observed_at": {"$ref": "#/$defs/Time"},
+        "expires_at": {"$ref": "#/$defs/Time"},
+        "native": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["slot", "amount_lamports"],
+          "properties": {
+            "slot": {"$ref": "#/$defs/Slot"},
+            "amount_lamports": {"$ref": "#/$defs/RawAmount"}
+          }
+        },
+        "token_programs": {
+          "type": "array",
+          "minItems": 2,
+          "prefixItems": [
+            {
+              "$ref": "#/$defs/TokenProgram",
+              "properties": {"program_id": {"const": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"}}
+            },
+            {
+              "$ref": "#/$defs/TokenProgram",
+              "properties": {"program_id": {"const": "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"}}
+            }
+          ],
+          "items": false
+        }
+      }
+    },
+    "TokenProgram": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["program_id", "slot", "accounts"],
+      "properties": {
+        "program_id": {"$ref": "#/$defs/Address"},
+        "slot": {"$ref": "#/$defs/Slot"},
+        "accounts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["address", "mint", "amount_raw", "decimals", "state"],
+            "properties": {
+              "address": {"$ref": "#/$defs/Address"},
+              "mint": {"$ref": "#/$defs/Address"},
+              "amount_raw": {"$ref": "#/$defs/RawAmount"},
+              "decimals": {"$ref": "#/$defs/Decimals"},
+              "state": {"enum": ["initialized", "frozen"]}
+            }
+          }
+        }
+      }
+    },
+    "SwapRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["side", "asset_mint", "in_amount", "min_out_amount", "slippage_bps"],
+      "properties": {
+        "side": {"$ref": "#/$defs/Side"},
+        "asset_mint": {"$ref": "#/$defs/AssetMint"},
+        "in_amount": {"$ref": "#/$defs/PositiveRawAmount"},
+        "min_out_amount": {"$ref": "#/$defs/PositiveRawAmount"},
+        "slippage_bps": {"$ref": "#/$defs/BasisPoints"}
+      }
+    },
+    "PreparedSwap": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version", "state", "network", "owner", "side", "asset_mint", "input_mint", "output_mint",
+        "in_amount", "out_amount", "min_out_amount", "requested_min_out_amount", "slippage_bps",
+        "swap_fee_bps", "swap_fee_mint", "signature_fee_lamports", "priority_fee_lamports", "rent_fee_lamports",
+        "router", "provider_request_id", "transaction_version", "transaction_base64", "last_valid_block_height",
+        "requested_at", "observed_at", "provider_expires_at"
+      ],
+      "properties": {
+        "schema_version": {"const": "1"},
+        "state": {"const": "prepared"},
+        "network": {"const": "solana-mainnet"},
+        "owner": {"$ref": "#/$defs/Address"},
+        "side": {"$ref": "#/$defs/Side"},
+        "asset_mint": {"$ref": "#/$defs/AssetMint"},
+        "input_mint": {"$ref": "#/$defs/Address"},
+        "output_mint": {"$ref": "#/$defs/Address"},
+        "in_amount": {"$ref": "#/$defs/PositiveRawAmount"},
+        "out_amount": {"$ref": "#/$defs/PositiveRawAmount"},
+        "min_out_amount": {"$ref": "#/$defs/PositiveRawAmount"},
+        "requested_min_out_amount": {"$ref": "#/$defs/PositiveRawAmount"},
+        "slippage_bps": {"$ref": "#/$defs/BasisPoints"},
+        "swap_fee_bps": {"anyOf": [{"$ref": "#/$defs/BasisPoints"}, {"type": "null"}]},
+        "swap_fee_mint": {"anyOf": [{"$ref": "#/$defs/Address"}, {"type": "null"}]},
+        "signature_fee_lamports": {"$ref": "#/$defs/PositiveRawAmount"},
+        "priority_fee_lamports": {"$ref": "#/$defs/RawAmount"},
+        "rent_fee_lamports": {"$ref": "#/$defs/RawAmount"},
+        "router": {"const": "metis"},
+        "provider_request_id": {"type": "string", "minLength": 1},
+        "transaction_version": {"const": 0},
+        "transaction_base64": {"type": "string", "contentEncoding": "base64", "minLength": 4, "maxLength": 1644},
+        "last_valid_block_height": {"$ref": "#/$defs/PositiveRawAmount"},
+        "requested_at": {"$ref": "#/$defs/Time"},
+        "observed_at": {"$ref": "#/$defs/Time"},
+        "provider_expires_at": {"anyOf": [{"$ref": "#/$defs/Time"}, {"type": "null"}]}
+      },
+      "if": {"properties": {"side": {"const": "BUY"}}},
+      "then": {"properties": {"input_mint": {"$ref": "#/$defs/USDC"}, "output_mint": {"$ref": "#/$defs/AssetMint"}}},
+      "else": {"properties": {"input_mint": {"$ref": "#/$defs/AssetMint"}, "output_mint": {"$ref": "#/$defs/USDC"}}}
+    },
+    "ExecutionApproval": {
+      "description": "Canonical JSON signed by the independent approval key. Encoded inside ExecutionRequest.approval.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version", "network", "owner", "intent_id", "reservation_id", "policy_sha256",
+        "signed_transaction_sha256", "provider_request_id", "last_valid_block_height", "expires_at"
+      ],
+      "properties": {
+        "schema_version": {"const": "1"},
+        "network": {"const": "solana-mainnet"},
+        "owner": {"$ref": "#/$defs/Address"},
+        "intent_id": {"$ref": "#/$defs/UUID"},
+        "reservation_id": {"$ref": "#/$defs/UUID"},
+        "policy_sha256": {"$ref": "#/$defs/Hash"},
+        "signed_transaction_sha256": {"$ref": "#/$defs/Hash"},
+        "provider_request_id": {"$ref": "#/$defs/RequestID"},
+        "last_valid_block_height": {"$ref": "#/$defs/PositiveRawAmount"},
+        "expires_at": {"$ref": "#/$defs/Time"}
+      }
+    },
+    "ExecutionRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["approval", "approval_signature", "signed_transaction_base64"],
+      "properties": {
+        "approval": {"type": "string", "contentEncoding": "base64", "minLength": 4, "maxLength": 2732},
+        "approval_signature": {"type": "string", "contentEncoding": "base64", "minLength": 88, "maxLength": 88},
+        "signed_transaction_base64": {"type": "string", "contentEncoding": "base64", "minLength": 4, "maxLength": 1644}
+      }
+    },
+    "ExecutionReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version", "network", "owner", "intent_id", "reservation_id", "provider_request_id",
+        "signature", "last_valid_block_height", "provider_status", "provider_code", "provider_slot",
+        "claimed_at", "provider_observed_at", "chain_status"
+      ],
+      "properties": {
+        "schema_version": {"const": "1"},
+        "network": {"const": "solana-mainnet"},
+        "owner": {"$ref": "#/$defs/Address"},
+        "intent_id": {"$ref": "#/$defs/UUID"},
+        "reservation_id": {"$ref": "#/$defs/UUID"},
+        "provider_request_id": {"$ref": "#/$defs/RequestID"},
+        "signature": {"$ref": "#/$defs/Signature"},
+        "last_valid_block_height": {"$ref": "#/$defs/PositiveRawAmount"},
+        "provider_status": {"enum": ["accepted", "rejected", "unknown"]},
+        "provider_code": {"type": ["integer", "null"], "minimum": -2147483648, "maximum": 2147483647},
+        "provider_slot": {"anyOf": [{"$ref": "#/$defs/Slot"}, {"type": "null"}]},
+        "claimed_at": {"$ref": "#/$defs/Time"},
+        "provider_observed_at": {"anyOf": [{"$ref": "#/$defs/Time"}, {"type": "null"}]},
+        "chain_status": {"anyOf": [{"$ref": "#/$defs/TransactionStatus"}, {"type": "null"}]}
+      }
+    },
+    "TransactionStatus": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "network", "signature", "state", "context_slot", "fee_lamports", "observed_at"],
+      "properties": {
+        "schema_version": {"const": "1"},
+        "network": {"const": "solana-mainnet"},
+        "signature": {"$ref": "#/$defs/Signature"},
+        "state": {"enum": ["unknown", "processed", "confirmed", "finalized_success", "finalized_failure"]},
+        "context_slot": {"$ref": "#/$defs/Slot"},
+        "transaction_slot": {"$ref": "#/$defs/Slot"},
+        "fee_lamports": {"anyOf": [{"$ref": "#/$defs/RawAmount"}, {"type": "null"}]},
+        "observed_at": {"$ref": "#/$defs/Time"}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"state": {"const": "unknown"}}},
+          "then": {"not": {"required": ["transaction_slot"]}},
+          "else": {"required": ["transaction_slot"]}
+        },
+        {
+          "if": {"properties": {"state": {"enum": ["finalized_success", "finalized_failure"]}}},
+          "then": {"properties": {"fee_lamports": {"$ref": "#/$defs/RawAmount"}}},
+          "else": {"properties": {"fee_lamports": {"type": "null"}}}
+        }
+      ]
+    },
+    "Error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code"],
+      "properties": {
+        "code": {
+          "enum": [
+            "adapter_busy", "balance_not_configured", "swap_preparation_disabled", "invalid_price_request",
+            "invalid_balance_request", "invalid_swap_request", "expected_json", "request_too_large",
+            "minimum_output_not_met", "provider_rate_limited", "provider_timeout", "provider_unavailable",
+            "invalid_execution_request", "invalid_transaction_status_request", "transaction_status_not_configured",
+            "swap_execution_disabled", "executor_authentication_required", "swap_approval_rejected",
+            "swap_attempt_conflict", "swap_approval_expired", "swap_attempt_not_found", "swap_execution_unavailable"
+          ]
+        }
+      }
+    }
+  }
+}

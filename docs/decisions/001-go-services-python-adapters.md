@@ -31,6 +31,12 @@ Ledger, job protocol, Go kernel и deployment пока отсутствуют. �
   Research/control/executor не получают ключ или Sign/admin capability.
 - Docker Compose и PostgreSQL достаточны для первого deployment. Сетевые
   границы, timeout/retry/idempotency и observability входят в acceptance.
+- Подготовленные данные могут идти в отдельный Python worker с явно
+  настроенным модельным провайдером. Immutable job `0.3` задаёт режим
+  `prepared_provider`, а PostgreSQL разделяет аренды по режиму и пину
+  реестра. Результат `0.4` требует сохранённого разрешения на вызов и
+  совпадающей квитанции модели. Go сохраняет право на применение решения
+  к виртуальному счёту через существующий paper workflow.
 
 ## Alternatives considered
 

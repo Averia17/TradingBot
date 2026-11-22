@@ -18,12 +18,13 @@ import (
 )
 
 const (
-	Version               = "0.1"
-	PartialVersion        = "0.2"
-	IdentityIntentVersion = "0.2"
-	IdentityQuoteVersion  = "0.3"
-	Source                = "synthetic_fixture"
-	MaxInputBytes         = 256 * 1024
+	Version                 = "0.1"
+	PartialVersion          = "0.2"
+	IdentityIntentVersion   = "0.2"
+	IdentityQuoteVersion    = "0.3"
+	Source                  = "synthetic_fixture"
+	JupiterFixtureExecution = "jupiter_fixture"
+	MaxInputBytes           = 256 * 1024
 )
 
 var (
@@ -70,6 +71,13 @@ type Quote struct {
 type Store interface {
 	Reserve(context.Context, ledger.ReservationRequest) (ledger.Order, bool, error)
 	Resolve(context.Context, ledger.ResolutionRequest) (ledger.Order, bool, error)
+}
+
+// JupiterFixtureSettlementEnabled reports whether the store uses the offline
+// Jupiter callback. The pinned quote must opt into the same settlement mode.
+func JupiterFixtureSettlementEnabled(store Store) bool {
+	settlement, ok := store.(interface{ JupiterFixtureSettlementEnabled() bool })
+	return ok && settlement.JupiterFixtureSettlementEnabled()
 }
 
 type Result struct {
@@ -234,6 +242,9 @@ func (fixture *PreparedFixture) Run(ctx context.Context, store Store) (Result, e
 		return Result{}, errors.New("paper fixture must be prepared before execution")
 	}
 	in, quote, preview := fixture.intent, fixture.quote, fixture.preview
+	if (quote.Execution == JupiterFixtureExecution) != JupiterFixtureSettlementEnabled(store) {
+		return Result{}, errors.New("paper quote requires its pinned settlement mode")
+	}
 	orderID := preview.OrderID
 	order, reserved, err := store.Reserve(ctx, ledger.ReservationRequest{
 		AccountID: in.AccountID, OrderID: orderID, DecisionID: in.DecisionID, QuoteID: stableID("quote", fixture.digest[:]),
@@ -245,7 +256,7 @@ func (fixture *PreparedFixture) Run(ctx context.Context, store Store) (Result, e
 	}
 	outcome := ledger.ResolutionRequest{AccountID: in.AccountID, OrderID: orderID, EventID: OutcomeEventID(orderID)}
 	switch quote.Execution {
-	case "fill", "partial":
+	case "fill", JupiterFixtureExecution, "partial":
 		// A simulated observation cannot precede the quote or the durable
 		// reservation. Preserve the same timestamp for reconciliation after TTL.
 		observed := quote.ObservedAt.Truncate(time.Microsecond)
@@ -323,7 +334,7 @@ func validate(in Intent, q Quote, now time.Time) (string, error) {
 
 func simulatedFill(q Quote, fee string) (*FixtureFill, error) {
 	switch q.Execution {
-	case "fill":
+	case "fill", JupiterFixtureExecution:
 		return &FixtureFill{QuantityRaw: q.QuantityRaw, GrossUSD: q.GrossUSD, FeeUSD: fee}, nil
 	case "partial":
 		executed, _ := new(big.Int).SetString(q.ExecutedQuantityRaw, 10)

@@ -58,7 +58,7 @@ func priorStableReview(ctx context.Context, research ScheduleStore, proposed job
 	}
 
 	var stored scheduledJob
-	if contract.Decode(prior.Request, contract.ResearchIdentityJob, &stored) != nil || stored.ID != prior.ID ||
+	if contract.Decode(prior.Request, contract.ResearchIdentityJobs, &stored) != nil || stored.ID != prior.ID ||
 		stored.IdentityRegistry == nil || *stored.IdentityRegistry != approved.Identity.Registry ||
 		stored.Policy != approved.SnapshotContext.Policy.Version || len(stored.RequestedSymbols) != 1 ||
 		len(approved.Identity.Securities) != 1 || len(stored.SecurityBindings) != 1 {

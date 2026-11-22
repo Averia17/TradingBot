@@ -173,6 +173,112 @@ def test_bound_owner_plan_submits_exact_stable_job_and_retries_without_new_snaps
     assert len(submissions) == 2 and submissions[0] == submissions[1]
 
 
+def test_entry_cycle_stages_bounded_admission_from_expanded_screening(tmp_path):
+    _, plan, bundle = identity_fixture(tmp_path)
+    screening_ref = "services/research/examples/entry-cycles/expanded-screening.json"
+    screening_raw = (ROOT / screening_ref).read_bytes()
+    screening = json.loads(screening_raw)
+    refs = (screening_ref, screening["data_manifest"]["ref"], screening["identity_registry"]["ref"])
+    for ref in refs:
+        target = tmp_path / ref
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes((ROOT / ref).read_bytes())
+
+    registry_pin = screening["identity_registry"]
+    registry = read_pinned_json(tmp_path, ArchiveReference.model_validate(registry_pin))
+    registry_sha = registry_pin["sha256"]
+    entries = {row["symbol"]: row for row in registry["entries"]}
+    selected_symbols = ("AVGO", "XOM")
+    policy = bundle["snapshot_context"]["policy"] | {
+        "instruments": [
+            {"symbol": row["symbol"], "instrument": row["instrument"], "group": "fixture"}
+            for row in entries.values()
+        ]
+    }
+    mark_at = (AT - timedelta(seconds=30)).isoformat()
+    marks = [
+        {"instrument": row["instrument"], "price_usd": "100", "at": mark_at, "available_at": mark_at}
+        for row in entries.values()
+    ]
+    tape = read_pinned_json(tmp_path, ArchiveReference.model_validate(plan["quote_tape"]))
+    tape = bind_tape(tape, ACCOUNT, registry_sha)
+    sample = tape["observations"][0]
+    tape["observations"] = []
+    for symbol in selected_symbols:
+        entry = entries[symbol]
+        quote = sample["quote"] | {
+            "security_id": entry["security_id"],
+            "instrument": entry["instrument"],
+        }
+        tape["observations"].append(sample | {"quote": quote})
+    plan.update(
+        policy=put(tmp_path, "expanded-policy.json", policy),
+        identity_registry=registry_pin,
+        quote_tape=put(tmp_path, "expanded-tape.json", tape),
+        occurrences=[
+            plan["occurrences"][0]
+            | {
+                "screening": {"ref": screening_ref, "sha256": hashlib.sha256(screening_raw).hexdigest()},
+                "marks": put(tmp_path, "expanded-marks.json", marks),
+            }
+        ],
+    )
+    plan_ref = put(tmp_path, "expanded-plan.json", plan)
+    snapshot_context = bundle["snapshot_context"] | {"policy": policy, "marks": marks}
+    submissions = []
+
+    def invoke(*args):
+        if args[0] == "snapshot":
+            assert args[args.index("--as-of") + 1] == AT.isoformat()
+            assert json.loads(Path(args[args.index("--policy") + 1]).read_bytes()) == policy
+            assert json.loads(Path(args[args.index("--marks") + 1]).read_bytes()) == marks
+            return bundle | {"snapshot_context": snapshot_context}
+        assert args[0] == "schedule-entry"
+        assert args[args.index("--identity-registry-sha256") + 1] == registry_sha
+        admission = Path(args[args.index("--config") + 1]).read_bytes()
+        selection = Path(args[args.index("--selection") + 1]).read_bytes()
+        submissions.append((admission, selection))
+        return {
+            "entry_schedule_schema_version": "0.2",
+            "status": "queued",
+            "created": False,
+            "job_id": ACCOUNT,
+            "created_at": AT.isoformat(),
+        }
+
+    report = run_cycles(
+        tmp_path,
+        plan_ref,
+        tmp_path / "journal",
+        invoke,
+        clock=lambda: AT,
+        trusted_identity_registry_sha256=registry_sha,
+    )
+
+    assert [row["status"] for row in report["occurrences"]] == ["queued"]
+    [(raw_admission, raw_selection)] = submissions
+    admission, selected = json.loads(raw_admission), json.loads(raw_selection)
+    assert admission["identity_binding"] == {
+        "identity_registry": registry_pin,
+        "quote_tape": plan["quote_tape"],
+    }
+    assert admission["selection_sha256"] == hashlib.sha256(raw_selection).hexdigest()
+    assert len(selected["candidates"]) == 23
+    assert {row["symbol"] for row in selected["candidates"]} == {
+        row["symbol"] for row in screening["candidates"]
+    }
+    assert any(row["status"] == "capacity_exhausted" for row in selected["candidates"])
+    job = selected["job"]
+    assert job["requested_symbols"] == list(selected_symbols)
+    assert job["max_llm_calls"] == admission["max_job_llm_calls"] == 33
+    assert job["identity_registry"] == registry_pin
+    assert job["data_manifest"] == screening["data_manifest"]
+    assert job["security_bindings"] == [
+        {"symbol": symbol, "security_id": entries[symbol]["security_id"]}
+        for symbol in selected_symbols
+    ]
+
+
 @pytest.mark.parametrize(
     "mutation",
     ["owner-pin", "tape-sha", "tape-account", "tape-registry", "quote-registry", "screening", "screening-pin"],

@@ -23,6 +23,7 @@
 | Paper workflow | Go | Снимки счёта, планирование входов и применение сохранённых решений по политике владельца | `services/control/internal/paper_workflow` связывает research с paper ledger. Команда `paper` запускает операции |
 | Paper quote collector | Go | Проверяет ответы локального тестового HTTP-источника и формирует ленту котировок `0.3` | Команда `paper-quote-collect` возвращает SHA-256 для закрепления ленты владельцем |
 | Venue quotes | Go | Читает публичные рыночные наблюдения через HTTP v1 | `services/venue-quotes`, [стаканы Binance Spot и Dzengi](../contracts/venue-order-book.schema.json) и [котировки Jupiter Swap v2](../contracts/venue-quote.schema.json) |
+| Jupiter Adapter | Go | Котировки и цены Jupiter, остатки Solana, подготовка, отправка одобренного BUY/SELL и наблюдение статуса | `services/venue-quotes/cmd/jupiter-adapter`, [HTTP v1](../contracts/jupiter-adapter.schema.json), [ADR-004](decisions/004-jupiter-adapter.md) |
 | Execution worker | Go | Allowed venue quotes/build/submit/status; без ключа и права менять policy | Будущий модуль control, затем отдельный process |
 | Independent verifier/signer | Go | Decode transaction, owner limits/allowlists, approval exact hash, signing | Отдельный future live host/identity |
 | Trade events | Go | Публикует события через pgqueue и Kafka | `services/trade-events/` с тестовым входом и отдельным relay для outbox paper ledger |
@@ -38,6 +39,98 @@ Dzengi возвращают цену и объём уровня в единиц�
 в raw units. В Binance REST depth доступен номер обновления снимка.
 Оба контракта содержат время получения и тип `indicative`. Путь исполнения
 paper использует собственный контракт и проверяет требования к исполнимости.
+
+### Jupiter Adapter
+
+Из корня репозитория команда запускается на `127.0.0.1:18084`.
+
+```powershell
+go -C services/venue-quotes run -mod=readonly ./cmd/jupiter-adapter
+```
+
+Docker-образ собирается целью `jupiter-adapter` в `services/venue-quotes/Dockerfile`.
+
+В таблице приведены синтетические примеры запросов и ответов.
+
+| HTTP v1 | Результат |
+|---|---|
+| `POST /v1/quotes` | Котировка ExactIn с маршрутом, входной суммой, ожидаемым и минимальным выходом в raw units. [Вход](../contracts/valid-venue-quote-request.json) · [Ответ](../contracts/valid-venue-quote-observation.json) |
+| `GET /v1/price?mint=<mint>` | Ориентир Jupiter Price v3 в USD за токен, с block ID и временем получения. [Ответ](../contracts/valid-jupiter-price.json) |
+| `GET /v1/balances` | Финализированные остатки настроенного кошелька в lamports и raw units по token accounts. `?fresh=true` принудительно читает RPC. [Ответ](../contracts/valid-jupiter-balances.json) |
+| `POST /v1/swaps/prepare` | `BUY` обменивает USDC на заданный mint, `SELL` задаёт обратную пару. `in_amount` указывается в raw units входного mint, `min_out_amount` — выходного. Ответ содержит кандидат транзакции, комиссии и высоту истечения. [Вход](../contracts/valid-jupiter-swap-request.json) · [Ответ](../contracts/valid-jupiter-prepared-swap.json) |
+| `POST /v1/swaps/execute` | Принять подписанный Metis v0 swap с отдельным подтверждением verifier. `202` возвращает зафиксированную в PostgreSQL попытку. [Контракт отправки](../contracts/jupiter-adapter.schema.json#/$defs/ExecutionRequest) · [Квитанция](../contracts/valid-jupiter-execution-receipt.json) |
+| `GET /v1/swaps/attempts/{intent_id}` | Квитанция попытки и доступное наблюдение Solana по сохранённой подписи. |
+| `GET /v1/swaps/status?signature=<signature>` | Наблюдение Solana для Metis v0 с подтверждением финализации и фактической комиссией. [Ответ](../contracts/valid-jupiter-transaction-status.json) |
+
+`TRADINGBOT_JUPITER_LISTEN` задаёт адрес HTTP. `TRADINGBOT_JUPITER_API_KEY`
+принимает ключ Jupiter. Для баланса нужны публичный адрес
+`TRADINGBOT_JUPITER_WALLET` и `TRADINGBOT_SOLANA_RPC_URL` для mainnet.
+Маршрут баланса возвращает `503`, пока RPC не настроен. Кэш хранит полный
+снимок пять секунд. Ошибка обновления возвращается клиенту, даже если в
+памяти был предыдущий снимок. Слоты в ответе показывают позицию в цепочке для
+каждой группы счетов.
+
+Подготовка требует адрес кошелька и явное
+`TRADINGBOT_JUPITER_ENABLE_PREPARE=true`. Использование Jupiter для новых
+запросов зависит от подтверждения допуска в [плане](planning/plan.md#16-xstocks-vs-ondo-vs-broker).
+Кандидаты Metis v0 передаются на независимую проверку и подпись.
+Локальные тесты используют имитацию Jupiter и RPC, а журнал проверяется
+на PostgreSQL.
+
+Маршруты отправки и квитанций выключены по умолчанию. Для разрешённого live
+контура применяется [миграция журнала попыток](../services/venue-quotes/internal/jupiter_execution/001_attempts.sql).
+Роль адаптера использует SELECT, INSERT и UPDATE. При включении
+`TRADINGBOT_JUPITER_ENABLE_EXECUTE=true` необходимы Jupiter API key, mainnet RPC,
+loopback HTTP, `TRADINGBOT_JUPITER_SUBMISSION_DATABASE_URL`,
+`TRADINGBOT_JUPITER_APPROVAL_PUBLIC_KEY` (Ed25519, стандартный Base64),
+`TRADINGBOT_JUPITER_POLICY_SHA256` и отдельный
+`TRADINGBOT_JUPITER_EXECUTOR_TOKEN` для `Authorization: Bearer`.
+Формат подписи одобрения описан в [ADR-004](decisions/004-jupiter-adapter.md).
+Изолированный verifier/signer и live-резервы находятся за границей адаптера.
+
+#### Сквозной офлайн-прогон Jupiter
+
+Для прогона нужен локальный тестовый PostgreSQL, где роль может создать и
+удалить отдельную схему. Укажите его в `TRADINGBOT_TEST_DATABASE_URL`
+и запустите команду из корня репозитория.
+
+```powershell
+go -C services/venue-quotes test -mod=readonly -count=1 -v ./internal/jupiter_rehearsal
+```
+
+Прогон запускает Control на loopback, использует обычные ручки адаптера
+и удаляет созданную схему по завершении. Тестовый транспорт отвечает на
+запросы Jupiter и Solana внутри процесса. Подписание использует временный
+кошелёк и отдельный ключ одобрения. Подписывается только заранее определённая
+тестовая Memo v0. BUY проверяет таймаут, удержание резерва, восстановление
+попытки и `paper reconcile`. SELL проверяет резерв токенов до финализации.
+В обоих случаях exact raw amounts берутся из изменения тестовых остатков
+после подтверждённого слота. USDC учитывается по синтетическому паритету
+с USD, сетевые комиссии наблюдаются отдельно в lamports.
+[Результаты прогона](verification.md#сквозной-офлайн-прогон-jupiter)
+
+#### Jupiter в периодическом paper-цикле
+
+`paper dispatch --jupiter-fixture-url` подключает локальный тестовый
+расчёт Jupiter через числовой loopback-адрес. Закреплённая котировка с
+`execution: "jupiter_fixture"` выбирает этот режим и связывается с заявкой
+при резервировании. Запрос на расчёт привязан к исследованию, ордеру,
+котировке и точным суммам. Квитанция подтверждает хеш исходного запроса.
+При `pending` диспетчер сохраняет резерв и продолжает проверять ту же
+попытку. При финализации ledger учитывает подтверждённый объём и сумму
+в пределах исходного лимита. Обычная симуляция с этим видом котировки
+отклоняется. [Контракт расчёта](../contracts/paper-jupiter-fixture.schema.json)
+
+Сквозной тест запускает штатные команды планирования и диспетчеризации,
+Control и worker с заданными тестовыми решениями через обычный протокол
+аренды и публикации результатов. Он использует локальный тестовый PostgreSQL
+из `TRADINGBOT_TEST_DATABASE_URL` и дочерний тестовый сервер Jupiter.
+
+```powershell
+go -C services/control test -mod=readonly -count=1 -v -run '^TestScheduledPaperJupiterRehearsal$' ./cmd/paper
+```
+
+### Paper
 
 В протоколе forward paper `paper_forward_source` фиксирует счёт, капитал,
 календарь UTC, контрольные даты, источник и возраст цен, эталон и порог просадки.
@@ -217,11 +310,44 @@ go -C services/control build -mod=readonly -o $equityRouteBin ./cmd/equity-route
 флаг `--quantity` оценивает покупку и продажу по всей нужной глубине.
 Оценка отражает спред и проскальзывание на текущем стакане до комиссий и
 funding. При недостатке глубины результат указывает отказ по этому размеру.
-Нормализация
-к синхронным спотовым котировкам, расчёт ожидаемых затрат на весь горизонт
-и автоматическая подача наблюдений в `equity-route` требуют следующего шага.
-Контуры этой секции формируют research-решение. Историческая проверка и
-forward paper нужны для оценки реализованного преимущества.
+
+`equity-study` собирает вход для `equity-route` из архивных стаканов спота
+и trade[XYZ]. [Контракт входа](../contracts/equity-study-input.schema.json)
+принимает привязку инструмента к базовой акции, курс валюты котировки,
+лот, независимую цену акции, комиссии и стресс-параметры. Он сверяет
+актуальность и разницу во времени срезов, восстанавливает perp из
+оригинальных ответов с SHA-256 и округляет размер вниз к общему шагу
+экспозиции в акциях. По каждому размеру требуется полная глубина
+на покупку и продажу. Хеш входного файла и хеши отдельных наблюдений
+включаются в итоговый снимок.
+
+К двусторонней стоимости стакана добавляются taker-комиссии и фиксированные
+издержки каждого плеча сделки. Для funding применяется захваченная ставка
+к oracle-цене на каждый час горизонта. Это сценарий постоянной ставки.
+Стресс применяет неблагоприятный знак и учитывает рост номинала и введённый
+порог ставки. Для маржи используется уровень при неблагоприятном номинале
+и его полная ставка без скидки за нижние уровни. FX, экономический базис,
+комиссии, внешняя сессия и стресс-параметры задаются входным файлом.
+[Funding](https://hyperliquid.gitbook.io/hyperliquid-docs/trading/funding) ·
+[Уровни маржи](https://hyperliquid.gitbook.io/hyperliquid-docs/trading/margin-tiers)
+
+Синтетический сценарий запускается следующими командами из корня репозитория.
+
+```powershell
+$studyPath = Join-Path $env:TEMP "tradingbot-equity-study-$PID.json"
+$thesesPath = Join-Path $env:TEMP "tradingbot-equity-theses-$PID.json"
+$study = go -C services/venue-quotes run -mod=readonly ./cmd/equity-study `
+  --input ../../contracts/valid-equity-study-input.json
+if ($LASTEXITCODE -ne 0) { throw "equity-study failed" }
+$study | Set-Content -LiteralPath $studyPath -Encoding utf8
+$batch = Get-Content -Raw contracts/valid-equity-route-theses.json | ConvertFrom-Json
+$batch.study_sha256 = (Get-FileHash -LiteralPath $studyPath -Algorithm SHA256).Hash.ToLowerInvariant()
+$batch | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $thesesPath -Encoding utf8
+go -C services/control run -mod=readonly ./cmd/equity-route --study $studyPath --theses $thesesPath
+```
+
+Для рыночного прогона нужен архив с актуальными наблюдениями и правилами
+площадок. Планировщик их сбора и forward paper остаются следующими этапами.
 
 Research сохраняет решения без блокировки реальных средств. Paper ledger и
 его reservations отделены от live account. Резервирование реальных cash/tokens
@@ -315,6 +441,22 @@ worker через Control. Профиль `paper-quote` читает хешир�
 Диспетчер читает ту же директорию. После смены политики продолжение
 зарезервированного ордера сверяет исходное применение и закреплённую
 котировку с ledger. Для нового резерва требуется действующая политика.
+
+Профиль `research-provider` берёт только подготовленные задания `0.3` по
+пину реестра и режиму `prepared_provider`. Подготовленный архив
+`local_archive` проходит ту же проекцию устойчивых ID. Перед одним вызовом
+портфельной модели worker получает разрешение Control, после ответа отправляет
+квитанцию с моделью и usage. В одной транзакции Control сопоставляет квитанцию
+и результат `0.4` с текущей арендой, пинами и job budget. Пересмотр
+открытой позиции наследует режим принятого входа. Диспетчер использует
+обычный paper risk и котировку с наблюдением после сохранения результата.
+[Команды и исходные данные](../README.md#ai-по-расписанию-с-виртуальным-исполнением)
+
+Профиль `paper-notifications` читает из того же ledger подтверждённые
+fills через outbox, переносит в выделенный Kafka-топик
+`tradingbot.trade.filled.paper.v1` и доставляет paper-сообщения через
+отдельную группу потребителя. Фиксация смещения Kafka следует за
+подтверждением Telegram. [Гарантии доставки](decisions/002-trade-notifications.md)
 
 Вход с устойчивым ID использует расписание `0.2`. Go проверяет активный
 реестр владельца и сопоставляет `security_id` с точным инструментом
@@ -435,8 +577,9 @@ freshness и согласованность распределения с пер
 
 ## Данные и полномочия
 
-PostgreSQL — единый authority экономического состояния. Control владеет ledger,
-reservations и account serialization. Job creation и outbox фиксируются атомарно;
+PostgreSQL хранит авторитетное состояние внутреннего учёта. Control владеет
+ledger, reservations и account serialization. Фактические остатки Solana-кошелька
+наблюдаются отдельно через RPC. Job creation и outbox фиксируются атомарно;
 worker не держит SQL transaction во время provider calls. Research работает
 через control contract без прямых write credentials к balances/reservations.
 Evaluation может иметь собственную область хранения результатов, с ограниченной

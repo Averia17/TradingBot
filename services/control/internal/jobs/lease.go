@@ -12,10 +12,12 @@ import (
 )
 
 const (
-	leaseTTL           = time.Minute
-	maxAttemptDuration = 15 * time.Minute
-	maxAttempts        = 3
-	maxClaimCandidates = 16
+	leaseTTL             = time.Minute
+	maxAttemptDuration   = 15 * time.Minute
+	maxAttempts          = 3
+	maxClaimCandidates   = 16
+	offlineAnalysisMode  = "offline"
+	ProviderAnalysisMode = "prepared_provider"
 )
 
 var (
@@ -35,10 +37,15 @@ type Lease struct {
 	Deadline  time.Time
 }
 
+type claimScope struct {
+	registrySHA string
+	mode        string
+}
+
 // Claim creates one attempt or replays the same still-active claim. A claim ID
 // that found no work is unbound until an attempt is committed.
 func (s *Store) Claim(ctx context.Context, workerID, claimID string, maxSnapshotAge time.Duration) (Lease, error) {
-	return s.claim(ctx, workerID, claimID, maxSnapshotAge, "")
+	return s.claim(ctx, workerID, claimID, maxSnapshotAge, claimScope{mode: offlineAnalysisMode})
 }
 
 // ClaimWithIdentityRegistry selects jobs whose immutable registry digest
@@ -47,10 +54,17 @@ func (s *Store) ClaimWithIdentityRegistry(ctx context.Context, workerID, claimID
 	if !registryDigest.MatchString(registrySHA) {
 		return Lease{}, errors.New("invalid research claim registry digest")
 	}
-	return s.claim(ctx, workerID, claimID, maxSnapshotAge, registrySHA)
+	return s.claim(ctx, workerID, claimID, maxSnapshotAge, claimScope{registrySHA, offlineAnalysisMode})
 }
 
-func (s *Store) claim(ctx context.Context, workerID, claimID string, maxSnapshotAge time.Duration, registrySHA string) (Lease, error) {
+func (s *Store) ClaimPreparedProvider(ctx context.Context, workerID, claimID string, maxSnapshotAge time.Duration, registrySHA string) (Lease, error) {
+	if !registryDigest.MatchString(registrySHA) {
+		return Lease{}, errors.New("invalid research claim registry digest")
+	}
+	return s.claim(ctx, workerID, claimID, maxSnapshotAge, claimScope{registrySHA, ProviderAnalysisMode})
+}
+
+func (s *Store) claim(ctx context.Context, workerID, claimID string, maxSnapshotAge time.Duration, scope claimScope) (Lease, error) {
 	if maxSnapshotAge <= 0 {
 		return Lease{}, errors.New("invalid research snapshot age limit")
 	}
@@ -64,11 +78,11 @@ func (s *Store) claim(ctx context.Context, workerID, claimID string, maxSnapshot
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 737292))`, claimID); err != nil {
 		return Lease{}, fmt.Errorf("lock research claim identity: %w", err)
 	}
-	if lease, err := replayClaim(ctx, tx, workerID, claimID, maxSnapshotAge, registrySHA); !errors.Is(err, pgx.ErrNoRows) {
+	if lease, err := replayClaim(ctx, tx, workerID, claimID, maxSnapshotAge, scope); !errors.Is(err, pgx.ErrNoRows) {
 		return lease, err
 	}
 	for range maxClaimCandidates {
-		lease, err := claimNext(ctx, tx, workerID, claimID, maxSnapshotAge, registrySHA)
+		lease, err := claimNext(ctx, tx, workerID, claimID, maxSnapshotAge, scope)
 		if errors.Is(err, pgx.ErrNoRows) {
 			break
 		}
@@ -88,12 +102,12 @@ func (s *Store) claim(ctx context.Context, workerID, claimID string, maxSnapshot
 	return Lease{}, ErrNoJob
 }
 
-func replayClaim(ctx context.Context, tx pgx.Tx, workerID, claimID string, maxSnapshotAge time.Duration, registrySHA string) (Lease, error) {
+func replayClaim(ctx context.Context, tx pgx.Tx, workerID, claimID string, maxSnapshotAge time.Duration, scope claimScope) (Lease, error) {
 	job := lockedJob{tx: tx}
-	var priorRegistrySHA string
-	err := tx.QueryRow(ctx, `SELECT j.id::text, j.status, j.attempt_count, a.identity_registry_sha256
+	var prior claimScope
+	err := tx.QueryRow(ctx, `SELECT j.id::text, j.status, j.attempt_count, a.identity_registry_sha256, j.analysis_mode
 		FROM research_job_attempts a JOIN research_jobs j ON a.job_id = j.id
-		WHERE a.claim_id = $1 FOR UPDATE OF j`, claimID).Scan(&job.id, &job.status, &job.attempt, &priorRegistrySHA)
+		WHERE a.claim_id = $1 FOR UPDATE OF j`, claimID).Scan(&job.id, &job.status, &job.attempt, &prior.registrySHA, &prior.mode)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Lease{}, pgx.ErrNoRows
 	}
@@ -104,7 +118,7 @@ func replayClaim(ctx context.Context, tx pgx.Tx, workerID, claimID string, maxSn
 	if err != nil {
 		return Lease{}, err
 	}
-	if lease.ClaimID != claimID || lease.WorkerID != workerID || priorRegistrySHA != registrySHA {
+	if lease.ClaimID != claimID || lease.WorkerID != workerID || prior != scope {
 		return Lease{}, ErrLeaseConflict
 	}
 	inputs, err := readJobInputs(ctx, tx, job.id)
@@ -118,20 +132,20 @@ func replayClaim(ctx context.Context, tx pgx.Tx, workerID, claimID string, maxSn
 	return lease, nil
 }
 
-func claimNext(ctx context.Context, tx pgx.Tx, workerID, claimID string, maxSnapshotAge time.Duration, registrySHA string) (Lease, error) {
+func claimNext(ctx context.Context, tx pgx.Tx, workerID, claimID string, maxSnapshotAge time.Duration, scope claimScope) (Lease, error) {
 	job := lockedJob{tx: tx}
 	err := tx.QueryRow(ctx, `SELECT j.id::text, j.status, j.attempt_count FROM research_jobs j
 		LEFT JOIN research_job_attempts a ON a.job_id = j.id AND a.attempt = j.attempt_count
-		WHERE j.identity_registry_sha256 = $1
+		WHERE j.identity_registry_sha256 = $1 AND j.analysis_mode = $2
 			AND (j.status = 'queued' OR (j.status = 'leased' AND a.expires_at <= statement_timestamp()))
-		ORDER BY j.created_at, j.id LIMIT 1 FOR UPDATE OF j SKIP LOCKED`, registrySHA).Scan(&job.id, &job.status, &job.attempt)
+		ORDER BY j.created_at, j.id LIMIT 1 FOR UPDATE OF j SKIP LOCKED`, scope.registrySHA, scope.mode).Scan(&job.id, &job.status, &job.attempt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Lease{}, pgx.ErrNoRows
 	}
 	if err != nil {
 		return Lease{}, fmt.Errorf("select research job for claim: %w", err)
 	}
-	return job.claim(ctx, workerID, claimID, maxSnapshotAge, registrySHA)
+	return job.claim(ctx, workerID, claimID, maxSnapshotAge, scope.registrySHA)
 }
 
 func (j lockedJob) claim(ctx context.Context, workerID, claimID string, maxSnapshotAge time.Duration, registrySHA string) (Lease, error) {
@@ -188,28 +202,42 @@ func (j lockedJob) claim(ctx context.Context, workerID, claimID string, maxSnaps
 }
 
 type registryBinding struct {
-	Version  string `json:"job_schema_version"`
-	Registry *struct {
+	Version    string        `json:"job_schema_version"`
+	Mode       string        `json:"analysis_mode"`
+	CallBudget jobCallBudget `json:"max_llm_calls"`
+	Registry   *struct {
 		SHA256 string `json:"sha256"`
 	} `json:"identity_registry"`
 }
 
-func jobRegistryPin(raw []byte) (string, error) {
+func researchClaimScope(raw []byte) (claimScope, error) {
 	var binding registryBinding
 	if err := json.Unmarshal(raw, &binding); err != nil {
-		return "", err
+		return claimScope{}, err
 	}
-	return binding.pin()
+	return binding.scope()
 }
 
-func (b registryBinding) pin() (string, error) {
-	if b.Version == "0.2" && b.Registry != nil && registryDigest.MatchString(b.Registry.SHA256) {
-		return b.Registry.SHA256, nil
+func (binding registryBinding) scope() (claimScope, error) {
+	if binding.Version == "0.2" || binding.Version == "0.3" {
+		isProvider := binding.Version == "0.3"
+		if isProvider && (binding.CallBudget.invalid || binding.CallBudget.limit != 1) {
+			return claimScope{}, errors.New("prepared provider jobs require exactly one call")
+		}
+		if binding.Registry != nil && registryDigest.MatchString(binding.Registry.SHA256) &&
+			(isProvider && binding.Mode == ProviderAnalysisMode || !isProvider && binding.Mode == "") {
+			mode := offlineAnalysisMode
+			if isProvider {
+				mode = ProviderAnalysisMode
+			}
+			return claimScope{binding.Registry.SHA256, mode}, nil
+		}
+		return claimScope{}, errors.New("invalid research job registry or analysis mode")
 	}
-	if b.Version == "0.2" || b.Registry != nil {
-		return "", errors.New("invalid research job registry binding")
+	if binding.Registry != nil || binding.Mode != "" {
+		return claimScope{}, errors.New("unexpected research job registry or analysis mode")
 	}
-	return "", nil
+	return claimScope{mode: offlineAnalysisMode}, nil
 }
 
 // Heartbeat extends only the latest unexpired attempt, bounded by its deadline.

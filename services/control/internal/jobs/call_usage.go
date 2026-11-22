@@ -19,7 +19,7 @@ var researchCallUsageMigration string
 
 var (
 	ErrCallPermitNotFound = errors.New("research invocation has no durable permit")
-	ErrInvalidCallUsage   = errors.New("invalid offline research invocation usage")
+	ErrInvalidCallUsage   = errors.New("invalid research invocation usage")
 )
 
 const (
@@ -32,6 +32,7 @@ type RecordResearchCallUsage struct {
 	WorkerID string
 	Token    string
 	Call     contract.ResearchLLMCall
+	Provider bool
 }
 
 type CallUsageReceipt struct {
@@ -44,7 +45,7 @@ type CallUsageReceipt struct {
 // RecordCallUsage appends one terminal callback to an existing permit. An
 // expired lease can replay only its own already-committed identical callback.
 func (s *Store) RecordCallUsage(ctx context.Context, input RecordResearchCallUsage) (CallUsageReceipt, bool, error) {
-	if err := input.Call.ValidateOfflineCall(); err != nil {
+	if err := validateCallMode(input.Call, input.Provider); err != nil {
 		return CallUsageReceipt{}, false, ErrInvalidCallUsage
 	}
 	input.Call.StartedAt = input.Call.StartedAt.UTC()
@@ -64,14 +65,16 @@ func (s *Store) RecordCallUsage(ctx context.Context, input RecordResearchCallUsa
 		expiresAt            time.Time
 		existingAt           *time.Time
 		stored, storedDigest []byte
+		mode                 string
 	)
 	err = job.tx.QueryRow(ctx, `SELECT p.attempt, a.worker_id, a.lease_token::text, a.expires_at,
-		u.recorded_at, u.payload, u.payload_sha256
+		u.recorded_at, u.payload, u.payload_sha256, j.analysis_mode
 		FROM research_call_permits p
+		JOIN research_jobs j ON j.id = p.job_id
 		JOIN research_job_attempts a USING (job_id, attempt)
 		LEFT JOIN research_call_usage u USING (job_id, call_id)
 		WHERE p.job_id=$1 AND p.call_id=$2`, receipt.JobID, receipt.CallID).Scan(
-		&receipt.Attempt, &owner, &token, &expiresAt, &existingAt, &stored, &storedDigest)
+		&receipt.Attempt, &owner, &token, &expiresAt, &existingAt, &stored, &storedDigest, &mode)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return CallUsageReceipt{}, false, ErrCallPermitNotFound
 	}
@@ -80,6 +83,9 @@ func (s *Store) RecordCallUsage(ctx context.Context, input RecordResearchCallUsa
 	}
 	if owner != input.WorkerID || token != input.Token {
 		return CallUsageReceipt{}, false, ErrLeaseConflict
+	}
+	if input.Provider != (mode == ProviderAnalysisMode) {
+		return CallUsageReceipt{}, false, ErrInvalidCallUsage
 	}
 	if existingAt != nil {
 		if !bytes.Equal(storedDigest, digest[:]) || !bytes.Equal(stored, payload) {
@@ -106,4 +112,11 @@ func (s *Store) RecordCallUsage(ctx context.Context, input RecordResearchCallUsa
 	}
 	receipt.RecordedAt = receipt.RecordedAt.UTC()
 	return receipt, true, nil
+}
+
+func validateCallMode(call contract.ResearchLLMCall, provider bool) error {
+	if provider {
+		return call.ValidateProviderCall()
+	}
+	return call.ValidateOfflineCall()
 }

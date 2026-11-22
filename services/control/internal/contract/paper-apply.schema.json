@@ -244,7 +244,7 @@
         "candidates": {"type": "array", "maxItems": 100, "items": {"type": "object"}}
       },
       "if": {"properties": {"selection_schema_version": {"const": "0.2"}}},
-      "then": {"properties": {"job": {"anyOf": [{"$ref": "research-job.schema.json#/$defs/IdentityJobRequest"}, {"type": "null"}]}}},
+      "then": {"properties": {"job": {"anyOf": [{"$ref": "research-job.schema.json#/$defs/IdentityJobs"}, {"type": "null"}]}}},
       "else": {"properties": {"job": {"anyOf": [{"$ref": "research-job.schema.json#/$defs/JobRequest"}, {"type": "null"}]}}}
     },
     "EntryScheduleReceipt": {

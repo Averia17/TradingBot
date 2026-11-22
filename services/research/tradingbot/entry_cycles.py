@@ -346,8 +346,12 @@ class _EntryAdmission:
                     {"symbol": symbol, "security_id": candidate_ids[symbol]}
                     for symbol in job["requested_symbols"]
                 ]
+                mode = screening.get("analysis_mode")
+                job_version = "0.3" if mode == "prepared_provider" else "0.2"
                 if (
-                    job.get("job_schema_version") != "0.2"
+                    job.get("job_schema_version") != job_version
+                    or job.get("analysis_mode") != mode
+                    or (mode == "prepared_provider" and job.get("max_llm_calls") != 1)
                     or job.get("job_id") != self.identity
                     or job.get("identity_registry") != self.identity_binding["identity_registry"]
                     or not expected_bindings

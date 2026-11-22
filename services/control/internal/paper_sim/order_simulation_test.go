@@ -45,6 +45,45 @@ func (l *recordingLedger) Resolve(_ context.Context, r ledger.ResolutionRequest)
 	return order, len(l.resolve) == 1, nil
 }
 
+type fixtureSettlementLedger struct{ *recordingLedger }
+
+func (fixtureSettlementLedger) JupiterFixtureSettlementEnabled() bool { return true }
+
+func TestJupiterFixtureRouteIsBoundBeforeReservation(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	for _, test := range []struct {
+		name, mode string
+		bridge     bool
+		wantOrder  bool
+	}{
+		{"tagged without bridge", JupiterFixtureExecution, false, false},
+		{"ordinary fill with bridge", "fill", true, false},
+		{"tagged with bridge", JupiterFixtureExecution, true, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			in, quote := fixture(now)
+			quote.Execution = test.mode
+			raw := bindQuote(t, &in, quote)
+			records := &recordingLedger{created: now}
+			var store Store = records
+			if test.bridge {
+				store = fixtureSettlementLedger{records}
+			}
+			got, err := Run(t.Context(), store, in, raw, now)
+			if !test.wantOrder {
+				if err == nil || len(records.reserve) != 0 || len(records.resolve) != 0 {
+					t.Fatal("settlement mode mismatch reached the ledger")
+				}
+				return
+			}
+			if err != nil || len(records.reserve) != 1 || len(records.resolve) != 1 || got.Order.Status != "filled" ||
+				got.SimulatedExecution != JupiterFixtureExecution {
+				t.Fatalf("tagged fixture did not use its bound route: %+v / %v", got, err)
+			}
+		})
+	}
+}
+
 func TestPublishedFixtureContract(t *testing.T) {
 	const base = "https://tradingbot.local/contracts/"
 	const fixtureSchema = "paper-replay.schema.json"

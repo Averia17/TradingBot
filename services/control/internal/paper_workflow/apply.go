@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"tradingbot/control/internal/contract"
+	"tradingbot/control/internal/control"
 	"tradingbot/control/internal/jobs"
 	"tradingbot/control/internal/ledger"
 	"tradingbot/control/internal/paper_risk"
@@ -63,6 +64,7 @@ type storedJob struct {
 	DataManifest     research_scheduler.ArchiveReference `json:"data_manifest"`
 	PolicyVersion    string                              `json:"policy_version"`
 	MaxLLMCalls      int                                 `json:"max_llm_calls"`
+	AnalysisMode     string                              `json:"analysis_mode,omitempty"`
 	IdentityRegistry *ArchiveReference                   `json:"identity_registry,omitempty"`
 	SecurityBindings []ResearchSecurityBinding           `json:"security_bindings,omitempty"`
 }
@@ -222,6 +224,10 @@ type researchOrderStore struct {
 	jobID string
 }
 
+func (s researchOrderStore) JupiterFixtureSettlementEnabled() bool {
+	return paper_sim.JupiterFixtureSettlementEnabled(s.Store)
+}
+
 func (s researchOrderStore) Reserve(ctx context.Context, request ledger.ReservationRequest) (ledger.Order, bool, error) {
 	request.ResearchJobID = s.jobID
 	return s.Store.Reserve(ctx, request)
@@ -276,7 +282,12 @@ func validateCompletedResearch(job jobs.Job, receipt jobs.Result, req Request, n
 	var result storedResult
 	if receipt.JobID != job.ID || receipt.Attempt < 1 || receipt.Attempt > 3 || receipt.CompletedAt.Before(job.CreatedAt) || receipt.CompletedAt.After(now) ||
 		contract.Decode(job.Request, nil, &request) != nil || request.ID != job.ID || request.PolicyVersion != config.Policy.Version ||
-		contract.CheckSymbols(request.RequestedSymbols) != nil || contract.Decode(receipt.Payload, nil, &result) != nil || !validResultProvenance(result, request, receipt.Attempt) {
+		contract.CheckSymbols(request.RequestedSymbols) != nil || contract.Decode(receipt.Payload, nil, &result) != nil {
+		return applicationPlan{}, fmt.Errorf("%w: unsupported or unbound research receipt", ErrInvalid)
+	}
+	prepared := result.Version == "0.4"
+	if (prepared && control.ValidateArchivedResearchResult(job, receipt) != nil) ||
+		(!prepared && !validResultProvenance(result, request, receipt.Attempt)) {
 		return applicationPlan{}, fmt.Errorf("%w: unsupported or unbound research receipt", ErrInvalid)
 	}
 	portfolio, err := contract.ParsePortfolio(request.Portfolio)
@@ -292,7 +303,8 @@ func validateCompletedResearch(job jobs.Job, receipt jobs.Result, req Request, n
 	// The completion path validated its age at receipt. Validate the batch at
 	// that immutable instant so an old exact replay keeps its original identity.
 	batch, err := contract.ParseBatch(result.Batch, receipt.CompletedAt, receipt.CompletedAt.Sub(portfolio.AsOf))
-	if err != nil || contract.CheckAllocation(batch, portfolio, request.RequestedSymbols) != nil || !reportsMatchEvidence(batch, result.Reports, request.RequestedSymbols) {
+	if err != nil || contract.CheckAllocation(batch, portfolio, request.RequestedSymbols) != nil ||
+		(!prepared && !reportsMatchEvidence(batch, result.Reports, request.RequestedSymbols)) {
 		return applicationPlan{}, fmt.Errorf("%w: result does not match its durable job or evidence", ErrInvalid)
 	}
 	return applicationPlan{request: req, portfolio: portfolio, batch: batch, completedAt: receipt.CompletedAt}, nil

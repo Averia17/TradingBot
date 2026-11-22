@@ -92,14 +92,20 @@ func newHandler(maxResearchAge time.Duration, now func() time.Time, store jobSto
 			response["research_job_schema_version"] = jobSchemaVersion
 			jobVersions := []string{jobSchemaVersion}
 			resultVersions := []string{syntheticResultVersion, offlineResultVersion}
+			sourceModes := []string{syntheticSourceMode, offlineSourceMode}
 			if identityRegistrySHA256 != "" {
 				jobVersions = append(jobVersions, identityJobSchemaVersion)
 				resultVersions = append(resultVersions, identityResultVersion)
+				if _, provider := store.(providerClaimStore); provider && hasCallUsage {
+					jobVersions = append(jobVersions, providerJobSchemaVersion)
+					resultVersions = append(resultVersions, providerResultVersion)
+					sourceModes = append(sourceModes, providerSourceMode)
+				}
 			}
 			response["research_job_schema_versions"] = jobVersions
 			response["research_result_schema_version"] = syntheticResultVersion
 			response["research_result_schema_versions"] = resultVersions
-			response["research_result_source_modes"] = []string{syntheticSourceMode, offlineSourceMode}
+			response["research_result_source_modes"] = sourceModes
 		}
 		if hasCalendar {
 			response["research_calendar_observations"] = true

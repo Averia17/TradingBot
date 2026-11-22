@@ -61,9 +61,16 @@ func (h jobHTTP) complete(w http.ResponseWriter, r *http.Request, jobID string) 
 	input := jobs.CompleteJob{
 		JobID: jobID, WorkerID: workerID, Token: strings.ToLower(token), Payload: payload, ExpiresAt: document.ExpiresAt,
 	}
-	if metadata, ok := document.Metadata.(offlineResultMetadata); ok {
+	if metadata, ok := document.Metadata.(workerResultMetadata); ok {
 		input.ExpectedAttempt = metadata.Provenance.Attempt
 		input.ExpectedLLMCalls = metadata.LLMCalls
+		if document.SchemaVersion == providerResultVersion {
+			input.ExpectedProviderUsage = &jobs.ProviderUsageExpectation{
+				Provider: metadata.Provenance.ModelProvider, Model: metadata.Provenance.ModelID,
+				InputTokens: metadata.InputTokens, OutputTokens: metadata.OutputTokens,
+				MissingUsage: metadata.MissingUsageCalls == 1,
+			}
+		}
 	}
 	result, created, err := h.store.Complete(ctx, input, func(job jobs.Job, dbNow time.Time) error {
 		return document.validate(job, dbNow, h.maxResearchAge)
@@ -113,7 +120,12 @@ func parseResultDocument(fields map[string]json.RawMessage) (resultDocument, err
 		return resultDocument{}, errInvalidResult
 	}
 	for _, reports := range document.Reports {
-		if strings.TrimSpace(reports["final_trade_decision"]) == "" {
+		if document.SchemaVersion == providerResultVersion {
+			if len(reports) != 3 || strings.TrimSpace(reports["market_report"]) == "" ||
+				strings.TrimSpace(reports["fundamentals_report"]) == "" || strings.TrimSpace(reports["news_report"]) == "" {
+				return resultDocument{}, errInvalidResult
+			}
+		} else if strings.TrimSpace(reports["final_trade_decision"]) == "" {
 			return resultDocument{}, errInvalidResult
 		}
 		for field, text := range reports {
@@ -172,18 +184,34 @@ func (d resultDocument) validate(job jobs.Job, dbNow time.Time, maxAge time.Dura
 		contract.CheckSymbols(request.RequestedSymbols) != nil {
 		return errInvalidStoredJob
 	}
-	bound := request.Version == identityJobSchemaVersion
+	switch request.Version {
+	case providerJobSchemaVersion:
+		if request.AnalysisMode != jobs.ProviderAnalysisMode || request.MaxLLMCalls != 1 {
+			return errInvalidStoredJob
+		}
+		if d.SchemaVersion != providerResultVersion {
+			return errInvalidResult
+		}
+	case identityJobSchemaVersion:
+		if d.SchemaVersion != identityResultVersion {
+			return errInvalidResult
+		}
+	case jobSchemaVersion:
+		if d.SchemaVersion != syntheticResultVersion && d.SchemaVersion != offlineResultVersion {
+			return errInvalidResult
+		}
+	default:
+		return errInvalidStoredJob
+	}
+	bound := request.Version != jobSchemaVersion
 	if bound {
 		if !request.hasIdentityBindings() {
 			return errInvalidStoredJob
 		}
-	} else if request.Version != jobSchemaVersion || request.IdentityRegistry != nil || len(request.SecurityBindings) != 0 {
+	} else if request.IdentityRegistry != nil || len(request.SecurityBindings) != 0 {
 		return errInvalidStoredJob
 	}
-	if bound != (d.SchemaVersion == identityResultVersion) {
-		return errInvalidResult
-	}
-	if metadata, ok := d.Metadata.(offlineResultMetadata); ok {
+	if metadata, ok := d.Metadata.(workerResultMetadata); ok {
 		provenance := metadata.Provenance
 		if provenance.JobID != job.ID || provenance.PolicyVersion != request.PolicyVersion ||
 			provenance.DataManifest != request.DataManifest || metadata.LLMCalls > request.MaxLLMCalls {
@@ -229,7 +257,7 @@ func ValidateArchivedResearchResult(job jobs.Job, result jobs.Result) error {
 	if err != nil {
 		return err
 	}
-	if metadata, ok := document.Metadata.(offlineResultMetadata); ok && metadata.Provenance.Attempt != result.Attempt {
+	if metadata, ok := document.Metadata.(workerResultMetadata); ok && metadata.Provenance.Attempt != result.Attempt {
 		return errInvalidResult
 	}
 	return document.validate(job, result.CompletedAt, time.Duration(1<<63-1))

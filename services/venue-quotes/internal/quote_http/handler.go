@@ -7,6 +7,7 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"time"
 
 	"tradingbot/venue-quotes/internal/quotes"
 )
@@ -16,6 +17,7 @@ type Provider interface {
 }
 
 const maxConcurrentQuotes = 4
+const roundTripTimeout = 9 * time.Second
 
 func Handler(provider Provider) *http.ServeMux {
 	mux := http.NewServeMux()
@@ -26,7 +28,7 @@ func Handler(provider Provider) *http.ServeMux {
 		return mux
 	}
 	slots := make(chan struct{}, maxConcurrentQuotes)
-	mux.HandleFunc("POST /v1/quotes", func(w http.ResponseWriter, r *http.Request) {
+	handleQuote := func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		if mediaType, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type")); mediaType != "application/json" {
 			writeError(w, http.StatusUnsupportedMediaType, "expected_json")
@@ -49,9 +51,18 @@ func Handler(provider Provider) *http.ServeMux {
 			writeError(w, http.StatusServiceUnavailable, "quote_service_busy")
 			return
 		}
+		if r.Pattern == "POST /v1/quotes/round-trip" {
+			ctx, cancel := context.WithTimeout(r.Context(), roundTripTimeout)
+			defer cancel()
+			observation, err := quotes.RoundTrip(ctx, request, provider.Quote)
+			writeProviderResponse(w, observation, err)
+			return
+		}
 		observation, err := provider.Quote(r.Context(), request)
 		writeProviderResponse(w, observation, err)
-	})
+	}
+	mux.HandleFunc("POST /v1/quotes", handleQuote)
+	mux.HandleFunc("POST /v1/quotes/round-trip", handleQuote)
 	return mux
 }
 

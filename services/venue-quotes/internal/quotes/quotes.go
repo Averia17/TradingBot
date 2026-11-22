@@ -48,6 +48,7 @@ type Observation struct {
 	RequestedAt       time.Time  `json:"requested_at"`
 	ObservedAt        time.Time  `json:"observed_at"`
 	ProviderExpiresAt *time.Time `json:"provider_expires_at"`
+	RouteVenues       []string   `json:"-"`
 }
 
 func ValidMint(value string) bool {

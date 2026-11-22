@@ -14,9 +14,13 @@ import (
 	"tradingbot/control/internal/jobs"
 	"tradingbot/control/internal/ledger"
 	"tradingbot/control/internal/paper_risk"
+	"tradingbot/control/internal/paper_sim"
 )
 
 var ErrQuoteMissing = errors.New("no pinned local paper quote is available")
+
+// ErrSettlementPending means a reserved synthetic order still awaits evidence.
+var ErrSettlementPending = errors.New("paper fixture settlement pending")
 
 type FollowStore interface {
 	PaperStore
@@ -218,6 +222,9 @@ func (f applicationFollower) admit(ctx context.Context, application applicationP
 
 func (f applicationFollower) execute(ctx context.Context, application applicationPlan, now time.Time, resume bool) (FollowResult, error) {
 	result, err := application.execute(ctx, followedOrderStore{FollowStore: f.paper, input: f.input}, f.input.Quote, now)
+	if errors.Is(err, ErrSettlementPending) {
+		return f.status("awaiting_recovery"), nil
+	}
 	if !resume {
 		switch {
 		case errors.Is(err, ledger.ErrExpired):
@@ -287,6 +294,10 @@ func sameApplication(record ledger.ApplicationRecord, input ledger.ApplicationIn
 type followedOrderStore struct {
 	FollowStore
 	input ledger.ApplicationInput
+}
+
+func (s followedOrderStore) JupiterFixtureSettlementEnabled() bool {
+	return paper_sim.JupiterFixtureSettlementEnabled(s.FollowStore)
 }
 
 func (s followedOrderStore) Reserve(ctx context.Context, order ledger.ReservationRequest) (ledger.Order, bool, error) {

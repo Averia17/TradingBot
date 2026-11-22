@@ -631,6 +631,15 @@ go -C services/control run ./cmd/paper schedule-entry --config $entryConfig --se
 точные входы Go в локальном журнале до отправки задания. При повторе
 используются записанные байты. Просроченный срез без записи пропускается.
 
+[Профиль на 23 бумаги](services/research/examples/entry-cycles/expanded-screening.json)
+показывает широкий отбор с синтетическими ценами базовых бумаг и устойчивыми ID.
+При `top_k=3`, бюджете 33 вызова и 16 вызовах на бумагу в исследование
+попадают максимум две бумаги за запуск. Для своего paper-плана `0.2`
+в `occurrences[].screening` укажите профиль, закрепите реестр в
+`identity_registry` и подготовьте рыночный архив, marks и ленту котировок
+на нужный срез. В примере пути к архиву и реестру заданы от корня репозитория.
+[Состав списка и критерии](docs/planning/plan.md#9-universe-selection)
+
 ```powershell
 uv --directory services/research run --offline --frozen python -m tradingbot.entry_cycles --root $ownerRoot --plan-ref $cyclePlanRef --plan-sha256 $cyclePlanHash --journal $entryJournal --paper-cli $paperCLI
 ```
@@ -1212,6 +1221,19 @@ HTTP `201` подтверждает commit тестового fill и outbox. П
 к подтверждённым сделкам входит в S5 вместе с ledger и reconciliation.
 [Гарантии доставки и восстановление](docs/decisions/002-trade-notifications.md).
 
+Для подтверждённых **виртуальных** исполнений включите профиль
+`paper-notifications` в [research Compose](deploy/research/compose.yaml).
+Relay читает outbox из PostgreSQL Control, публикует события в
+`tradingbot.trade.filled.paper.v1`, а consumer использует отдельную группу и
+секреты `TRADINGBOT_PAPER_TELEGRAM_BOT_TOKEN` и
+`TRADINGBOT_PAPER_TELEGRAM_CHAT_ID`. Уведомления помечены как симуляция.
+`HOLD`, неисполненная заявка и резерв без подтверждённого fill сообщение
+о сделке не создают.
+
+```powershell
+docker compose -f deploy/research/compose.yaml --profile paper-notifications up -d --build
+```
+
 Если Docker Hub недоступен, `TRADINGBOT_GO_BUILD_IMAGE` позволяет задать зеркало
 того же образа Go. Локальная сборка проверена с
 `mirror.gcr.io/library/golang:1.26.5-bookworm@sha256:53eeac89074db483fdf0ab3be1df32bf6e47562263d2d0d6baa7f26acb4957dd`.
@@ -1264,9 +1286,65 @@ uv --directory services/research run --offline --frozen tradingbot analyze --por
 
 `max-calls` — shared thread-safe ограничение provider calls, не гарантированная сумма USD. SDK retries выключены; tool rounds/output tokens ограничены. Usage сохраняется где provider возвращает metadata; USD cost пока null. Structured output failure/unknown evidence/risk mismatch → error, без BUY по умолчанию и без free-text fallback в наш contract.
 
+### AI по расписанию с виртуальным исполнением
+
+В identity-профиле входа задайте `"analysis_mode": "prepared_provider"` и
+`"max_llm_calls": 1` в закреплённом скрининге `0.3`. Скринер применяет
+`top_k` и `remaining_analysis_slots`, затем один портфельный вызов оценивает
+все выбранные бумаги. Нужен архив `local_archive` с рыночными барами,
+раскрытиями и новостями по каждой выбранной бумаге, активными привязками
+реестра, наблюдаемыми marks и отдельной лентой paper-котировок. Котировка
+для исполнения должна появиться после сохранения результата модели.
+Окна дальнейшего пересмотра открытой позиции наследуют режим её открытия.
+В плане пересмотра для этого режима также задаётся один вызов на задание.
+
+Для профиля `research-provider` задайте
+`TRADINGBOT_RESEARCH_PROVIDER_CONFIG_PATH` с настройкой
+`{"llm_provider":"chatgpt","deep_think_llm":"gpt-6-sol"}` или используйте
+`"llm_provider":"openai"` с выбранной моделью и `OPENAI_API_KEY` в окружении.
+Конфиг модели остаётся без ключей. Для ChatGPT подтвердите OAuth в отдельном
+томе этого воркера. Если браузер не может открыть локальный обратный адрес
+контейнера, вставьте адрес последней страницы в терминал, где запущен вход.
+
+```powershell
+docker compose -f deploy/research/compose.yaml --profile research-provider run --rm --no-deps --entrypoint tradingagents provider-research login chatgpt
+docker compose -f deploy/research/compose.yaml --profile research-provider --profile paper-entry --profile paper-review-cycles --profile paper-identity up -d --build
+```
+
+Укажите те же пины реестра и данных в настройках Control и планов. Планы
+содержат конечный набор окон. Данные и котировки публикует владелец плана.
+Профиль выделяет подготовленные задания `0.3` для отдельного воркера,
+который получает durable permit до запроса модели и сохраняет квитанцию
+использования. Go принимает результат `0.4` после сверки с сохранённой
+квитанцией и привязкой к снимку. `paper-identity-dispatch` применяет
+допущенное решение к виртуальному счёту. [Архитектура](docs/architecture.md)
+
+Офлайн-проверка использует временную PostgreSQL и тестовую модель на
+границе провайдера. Для проверки доставки тех же исполнений создайте
+пустую схему PostgreSQL `provider_paper_check`, добавьте
+`search_path=provider_paper_check` к URL тестовой базы и установите
+`TRADINGBOT_TEST_PROVIDER_NOTIFICATIONS=1`. Отдельный тест Jupiter
+проверяет таймаут, повтор диспетчера и учёт результата с имитатором площадки.
+
+```powershell
+$env:TRADINGBOT_PROVIDER_TEST_DATABASE_URL = $testDatabaseUrl
+uv --directory services/research run --offline --frozen pytest -v tests/test_provider_postgres.py
+$env:TRADINGBOT_TEST_DATABASE_URL = $testDatabaseUrl
+$env:TRADINGBOT_TEST_JUPITER_NOTIFICATIONS = '1'
+go -C services/control test -mod=readonly -count=1 -v -run '^TestScheduledPaperJupiterRehearsal$' ./cmd/paper
+```
+
+По умолчанию проверка уведомлений поднимает локальную реализацию протокола
+Kafka и заглушку Telegram. Для проверки реального брокера задайте
+`TRADINGBOT_TEST_KAFKA_BROKERS` с временным loopback-адресом брокера, на
+котором ещё нет paper-топика. Для каждого из двух тестов используйте отдельный
+брокер или очистите собственный временный брокер между прогонами.
+
 ## Границы research и paper
 
-- `execution_mode` в schema **только `research`**; signer/submit/live commands отсутствуют.
+- `execution_mode` в research schema принимает только `research`.
+  Для отправки через Jupiter действует отдельный протокол с одобрением.
+  Автономный signer и сверка реальных сделок остаются в live-плане.
 - Cash/concentration/holding/action checks не заменяют production Go risk kernel и reservations ledger.
 - Upstream data имеет day-level cutoff, не verified intraday PIT. Исторические LLM результаты могут содержать model knowledge leakage.
 - Forecast/confidence — оценки модели, не calibration или доказанная alpha. Котировок real execution пока нет.

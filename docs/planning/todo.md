@@ -25,7 +25,7 @@ Research и текущая диагностика Nautilus находятся в
 - **Goal:** выбрать разрешённые research и execution paths.
 - **Context:** EU retail не равен direct qualified issuer client; конкретная страна UNKNOWN.
 - **Files/components:** `docs/eligibility.md`, `docs/provider-access.csv`.
-- **Acceptance:** для гражданства и страны проживания владельца зафиксированы дата и версия условий, доступ к API и целевым инструментам, поддержка торговли без плеча, способ хранения, ввод и вывод. Для Беларуси первым проверяется Binance Spot bStocks. Dzengi входит в сравнение стоимости. Допуск к Jupiter, xStocks и другим маршрутам проверяется отдельно. Пробелы остаются `UNKNOWN` и блокируют затронутый live-маршрут. [Сравнение маршрутов](plan.md#16-xstocks-vs-ondo-vs-broker).
+- **Acceptance:** для гражданства и страны проживания владельца зафиксированы дата и версия условий, доступ к API и целевым инструментам, поддержка торговли без плеча, способ хранения, ввод и вывод. Для Dzengi проверяем стоимость входа и выхода в открытую сессию и допустимость исполнения из ЕС. Владелец исключил Binance для своего аккаунта. Допуск к Jupiter, xStocks и другим маршрутам проверяется отдельно. Пробелы остаются `UNKNOWN` и блокируют затронутый live-маршрут. [Сравнение маршрутов](plan.md#16-xstocks-vs-ondo-vs-broker).
 - **Tests:** каждая разрешённая операция имеет evidence для конкретного аккаунта или владельца. Успешная публичная котировка подтверждает только доступ к источнику котировки.
 - **Dependencies:** нет; окончательный live результат требует конкретной страны и onboarding.
 
@@ -292,6 +292,7 @@ Research и текущая диагностика Nautilus находятся в
 ### [ ] P3-05 — Cheap scorer with budgeted candidate selection
 
 - **Текущий прогресс:** PIT-отбор по закреплённому stockstats ROC, допуску, свежести, обороту и спреду готовит durable research-задание в пределах явно заданных слотов. После активации суточного лимита PostgreSQL ограничивает общее число разрешений для всех заданий и повторных попыток. Проверены конкурентные запросы, перезапуск и смена суток UTC. Платные расходы и лимиты по валюте остаются открытыми.
+- **Расширенный профиль:** 23 бумаги проходят тот же отбор с синтетическими данными и пином реестра. Покрытие рыночными данными и оценка реальных маршрутов для новых бумаг остаются открытыми. [Список и критерии](plan.md#9-universe-selection)
 - **Goal:** не анализировать500 equities full debate ежедневно.
 - **Context:** universe prefilter, не замена AI trade decision.
 - **Files/components:** existing Qlib workflow/config adapter либо existing TA indicator-ranking adapter, `services/research/tradingbot/universe/scorer.py`, `config/universe.yaml`.
@@ -374,6 +375,13 @@ Research и текущая диагностика Nautilus находятся в
 ## Phase 5 — Paper operation
 
 ### [ ] P5-01 — Paper scheduling over durable research jobs
+
+- **Модель по расписанию:** профиль `research-provider` берёт отдельные
+  identity-задания `0.3` по пину реестра. Один вызов на задание
+  подтверждается разрешением и квитанцией в PostgreSQL. Paper применяет
+  результат `0.4` к виртуальному счёту по policy и закреплённой котировке.
+  Окна входа и пересмотра используют подготовленные архивы владельца.
+  Автоматическое пополнение актуальных архивов для расширенного списка открыто.
 
 - **Фоновый запуск:** профиль `paper-entry` обрабатывает окна закреплённого
   плана и повторяет постановку задания из постоянного журнала после
@@ -473,6 +481,19 @@ Research и текущая диагностика Nautilus находятся в
 
 ### [ ] P6-01 — One permitted venue build/submit/status adapter
 
+- **Текущий прогресс:** `jupiter-adapter` подготавливает BUY/SELL через
+  Jupiter Swap v2 для пары с USDC и возвращает кандидат Metis v0 с минимумом
+  выхода, комиссиями и высотой истечения. Есть защищённая отправка точного
+  подписанного payload по одобрению verifier, durable журнал попыток,
+  чтение квитанций и наблюдение финализации Solana. Через тот же адаптер
+  читаются остатки кошелька. Проверки используют тестовые ответы и PostgreSQL.
+  Сквозной тест проходит BUY и SELL через paper ledger, тестовые подписи,
+  реальные обработчики адаптера и имитаторы Jupiter и Solana.
+  Периодический тест связывает окна входа, события пересмотра и очередь
+  research с этим контуром через `paper dispatch --jupiter-fixture-url`.
+  Допуск, live reservations, производственный verifier/signer и сверка
+  фактических fills в ledger открыты.
+  [ADR-004](../decisions/004-jupiter-adapter.md).
 - **Goal:** minimal execution path без universal router.
 - **Context:** одна площадка после проверки допуска, расходов и хранения.
 - **Files/components:** адаптер выбранной площадки, `services/control/cmd/executor/`.
@@ -482,6 +503,9 @@ Research и текущая диагностика Nautilus находятся в
 
 ### [ ] P6-02 — Independent transaction decoder/policy verifier
 
+- **Текущий прогресс:** офлайн-прогон подписывает только точный шаблон Memo v0.
+  Тесты отклоняют подмену владельца, аргументов, инструкций и срока.
+  Декодирование инструкций и lookup tables реального Metis открыто.
 - **Goal:** reject malicious built transaction до signing.
 - **Context:** quote provider untrusted; Token-2022/lookup tables critical.
 - **Files/components:** `services/control/internal/verify/`, adversarial transaction fixtures.
@@ -509,6 +533,12 @@ Research и текущая диагностика Nautilus находятся в
 
 ### [ ] P6-05 — Submit idempotency and finality reconciliation
 
+- **Текущий прогресс:** при тестовом таймауте BUY paper ledger удерживает
+  резерв. Пересозданный адаптер восстанавливает попытку из PostgreSQL
+  без повторной отправки. После тестовой финализации проходят сверка
+  и идемпотентный учёт. Обычный dispatcher отвергает закреплённую
+  `jupiter_fixture` при перезапуске без соответствующей настройки.
+  Независимые live RPC и сверка фактических fills открыты.
 - **Goal:** exactly-once economic effect where chain semantics allow.
 - **Context:** API timeout ≠ failed transaction.
 - **Files/components:** `services/control/internal/orders/`, `services/control/internal/reconcile/`, SQL order events.
@@ -632,6 +662,10 @@ Research и текущая диагностика Nautilus находятся в
   параметры контракта и L2 trade[XYZ], сохраняет mark, oracle, ставку funding
   и оригинальные ответы с хешами. Двусторонняя оценка стакана проверяет
   лоты и достаточность глубины. Адаптер покрыт офлайн-тестами.
+- `equity-study` преобразует один архивный набор в снимок для `equity-route`.
+  Использует общий лот спота и perp, ограничение на расхождение времени,
+  расчёт затрат из глубины и сценарный funding по oracle. Для настроек
+  маржи использует уровень при неблагоприятном номинале.
 - Собрать сопоставимую историю спота и trade[XYZ] на Hyperliquid. Взять
   общий набор TSLA, NVDA, AAPL, AMZN, GOOGL и META по фактическому пересечению
   листингов и размеры $250, $500, $1 000 и $1 500, где хватает глубины и лотов.

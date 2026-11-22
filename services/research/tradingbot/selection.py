@@ -76,6 +76,7 @@ class RosterSelectionRequest(SelectionRequest):
 class IdentitySelectionRequest(RosterSelectionRequest):
     schema_version: Literal["0.3"]
     identity_registry: ArchiveReference
+    analysis_mode: Literal["prepared_provider"] | None = None
 
 
 SELECTION_INPUT = TypeAdapter(
@@ -242,6 +243,9 @@ def plan_research(
     if len(set(symbols)) != len(symbols):
         raise ValueError("duplicate research candidate symbol")
     identity_bound = isinstance(config, IdentitySelectionRequest)
+    provider_bound = identity_bound and config.analysis_mode == "prepared_provider"
+    if provider_bound and config.max_llm_calls != 1:
+        raise ValueError("prepared provider screening requires one model call per job")
     roster_guarded = isinstance(config, RosterSelectionRequest) and not identity_bound
     registry = load_identity_registry(root, config.identity_registry) if identity_bound else None
     if registry is not None and registry.universe_provider != config.universe_provider:
@@ -253,6 +257,8 @@ def plan_research(
         symbols=None if roster_guarded or identity_bound else symbols,
         visibility="locally_ingested",
     )
+    if provider_bound and snapshot.source_mode != "local_archive":
+        raise ValueError("prepared provider screening requires a local observations archive")
     records_by_symbol: dict[str, list[ArchiveRecord]] = defaultdict(list)
     historical_ids: dict[str, set[str]] = defaultdict(set)
     if registry is None:
@@ -325,11 +331,9 @@ def plan_research(
             row["symbol"],
         )
     )
-    capacity = min(
-        config.top_k,
-        config.remaining_analysis_slots,
-        (config.max_llm_calls - ALLOCATION_CALLS) // config.calls_per_symbol,
-    )
+    capacity = min(config.top_k, config.remaining_analysis_slots)
+    if not provider_bound:
+        capacity = min(capacity, (config.max_llm_calls - ALLOCATION_CALLS) // config.calls_per_symbol)
     selected = [row["symbol"] for row in ranked[:capacity]]
     for index, row in enumerate(ranked):
         row["status"] = "selected" if index < capacity else "capacity_exhausted"
@@ -356,6 +360,12 @@ def plan_research(
                 "identity_registry": config.identity_registry.model_dump(mode="json"),
                 "security_bindings": [binding.model_dump(mode="json") for binding in bindings],
             }
+            if provider_bound:
+                job |= {
+                    "job_schema_version": "0.3",
+                    "analysis_mode": "prepared_provider",
+                    "max_llm_calls": ALLOCATION_CALLS,
+                }
     return {
         "selection_schema_version": "0.2" if identity_bound else "0.1",
         "source_mode": snapshot.source_mode,

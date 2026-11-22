@@ -1,0 +1,47 @@
+{
+  "schema_version": "0.3",
+  "data_manifest": {
+    "ref": "services/research/examples/selection/expanded-market.json",
+    "sha256": "456840dce310106dd3fa73d14c778ea637ca13896bbc8880db50a6d4c7849e29"
+  },
+  "identity_registry": {
+    "ref": "services/research/examples/selection/expanded-identity-registry.json",
+    "sha256": "c1a33fc92dcef0d27b107aea7d7e92d50c60ff59fd9cb08204dd8b883e9f0230"
+  },
+  "universe_provider": "expanded-selection-fixture",
+  "top_k": 3,
+  "remaining_analysis_slots": 3,
+  "calls_per_symbol": 16,
+  "max_llm_calls": 33,
+  "roc_periods": 2,
+  "max_bar_age_seconds": 60,
+  "max_bar_gap_seconds": 60,
+  "max_catalyst_age_seconds": 1200,
+  "min_bar_turnover_usd": "10000",
+  "max_spread_bps": 25,
+  "candidates": [
+    {"symbol": "NVDA", "security_id": "fixture-expanded-nvda", "allowed": true},
+    {"symbol": "AAPL", "security_id": "fixture-expanded-aapl", "allowed": true},
+    {"symbol": "MSFT", "security_id": "fixture-expanded-msft", "allowed": true},
+    {"symbol": "AVGO", "security_id": "fixture-expanded-avgo", "allowed": true},
+    {"symbol": "AMD", "security_id": "fixture-expanded-amd", "allowed": true},
+    {"symbol": "MU", "security_id": "fixture-expanded-mu", "allowed": true},
+    {"symbol": "INTC", "security_id": "fixture-expanded-intc", "allowed": true},
+    {"symbol": "TSM", "security_id": "fixture-expanded-tsm", "allowed": true},
+    {"symbol": "ASML", "security_id": "fixture-expanded-asml", "allowed": true},
+    {"symbol": "PLTR", "security_id": "fixture-expanded-pltr", "allowed": true},
+    {"symbol": "GOOGL", "security_id": "fixture-expanded-googl", "allowed": true},
+    {"symbol": "META", "security_id": "fixture-expanded-meta", "allowed": true},
+    {"symbol": "AMZN", "security_id": "fixture-expanded-amzn", "allowed": true},
+    {"symbol": "TSLA", "security_id": "fixture-expanded-tsla", "allowed": true},
+    {"symbol": "NFLX", "security_id": "fixture-expanded-nflx", "allowed": true},
+    {"symbol": "BRK.B", "security_id": "fixture-expanded-brk.b", "allowed": true},
+    {"symbol": "JPM", "security_id": "fixture-expanded-jpm", "allowed": true},
+    {"symbol": "V", "security_id": "fixture-expanded-v", "allowed": true},
+    {"symbol": "WMT", "security_id": "fixture-expanded-wmt", "allowed": true},
+    {"symbol": "MCD", "security_id": "fixture-expanded-mcd", "allowed": true},
+    {"symbol": "XOM", "security_id": "fixture-expanded-xom", "allowed": true},
+    {"symbol": "JNJ", "security_id": "fixture-expanded-jnj", "allowed": true},
+    {"symbol": "ABBV", "security_id": "fixture-expanded-abbv", "allowed": true}
+  ]
+}

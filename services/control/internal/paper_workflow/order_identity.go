@@ -20,6 +20,7 @@ type orderIdentity struct {
 	Registry          ArchiveReference  `json:"identity_registry"`
 	ApplicationSHA256 string            `json:"application_sha256"`
 	Decision          contract.Intent   `json:"-"`
+	AnalysisMode      string            `json:"-"`
 }
 
 // OpeningIdentity locates a position's original owner-approved virtual BUY.

@@ -104,6 +104,7 @@
         },
         "source_mode": {
           "enum": [
+            "provider_reported",
             "synthetic_fixture"
           ]
         }

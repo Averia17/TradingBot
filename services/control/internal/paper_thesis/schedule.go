@@ -75,6 +75,7 @@ type scheduledJob struct {
 	Budget           int                                      `json:"max_llm_calls"`
 	IdentityRegistry *paper_workflow.ArchiveReference         `json:"identity_registry,omitempty"`
 	SecurityBindings []paper_workflow.ResearchSecurityBinding `json:"security_bindings,omitempty"`
+	AnalysisMode     string                                   `json:"analysis_mode,omitempty"`
 }
 
 // ScheduleReview queues one due opening thesis review. The trigger is the
@@ -308,6 +309,12 @@ func (r ScheduleRequest) enrollStable(archiveRoot string, view View, portfolio c
 	}
 	digest := sha256.Sum256(proof)
 	wire.Version, wire.IdentityRegistry, wire.SecurityBindings = paper_workflow.IdentityVersion, &identity.Registry, bindings
+	if opening.AnalysisMode == jobs.ProviderAnalysisMode {
+		if r.Budget != 1 {
+			return fmt.Errorf("%w: prepared provider review requires one model call", ErrInvalid)
+		}
+		wire.Version, wire.AnalysisMode = "0.3", jobs.ProviderAnalysisMode
+	}
 	dispatch.Identity, dispatch.ReviewScheduleSHA256 = identity, hex.EncodeToString(digest[:])
 	dispatch.ReviewOrigin = &paper_workflow.ReviewOrigin{OpeningOrderID: view.OrderID, OpeningApplicationSHA256: opening.ApplicationSHA256}
 	return nil

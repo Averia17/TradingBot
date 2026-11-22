@@ -70,7 +70,7 @@ func checkBudget(ctx context.Context, tx pgx.Tx, r *report) error {
 		Registry json.RawMessage `json:"identity_registry"`
 	}
 	parsed := json.Unmarshal(archivedJob.Request, &input) == nil
-	bound := input.Version == "0.2" || registrySHA != ""
+	bound := input.Version == "0.2" || input.Version == "0.3" || registrySHA != ""
 	validBinding := input.Version == "0.1" && len(input.Registry) == 0
 	if bound {
 		validBinding = control.CheckArchivedIdentityRequest(archivedJob, registrySHA)
@@ -115,22 +115,22 @@ func checkReportedUsage(r *report, job jobs.Job, receipt jobs.Result, hash []byt
 		} `json:"metadata"`
 	}
 	if !matchesDigest(receipt.Payload, hash) || json.Unmarshal(receipt.Payload, &result) != nil ||
-		bound != (result.Version == "0.3") ||
+		bound != (result.Version == "0.3" || result.Version == "0.4") ||
 		bound && (r.Research.Limit == nil || control.ValidateArchivedResearchResult(job, receipt) != nil) {
 		r.add("research_result_integrity_failed")
 		return
 	}
 	usage := result.Metadata
-	offline := result.Version == "0.2" || result.Version == "0.3"
-	if (result.Version != "0.1" && !offline) || usage.Calls == nil || *usage.Calls < 0 || *usage.Calls > 64 ||
+	workerResult := result.Version == "0.2" || result.Version == "0.3" || result.Version == "0.4"
+	if (result.Version != "0.1" && !workerResult) || usage.Calls == nil || *usage.Calls < 0 || *usage.Calls > 64 ||
 		(result.Version == "0.1" && *usage.Calls != 0) ||
-		(offline && (*usage.Calls == 0 || usage.MissingUsage == nil || *usage.MissingUsage < 0 || *usage.MissingUsage > *usage.Calls)) {
+		(workerResult && (*usage.Calls == 0 || usage.MissingUsage == nil || *usage.MissingUsage < 0 || *usage.MissingUsage > *usage.Calls)) {
 		r.add("research_usage_unknown")
 		return
 	}
 	b := r.Research
 	b.ReportedCalls = usage.Calls
-	if offline {
+	if workerResult {
 		b.MissingTokenCallUsage = usage.MissingUsage
 		if *usage.MissingUsage > 0 {
 			r.add("research_token_usage_missing")

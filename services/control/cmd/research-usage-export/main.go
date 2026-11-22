@@ -68,8 +68,12 @@ func run(ctx context.Context, dsn string, args []string, output io.Writer) error
 }
 
 func projectArchive(usage jobs.ResearchCallUsage) permitArchive {
+	sourceMode := "synthetic_fixture"
+	if usage.AnalysisMode == jobs.ProviderAnalysisMode {
+		sourceMode = "provider_reported"
+	}
 	report := permitArchive{
-		Version: "0.1", Source: "synthetic_fixture", JobID: usage.JobID,
+		Version: "0.1", Source: sourceMode, JobID: usage.JobID,
 		Status: usage.Status, Attempts: usage.Attempts, LegacyBudgetUnknown: usage.LegacyBudgetUnknown,
 		PermitHistoryKnown: usage.PermitHistoryKnown,
 		Permits:            make([]permitRecord, 0, len(usage.Records)),

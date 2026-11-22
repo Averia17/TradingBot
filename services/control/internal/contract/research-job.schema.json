@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "Research job HTTP protocols 0.1 and 0.2",
+  "title": "Research job HTTP protocols 0.1 to 0.3",
   "$ref": "#/$defs/SupportedJobRequest",
   "$defs": {
     "UUID": {
@@ -82,10 +82,33 @@
         "security_bindings": {"$ref": "#/$defs/SecurityBindings"}
       }
     },
+    "ProviderJobRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["job_schema_version", "analysis_mode", "job_id", "portfolio", "requested_symbols", "data_manifest", "policy_version", "max_llm_calls", "identity_registry", "security_bindings"],
+      "properties": {
+        "job_schema_version": {"const": "0.3"},
+        "analysis_mode": {"const": "prepared_provider"},
+        "job_id": {"$ref": "#/$defs/IdentityJobRequest/properties/job_id"},
+        "portfolio": {"$ref": "#/$defs/IdentityJobRequest/properties/portfolio"},
+        "requested_symbols": {"$ref": "#/$defs/IdentityJobRequest/properties/requested_symbols"},
+        "data_manifest": {"$ref": "#/$defs/PinnedLocalReference"},
+        "policy_version": {"$ref": "#/$defs/IdentityJobRequest/properties/policy_version"},
+        "max_llm_calls": {"const": 1},
+        "identity_registry": {"$ref": "#/$defs/PinnedLocalReference"},
+        "security_bindings": {"$ref": "#/$defs/SecurityBindings"}
+      }
+    },
+    "IdentityJobs": {
+      "oneOf": [
+        {"$ref": "#/$defs/IdentityJobRequest"},
+        {"$ref": "#/$defs/ProviderJobRequest"}
+      ]
+    },
     "SupportedJobRequest": {
       "oneOf": [
         {"$ref": "#/$defs/JobRequest"},
-        {"$ref": "#/$defs/IdentityJobRequest"}
+        {"$ref": "#/$defs/IdentityJobs"}
       ]
     },
     "ClaimRequest": {
@@ -95,8 +118,10 @@
       "properties": {
         "worker_id": {"$ref": "#/$defs/Identifier"},
         "claim_id": {"$ref": "#/$defs/UUID"},
-        "identity_registry_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
-      }
+        "identity_registry_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "analysis_mode": {"const": "prepared_provider"}
+      },
+      "dependentRequired": {"analysis_mode": ["identity_registry_sha256"]}
     },
     "HeartbeatRequest": {
       "type": "object",

@@ -1,6 +1,7 @@
 """Reprice archived research invocations under an independently pinned USD schedule."""
 
 import json
+import re
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
@@ -28,6 +29,7 @@ MAX_PERMITS_PER_JOB = 64
 MAX_CALLBACK_BYTES = 4096
 TokenCount = Annotated[int, msgspec.Meta(ge=0, le=1_000_000_000)]
 ModelKey = Annotated[str, msgspec.Meta(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:/@-]{0,191}$")]
+_PREPARED_MODEL_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 
 
 class ResearchInvocation(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
@@ -66,7 +68,7 @@ class ResearchPermit(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
 
 class ResearchPermitArchive(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
     schema_version: Literal["0.1"]
-    source_mode: Literal["synthetic_fixture"]
+    source_mode: Literal["synthetic_fixture", "provider_reported"]
     job_id: UUID
     job_status: Literal["queued", "leased", "completed", "failed", "expired"]
     attempts: Annotated[int, msgspec.Meta(ge=0, le=2**31 - 1)]
@@ -189,11 +191,18 @@ def _load_permits(artifact: PinnedArtifact) -> PricedUsageInput:
         call = msgspec.convert(
             json.loads(raw, object_pairs_hook=_unique_fields), type=ResearchInvocation
         )
-        if (
-            call.run_id != permit.call_id
-            or call.status == "unfinished"
-            or (call.provider, call.model) not in {(None, None), ("offline", "scripted-offline-v1")}
-        ):
+        if call.run_id != permit.call_id or call.status == "unfinished":
+            raise ValueError("Research callback does not match its permit")
+        if archive.source_mode == "provider_reported":
+            if (
+                call.role != "portfolio_allocator"
+                or call.provider not in {"openai", "chatgpt"}
+                or call.model is None
+                or _PREPARED_MODEL_ID.fullmatch(call.model) is None
+                or call.model == "scripted-offline-v1"
+            ):
+                raise ValueError("Research callback does not match its provider permit")
+        elif (call.provider, call.model) not in {(None, None), ("offline", "scripted-offline-v1")}:
             raise ValueError("Research callback does not match its offline permit")
         calls.append((call, permit))
     complete = (

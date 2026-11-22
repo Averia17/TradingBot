@@ -1,0 +1,16 @@
+{
+  "schema_version": "1",
+  "network": "solana-mainnet",
+  "owner": "BQ72nSv9f3PRyRKCBnHLVrerrv37CYTHm5h3s9VSGQDV",
+  "intent_id": "7c4d4963-94e7-498b-8869-4e46feacbdd0",
+  "reservation_id": "7c4d4963-94e7-498b-8869-4e46feacbdd1",
+  "provider_request_id": "example-request",
+  "signature": "4cdd1oX7cfVALfr26tP52BZ6cSzrgnNGtYD7BFhm6FFeZV5sPTnRvg6NRn8yC6DbEikXcrNChBM5vVJnTgKhGhVu",
+  "last_valid_block_height": "312345678",
+  "provider_status": "unknown",
+  "provider_code": -1001,
+  "provider_slot": null,
+  "claimed_at": "2026-11-22T10:00:00Z",
+  "provider_observed_at": "2026-11-22T10:00:00.4Z",
+  "chain_status": null
+}

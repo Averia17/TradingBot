@@ -11,7 +11,7 @@
       "additionalProperties": false,
       "required": ["call_usage_schema_version", "worker_id", "lease_token", "call"],
       "properties": {
-        "call_usage_schema_version": {"const": "0.1"},
+        "call_usage_schema_version": {"enum": ["0.1", "0.2"]},
         "worker_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"},
         "lease_token": {"$ref": "#/$defs/UUID"},
         "call": {
@@ -21,14 +21,22 @@
               "properties": {
                 "run_id": {"$ref": "#/$defs/UUID"},
                 "status": {"enum": ["completed", "failed"]},
-                "provider": {"enum": [null, "offline"]},
-                "model": {"enum": [null, "scripted-offline-v1"]},
                 "started_at": {"pattern": "Z$"}
               }
             }
           ]
         }
-      }
+      },
+      "if": {"properties": {"call_usage_schema_version": {"const": "0.2"}}},
+      "then": {"properties": {"call": {"properties": {
+        "provider": {"enum": ["chatgpt", "openai"]},
+        "model": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$", "not": {"const": "scripted-offline-v1"}},
+        "role": {"const": "portfolio_allocator"}
+      }}}},
+      "else": {"properties": {"call": {"properties": {
+        "provider": {"enum": [null, "offline"]},
+        "model": {"enum": [null, "scripted-offline-v1"]}
+      }}}}
     },
     "Receipt": {
       "type": "object",

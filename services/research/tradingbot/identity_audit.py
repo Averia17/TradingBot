@@ -18,6 +18,7 @@ from tradingbot.contracts import (
     PortfolioSnapshot,
     Symbol,
 )
+from tradingbot.prepared_analysis import REPORTS_BY_KIND, build_prepared_reports
 from tradingbot.security_identity import (
     SecurityBinding,
     load_identity_registry,
@@ -39,6 +40,7 @@ _RECEIPT_TIME = r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-
 _JobID = Annotated[str, Field(pattern=r"^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$")]
 _Attempt = Annotated[int, Field(strict=True, ge=1, le=3)]
 _CallCount = Annotated[int, Field(strict=True, ge=1, le=64)]
+_SingleCall = Annotated[int, Field(strict=True, ge=1, le=1)]
 _Usage = Annotated[int, Field(strict=True, ge=0, le=2**64 - 1)]
 _Bindings = Annotated[list[SecurityBinding], Field(min_length=1, max_length=100)]
 _ReportKey = Literal[
@@ -49,6 +51,7 @@ _ReportKey = Literal[
     "trader_investment_plan",
     "final_trade_decision",
 ]
+_PREPARED_REPORT_KEYS = frozenset(REPORTS_BY_KIND.values())
 _wire_time = TypeAdapter(CaptureTime)
 
 
@@ -68,8 +71,7 @@ class _Export(Contract):
     jobs: Annotated[list[_ExportRow], Field(min_length=1, max_length=32)]
 
 
-class _Job(Contract):
-    job_schema_version: Literal["0.2"]
+class _IdentityJobFields(Contract):
     job_id: _JobID
     portfolio: PortfolioSnapshot
     requested_symbols: Annotated[list[Symbol], Field(min_length=1, max_length=100)]
@@ -80,7 +82,21 @@ class _Job(Contract):
     security_bindings: _Bindings
 
 
-class _Provenance(Contract):
+class _OfflineJob(_IdentityJobFields):
+    job_schema_version: Literal["0.2"]
+
+
+class _PreparedJob(_IdentityJobFields):
+    job_schema_version: Literal["0.3"]
+    analysis_mode: Literal["prepared_provider"]
+    max_llm_calls: _SingleCall
+
+
+_Job = _OfflineJob | _PreparedJob
+_job_wire = TypeAdapter(Annotated[_Job, Field(discriminator="job_schema_version")])
+
+
+class _IdentityProvenanceFields(Contract):
     job_id: _JobID
     attempt: _Attempt
     policy_version: Identifier
@@ -89,14 +105,22 @@ class _Provenance(Contract):
     upstream_version: Identifier
     upstream_sha: Annotated[str, Field(pattern=r"^[0-9a-f]{40}$")]
     config_sha256: SHA256
-    model_id: Literal["scripted-offline-v1"]
     identity_registry: ArchiveReference
     security_bindings: _Bindings
     projected_snapshot_sha256: SHA256
 
 
-class _Metadata(Contract):
-    source_mode: Literal["tradingagents_offline"]
+class _OfflineProvenance(_IdentityProvenanceFields):
+    model_id: Literal["scripted-offline-v1"]
+
+
+class _PreparedProvenance(_IdentityProvenanceFields):
+    model_id: Identifier
+    model_provider: Literal["openai", "chatgpt"]
+    archive_source_mode: Literal["local_archive"]
+
+
+class _WorkerMetadataFields(Contract):
     alpha_measured: Annotated[bool, Field(strict=True)]
     intraday_pit_verified: Annotated[bool, Field(strict=True)]
     llm_calls: _CallCount
@@ -104,14 +128,36 @@ class _Metadata(Contract):
     output_tokens: _Usage
     missing_usage_calls: Annotated[int, Field(strict=True, ge=0, le=64)]
     usd_cost: None
-    provenance: _Provenance
 
 
-class _Result(Contract):
-    result_schema_version: Literal["0.3"]
+class _OfflineMetadata(_WorkerMetadataFields):
+    source_mode: Literal["tradingagents_offline"]
+    provenance: _OfflineProvenance
+
+
+class _PreparedMetadata(_WorkerMetadataFields):
+    source_mode: Literal["prepared_archive_research"]
+    llm_calls: _SingleCall
+    provenance: _PreparedProvenance
+
+
+class _ResultFields(Contract):
     batch: DecisionBatch
     reports: Annotated[dict[Symbol, dict[_ReportKey, str]], Field(min_length=1, max_length=100)]
-    metadata: _Metadata
+
+
+class _OfflineResult(_ResultFields):
+    result_schema_version: Literal["0.3"]
+    metadata: _OfflineMetadata
+
+
+class _PreparedResult(_ResultFields):
+    result_schema_version: Literal["0.4"]
+    metadata: _PreparedMetadata
+
+
+_Result = _OfflineResult | _PreparedResult
+_result_wire = TypeAdapter(Annotated[_Result, Field(discriminator="result_schema_version")])
 
 
 def _reject_constant(_name: str):
@@ -145,7 +191,7 @@ def _money(value: object) -> None:
 
 def _request(raw: bytes) -> _Job:
     wire = _decode(raw)
-    job = _Job.model_validate(wire)
+    job = _job_wire.validate_python(wire)
     portfolio = wire["portfolio"]
     if portfolio.keys() != PortfolioSnapshot.model_fields.keys():
         raise ValueError("incomplete stored research portfolio")
@@ -167,7 +213,7 @@ def _request(raw: bytes) -> _Job:
 
 def _result(raw: bytes) -> _Result:
     wire = _decode(raw)
-    result = _Result.model_validate(wire)
+    result = _result_wire.validate_python(wire)
     batch = wire["batch"]
     if batch.keys() != DecisionBatch.model_fields.keys():
         raise ValueError("incomplete stored decision batch")
@@ -179,6 +225,9 @@ def _result(raw: bytes) -> _Result:
 
 
 def _validate_record(row: _ExportRow, job: _Job, result: _Result, owner: ArchiveReference) -> None:
+    prepared = isinstance(result, _PreparedResult)
+    if prepared != isinstance(job, _PreparedJob):
+        raise ValueError("stored result version does not match the job analysis mode")
     if job.job_id != row.job_id:
         raise ValueError("exported research job ID does not match the stored request")
     if job.identity_registry != owner:
@@ -194,6 +243,7 @@ def _validate_record(row: _ExportRow, job: _Job, result: _Result, owner: Archive
         or proof.security_bindings != job.security_bindings
         or metadata.alpha_measured
         or metadata.intraday_pit_verified
+        or prepared and proof.model_id == "scripted-offline-v1"
         or not metadata.missing_usage_calls <= metadata.llm_calls <= job.max_llm_calls
         or metadata.missing_usage_calls == metadata.llm_calls
         and (metadata.input_tokens or metadata.output_tokens)
@@ -219,9 +269,11 @@ def _validate_record(row: _ExportRow, job: _Job, result: _Result, owner: Archive
     if set(result.reports) != symbols or {intent.symbol for intent in batch.intents} != symbols:
         raise ValueError("stored reports and decisions must cover the exact requested symbols")
     for reports in result.reports.values():
-        if not reports.get("final_trade_decision") or any(
-            not text.strip() for text in reports.values()
-        ):
+        has_required_report = (
+            reports.keys() == _PREPARED_REPORT_KEYS
+            if prepared else bool(reports.get("final_trade_decision"))
+        )
+        if not has_required_report or any(not text.strip() for text in reports.values()):
             raise ValueError("stored result has missing or blank analyst reports")
     hashes = {
         f"{symbol}:{field}": hashlib.sha256(text.encode("utf-8")).hexdigest()
@@ -271,6 +323,8 @@ def audit_identity_export(
             job.portfolio.as_of,
             visibility="locally_ingested",
         )
+        if isinstance(stored, _PreparedResult) and snapshot.source_mode != "local_archive":
+            raise ValueError("prepared provider result requires a local archive")
         projected = project_identity_snapshot(
             snapshot,
             registry,
@@ -281,6 +335,10 @@ def audit_identity_export(
         projection_hash = projected.sha256
         if projection_hash != stored.metadata.provenance.projected_snapshot_sha256:
             raise ValueError("projected snapshot SHA-256 does not match the stored result")
+        if isinstance(stored, _PreparedResult) and stored.reports != build_prepared_reports(
+            projected, job.requested_symbols,
+        ):
+            raise ValueError("prepared reports differ from the pinned local archive")
         jobs.append(
             row.model_dump(exclude={"request_base64", "result_base64"})
             | {

@@ -1,0 +1,10 @@
+{
+  "schema_version": "0.1",
+  "source_mode": "synthetic_fixture",
+  "request_sha256": "a39b8cf1583dcb3d467de34e4fbfb7a56c2dce58516fc080b52d0dcd4bf66124",
+  "status": "finalized",
+  "quantity_raw": "100",
+  "gross_usd": "200",
+  "fee_usd": "0",
+  "observed_at": "2026-11-22T10:00:01Z"
+}

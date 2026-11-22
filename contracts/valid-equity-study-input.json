@@ -1,0 +1,117 @@
+{
+  "schema_version": "0.1",
+  "source_mode": "synthetic_fixture",
+  "as_of": "2026-10-05T14:35:00Z",
+  "horizon_hours": 4,
+  "max_skew_seconds": 10,
+  "account": {
+    "snapshot_id": "fixture-1",
+    "spot_cash_usd": "520",
+    "perp_collateral_usd": "525",
+    "remaining_stress_budget_usd": "140",
+    "has_open_perps": false,
+    "has_pending_orders": false
+  },
+  "policy": {
+    "version": "fixture-policy-1",
+    "allow_leverage": true,
+    "max_notional_usd": "1500",
+    "max_perp_capital_at_risk_usd": "800",
+    "min_stress_move_bps": 600,
+    "max_observation_age_seconds": 60,
+    "max_basis_bps": 50,
+    "maintenance_buffer_bps": 100,
+    "min_forecast_uncertainty_bps": 40,
+    "min_net_edge_bps": 25,
+    "min_perp_advantage_bps": 25,
+    "min_leverage_advantage_usd": "5",
+    "stress_loss_penalty_bps": 300,
+    "max_leverage": 5
+  },
+  "securities": [
+    {
+      "security_id": "fixture-nvda",
+      "symbol": "NVDA",
+      "held_spot": null,
+      "corporate_action_window_clear": true,
+      "market_stress_down_bps": 700,
+      "market_stress_up_bps": 900,
+      "reference": {
+        "price_usd": "100",
+        "observed_at": "2026-10-05T14:34:51Z",
+        "available_at": "2026-10-05T14:34:51Z",
+        "evidence_sha256": "1111111111111111111111111111111111111111111111111111111111111111"
+      },
+      "notionals_usd": [
+        "519",
+        "1500"
+      ],
+      "spot": {
+        "market_id": "fixture-spot-nvda",
+        "provider": "binance",
+        "market_symbol": "NVDABUSDT",
+        "shares_per_unit": "2",
+        "usd_per_quote_unit": "1",
+        "size_decimals": 1,
+        "taker_fee_bps": 5,
+        "fixed_fee_usd_per_leg": "0.05",
+        "execution_stress_add_bps": 20,
+        "basis_cost_bps": 5,
+        "basis_stress_bps": 20,
+        "order_book": {
+          "symbol": "NVDABUSDT",
+          "depth": 5,
+          "provider": "binance",
+          "firmness": "indicative",
+          "provider_sequence": 1,
+          "requested_at": "2026-10-05T14:34:50Z",
+          "observed_at": "2026-10-05T14:34:51Z",
+          "bids": [
+            {
+              "price": "199.8",
+              "quantity": "10"
+            }
+          ],
+          "asks": [
+            {
+              "price": "200.2",
+              "quantity": "10"
+            }
+          ]
+        }
+      },
+      "perp": {
+        "market_id": "fixture-perp-nvda",
+        "shares_per_unit": "1",
+        "usd_per_quote_unit": "1",
+        "taker_fee_bps": 3,
+        "fixed_fee_usd_per_leg": "0",
+        "execution_stress_add_bps": 10,
+        "basis_cost_bps": 2,
+        "basis_stress_bps": 12,
+        "funding_stress_rate_hourly": "0.0006",
+        "collateral_token_index": 0,
+        "external_session_until": "2026-10-05T20:00:00Z",
+        "capture": {
+          "schema_version": "0.1",
+          "provider": "hyperliquid",
+          "dex": "xyz",
+          "coin": "xyz:NVDA",
+          "available_at": "2026-10-05T14:34:53Z",
+          "meta_response": {
+            "requested_at": "2026-10-05T14:34:50Z",
+            "received_at": "2026-10-05T14:34:51Z",
+            "sha256": "14f9d2db85df87f2b8b65b669080ccfb6d009f16438e57c64a68e454e22487d6",
+            "body_base64": "W3sidW5pdmVyc2UiOlt7Im5hbWUiOiJ4eXo6TlZEQSIsInN6RGVjaW1hbHMiOjMsIm1heExldmVyYWdlIjoxMCwibWFyZ2luTW9kZSI6InN0cmljdElzb2xhdGVkIiwibWFyZ2luVGFibGVJZCI6MTB9XSwiY29sbGF0ZXJhbFRva2VuIjowfSxbeyJtYXJrUHgiOiIxMDAuMTAiLCJvcmFjbGVQeCI6Ijk5LjgwIiwiZnVuZGluZyI6IjAuMDAwMDUifV1d"
+          },
+          "book_response": {
+            "requested_at": "2026-10-05T14:34:51Z",
+            "received_at": "2026-10-05T14:34:53Z",
+            "sha256": "3372f73a4841357c127daab9f5f7c83a068cb0aa5158c974944ded2c5766e7fb",
+            "body_base64": "eyJjb2luIjoieHl6Ok5WREEiLCJ0aW1lIjoxNzkxMjEwODkyMDAwLCJsZXZlbHMiOltbeyJweCI6Ijk5Ljk5Iiwic3oiOiIyMCIsIm4iOjJ9XSxbeyJweCI6IjEwMC4wMSIsInN6IjoiMjAiLCJuIjoyfV1dfQ=="
+          }
+        }
+      }
+    }
+  ]
+}

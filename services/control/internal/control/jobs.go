@@ -17,6 +17,7 @@ import (
 const (
 	jobSchemaVersion         = "0.1"
 	identityJobSchemaVersion = "0.2"
+	providerJobSchemaVersion = "0.3"
 	maxLLMCalls              = 64
 	jobStoreTimeout          = 3 * time.Second
 )
@@ -67,6 +68,7 @@ type jobRequest struct {
 	MaxLLMCalls      int               `json:"max_llm_calls"`
 	IdentityRegistry *manifest         `json:"identity_registry,omitempty"`
 	SecurityBindings []securityBinding `json:"security_bindings,omitempty"`
+	AnalysisMode     string            `json:"analysis_mode,omitempty"`
 }
 
 func validIdentityRegistry(registry *manifest) bool {
@@ -95,7 +97,7 @@ func (r jobRequest) hasIdentityBindings() bool {
 // the registry pin under which PostgreSQL admits its attempts.
 func CheckArchivedIdentityRequest(job jobs.Job, registrySHA string) bool {
 	var request jobRequest
-	return contract.Decode(job.Request, contract.ResearchIdentityJob, &request) == nil &&
+	return contract.Decode(job.Request, contract.ResearchIdentityJobs, &request) == nil &&
 		request.ID == job.ID && request.hasIdentityBindings() && request.IdentityRegistry.SHA256 == registrySHA &&
 		contract.CheckSymbols(request.RequestedSymbols) == nil
 }
@@ -112,8 +114,8 @@ func (h jobHTTP) create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var request jobRequest
-	if version == identityJobSchemaVersion {
-		if contract.Decode(body, contract.ResearchIdentityJob, &request) != nil || !request.hasIdentityBindings() {
+	if version == identityJobSchemaVersion || version == providerJobSchemaVersion {
+		if contract.Decode(body, contract.ResearchIdentityJobs, &request) != nil || !request.hasIdentityBindings() {
 			writeError(w, http.StatusUnprocessableEntity, "invalid_job_request")
 			return
 		}
@@ -136,7 +138,7 @@ func (h jobHTTP) create(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	request.ID = strings.ToLower(request.ID)
-	if (request.Version != jobSchemaVersion && request.Version != identityJobSchemaVersion) || !jobUUID.MatchString(request.ID) ||
+	if (request.Version != jobSchemaVersion && request.Version != identityJobSchemaVersion && request.Version != providerJobSchemaVersion) || !jobUUID.MatchString(request.ID) ||
 		!policyVersion.MatchString(request.PolicyVersion) || request.MaxLLMCalls < 1 || request.MaxLLMCalls > maxLLMCalls ||
 		!manifestRef.MatchString(request.DataManifest.Ref) || !sha256Hex.MatchString(request.DataManifest.SHA256) ||
 		contract.CheckSymbols(request.RequestedSymbols) != nil {

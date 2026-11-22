@@ -20,12 +20,13 @@ func openingDecision(ctx context.Context, research ResearchSource, source openin
 		return contract.Intent{}, nil, fmt.Errorf("read opening research job: %w", err)
 	}
 	var header struct {
-		Version string `json:"job_schema_version"`
+		Version      string `json:"job_schema_version"`
+		AnalysisMode string `json:"analysis_mode"`
 	}
 	if json.Unmarshal(job.Request, &header) != nil {
 		return contract.Intent{}, nil, ErrInvalid
 	}
-	if header.Version == paper_workflow.IdentityVersion {
+	if header.Version == paper_workflow.IdentityVersion || header.Version == "0.3" {
 		withDispatch, ok := research.(interface {
 			ResearchSource
 			GetPaperDispatch(context.Context, string) (jobs.PaperDispatchTask, error)
@@ -43,6 +44,7 @@ func openingDecision(ctx context.Context, research ResearchSource, source openin
 		if !supportedHorizon(identity.Decision) {
 			return contract.Intent{}, nil, ErrInvalid
 		}
+		identity.AnalysisMode = header.AnalysisMode
 		return identity.Decision, &identity, nil
 	}
 	receipt, err := research.GetResult(ctx, order.ResearchJobID)

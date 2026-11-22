@@ -1,0 +1,81 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Offline Jupiter settlement for paper dispatch",
+  "oneOf": [
+    {"$ref": "#/$defs/Request"},
+    {"$ref": "#/$defs/Receipt"}
+  ],
+  "$defs": {
+    "Version": {"const": "0.1"},
+    "Source": {"const": "synthetic_fixture"},
+    "UUID": {"type": "string", "pattern": "^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$"},
+    "Money": {"type": "string", "pattern": "^(0|[1-9][0-9]{0,29})(\\.[0-9]{1,8})?$"},
+    "RawQuantity": {"type": "string", "pattern": "^[1-9][0-9]{0,37}$"},
+    "DateTime": {"type": "string", "format": "date-time"},
+    "RequestHash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "Receipt": {"oneOf": [{"$ref": "#/$defs/Pending"}, {"$ref": "#/$defs/Finalized"}]},
+    "Instrument": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["instrument_id", "registry_version", "decimals"],
+      "properties": {
+        "instrument_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9:._-]{0,127}$"},
+        "registry_version": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9:._-]{0,127}$"},
+        "decimals": {"type": "integer", "minimum": 0, "maximum": 18}
+      }
+    },
+    "Request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version", "source_mode", "account_id", "job_id", "order_id", "quote_id", "instrument",
+        "side", "quantity_raw", "gross_limit_usd", "gross_usd", "fee_usd", "created_at", "expires_at"
+      ],
+      "properties": {
+        "schema_version": {"$ref": "#/$defs/Version"},
+        "source_mode": {"$ref": "#/$defs/Source"},
+        "account_id": {"$ref": "#/$defs/UUID"},
+        "job_id": {"$ref": "#/$defs/UUID"},
+        "order_id": {"$ref": "#/$defs/UUID"},
+        "quote_id": {"$ref": "#/$defs/UUID"},
+        "instrument": {"$ref": "#/$defs/Instrument"},
+        "side": {"enum": ["BUY", "SELL"]},
+        "quantity_raw": {"$ref": "#/$defs/RawQuantity"},
+        "gross_limit_usd": {"$ref": "#/$defs/Money"},
+        "gross_usd": {"$ref": "#/$defs/Money"},
+        "fee_usd": {"$ref": "#/$defs/Money"},
+        "created_at": {"$ref": "#/$defs/DateTime"},
+        "expires_at": {"$ref": "#/$defs/DateTime"}
+      }
+    },
+    "Pending": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "source_mode", "request_sha256", "status"],
+      "properties": {
+        "schema_version": {"$ref": "#/$defs/Version"},
+        "source_mode": {"$ref": "#/$defs/Source"},
+        "request_sha256": {"$ref": "#/$defs/RequestHash"},
+        "status": {"const": "pending"}
+      }
+    },
+    "Finalized": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version", "source_mode", "request_sha256", "status",
+        "quantity_raw", "gross_usd", "fee_usd", "observed_at"
+      ],
+      "properties": {
+        "schema_version": {"$ref": "#/$defs/Version"},
+        "source_mode": {"$ref": "#/$defs/Source"},
+        "request_sha256": {"$ref": "#/$defs/RequestHash"},
+        "status": {"const": "finalized"},
+        "quantity_raw": {"$ref": "#/$defs/RawQuantity"},
+        "gross_usd": {"$ref": "#/$defs/Money"},
+        "fee_usd": {"$ref": "#/$defs/Money"},
+        "observed_at": {"$ref": "#/$defs/DateTime"}
+      }
+    }
+  }
+}

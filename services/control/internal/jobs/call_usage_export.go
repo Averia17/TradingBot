@@ -16,6 +16,7 @@ import (
 type ResearchCallUsage struct {
 	JobID               string
 	Status              string
+	AnalysisMode        string
 	Attempts            int
 	LegacyBudgetUnknown bool
 	PermitHistoryKnown  bool
@@ -41,9 +42,9 @@ func ReadResearchCallUsage(ctx context.Context, dsn, jobID string) (ResearchCall
 			COALESCE((SELECT NOT EXISTS (
 				SELECT 1 FROM research_job_attempts a
 				WHERE a.job_id=j.id AND a.started_at<m.applied_at
-			) FROM research_schema_migrations m WHERE m.version=4 AND m.applied_at IS NOT NULL), false)
+			) FROM research_schema_migrations m WHERE m.version=4 AND m.applied_at IS NOT NULL), false),j.analysis_mode
 			FROM research_jobs j WHERE j.id=$1`, jobID).Scan(
-			&result.JobID, &result.Status, &result.Attempts, &result.LegacyBudgetUnknown, &result.PermitHistoryKnown)
+			&result.JobID, &result.Status, &result.Attempts, &result.LegacyBudgetUnknown, &result.PermitHistoryKnown, &result.AnalysisMode)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrNotFound
 		}
@@ -66,7 +67,7 @@ func ReadResearchCallUsage(ctx context.Context, dsn, jobID string) (ResearchCall
 			if err := rows.Scan(&record.CallID, &record.Attempt, &record.GrantedAt, &record.Payload, &digest, &record.RecordedAt); err != nil {
 				return fmt.Errorf("read research call usage row: %w", err)
 			}
-			if err := record.verify(digest); err != nil {
+			if err := record.verify(digest, result.AnalysisMode == ProviderAnalysisMode); err != nil {
 				return err
 			}
 			result.Records = append(result.Records, record)
@@ -79,7 +80,7 @@ func ReadResearchCallUsage(ctx context.Context, dsn, jobID string) (ResearchCall
 	return result, nil
 }
 
-func (record *CallUsageRecord) verify(digest []byte) error {
+func (record *CallUsageRecord) verify(digest []byte, provider bool) error {
 	record.GrantedAt = record.GrantedAt.UTC()
 	if record.RecordedAt == nil {
 		if record.Payload != nil || digest != nil {
@@ -96,7 +97,7 @@ func (record *CallUsageRecord) verify(digest []byte) error {
 	}
 	var call contract.ResearchLLMCall
 	if contract.Decode(record.Payload, contract.ResearchLLMCallSchema, &call) != nil ||
-		call.ValidateOfflineCall() != nil || call.RunID != record.CallID {
+		validateCallMode(call, provider) != nil || call.RunID != record.CallID {
 		return errors.New("invalid persisted research call usage payload")
 	}
 	record.PayloadSHA256 = hex.EncodeToString(digest)

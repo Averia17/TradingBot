@@ -1,4 +1,4 @@
-"""Run a single offline research attempt at a time through the Control API."""
+"""Run one leased research attempt at a time through the Control API."""
 
 import json
 import logging
@@ -12,14 +12,19 @@ from http.client import HTTPConnection, HTTPException, HTTPSConnection
 from pathlib import Path
 from threading import Event, Lock, Timer
 from time import monotonic
+from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 
 from tradingbot.llm_usage import LLMCall
 from tradingbot.snapshots import ArchiveReference
 
+if TYPE_CHECKING:
+    from tradingbot.adapters.prepared_provider import ProviderConfig
+
 _LOG = logging.getLogger(__name__)
 _JOBS_PATH = "/v1/research/jobs/"
+_MAX_PROVIDER_CONFIG_BYTES = 4096
 _MAX_REQUEST_BYTES = 256 * 1024
 _MAX_RESPONSE_BYTES = 512 * 1024
 _RESULT_KEYS = {"result_schema_version", "batch", "reports", "metadata"}
@@ -56,6 +61,20 @@ def _object(pairs: list[tuple[str, object]]) -> dict:
     if len(value) != len(pairs):
         raise ValueError("duplicate JSON field")
     return value
+
+
+def load_provider_config(path: Path) -> dict:
+    with path.open("rb") as source:
+        raw = source.read(_MAX_PROVIDER_CONFIG_BYTES + 1)
+    if len(raw) > _MAX_PROVIDER_CONFIG_BYTES:
+        raise ValueError("provider configuration exceeds file limit")
+    try:
+        config = json.loads(raw, object_pairs_hook=_object)
+    except (ValueError, RecursionError):
+        raise ValueError("invalid provider configuration") from None
+    if not isinstance(config, dict):
+        raise ValueError("provider configuration must be an object")
+    return config
 
 
 def _timestamp(value: str) -> datetime:
@@ -226,6 +245,7 @@ class _Worker:
     heartbeat_interval: float
     archive_root: Path | None
     identity_registry: ArchiveReference | None = None
+    provider_config: "ProviderConfig | None" = None
 
     def run(self) -> None:
         if self.analyze is None and not self.wait_for_call_usage():
@@ -253,6 +273,8 @@ class _Worker:
         identity = {"worker_id": self.worker_id, "claim_id": claim_id}
         if self.identity_registry is not None:
             identity["identity_registry_sha256"] = self.identity_registry.sha256
+        if self.provider_config is not None:
+            identity["analysis_mode"] = "prepared_provider"
         claim = self.control.post("claim", _encode(identity), (200, 204))
         if claim is None:
             return None
@@ -284,6 +306,15 @@ class _Worker:
 
     def supports_request(self, request: dict) -> bool:
         version = request.get("job_schema_version")
+        if self.provider_config is not None:
+            return (
+                version == "0.3"
+                and request.get("analysis_mode") == "prepared_provider"
+                and self.identity_registry is not None
+                and request.get("identity_registry") == self.identity_registry.model_dump(mode="json")
+            )
+        if "analysis_mode" in request:
+            return False
         if version == "0.1":
             return self.identity_registry is None
         return (
@@ -306,10 +337,15 @@ class _Worker:
                 if self.identity_registry is not None:
                     jobs = capabilities.get("research_job_schema_versions")
                     results = capabilities.get("research_result_schema_versions")
+                    job_version, result_version = (
+                        ("0.2", "0.3") if self.provider_config is None else ("0.3", "0.4")
+                    )
                     if not (
-                        isinstance(jobs, list) and "0.2" in jobs
-                        and isinstance(results, list) and "0.3" in results
+                        isinstance(jobs, list) and job_version in jobs
+                        and isinstance(results, list) and result_version in results
                     ):
+                        if self.provider_config is not None:
+                            raise RuntimeError("Control does not advertise prepared-provider research")
                         raise RuntimeError("Control does not advertise identity-bound research")
                 return True
             message = "Control does not advertise durable research call usage"
@@ -367,16 +403,22 @@ class _Worker:
         self.publish(
             active,
             result,
-            expected_version="0.3" if request.get("job_schema_version") == "0.2" else "0.2",
+            expected_version={"0.2": "0.3", "0.3": "0.4"}.get(request.get("job_schema_version"), "0.2"),
         )
 
     def attempt_analyzer(self, lease: _Lease, watchdog: _LeaseWatchdog) -> Analyzer:
         analyze = self.analyze
         if analyze is None:
-            from tradingbot.adapters.offline import analyze_offline
+            if self.provider_config is None:
+                from tradingbot.adapters.offline import analyze_offline
 
+                analyze = analyze_offline
+            else:
+                from tradingbot.adapters.prepared_provider import analyze_prepared_provider
+
+                analyze = partial(analyze_prepared_provider, provider_config=self.provider_config)
             analyze = partial(
-                analyze_offline,
+                analyze,
                 authorize_call=partial(self.authorize_call, lease, watchdog),
                 record_call=partial(self.record_call, lease, watchdog),
             )
@@ -424,7 +466,10 @@ class _Worker:
             watchdog,
             "/record-call",
             call.run_id,
-            {"call_usage_schema_version": "0.1", "call": call.model_dump(mode="json")},
+            {
+                "call_usage_schema_version": "0.2" if self.provider_config is not None else "0.1",
+                "call": call.model_dump(mode="json"),
+            },
             _valid_usage_receipt,
         )
 
@@ -469,7 +514,7 @@ class _Worker:
             or result.keys() != _RESULT_KEYS
             or result["result_schema_version"] != expected_version
         ):
-            raise ValueError("invalid offline research result envelope")
+            raise ValueError("invalid research result envelope")
         expected = _encode(result)
         body = _encode(result | {"worker_id": self.worker_id, "lease_token": lease.token})
         remaining = _remaining(lease.expires)
@@ -542,9 +587,21 @@ def run_worker(
     request_timeout: float = 5,
     archive_root: Path | None = None,
     identity_registry: ArchiveReference | dict | None = None,
+    provider_config: dict | None = None,
 ) -> None:
-    """Poll Control and publish offline results until the stop event is set."""
-    worker_id = worker_id if worker_id is not None else f"research-offline-{uuid4()}"
+    """Poll Control with offline models by default, or explicitly use prepared-provider jobs."""
+    provider = None
+    profile = "offline"
+    if provider_config is not None:
+        if archive_root is None or identity_registry is None:
+            raise ValueError("prepared-provider research requires an archive root and identity registry")
+        if analyze is not None:
+            raise ValueError("prepared-provider research uses the built-in analyzer")
+        from tradingbot.adapters.prepared_provider import ProviderConfig
+
+        provider = ProviderConfig.model_validate(provider_config)
+        profile = "provider"
+    worker_id = worker_id if worker_id is not None else f"research-{profile}-{uuid4()}"
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", worker_id):
         raise ValueError("invalid worker identity")
     if not all(
@@ -573,4 +630,5 @@ def run_worker(
         heartbeat_interval,
         archive_root,
         identity_registry,
+        provider,
     ).run()

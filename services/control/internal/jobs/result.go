@@ -10,18 +10,31 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+
+	"tradingbot/control/internal/contract"
 )
 
 var ErrResultExpired = errors.New("research result expired before its receipt")
 
 type CompleteJob struct {
-	JobID            string
-	WorkerID         string
-	Token            string
-	Payload          json.RawMessage
-	ExpiresAt        time.Time
-	ExpectedAttempt  int // Zero for protocols with no attempt number in the result.
-	ExpectedLLMCalls int // Number of permits the submitting attempt consumed.
+	JobID                 string
+	WorkerID              string
+	Token                 string
+	Payload               json.RawMessage
+	ExpiresAt             time.Time
+	ExpectedAttempt       int // Zero for protocols with no attempt number in the result.
+	ExpectedLLMCalls      int // Number of permits the submitting attempt consumed.
+	ExpectedProviderUsage *ProviderUsageExpectation
+}
+
+// ProviderUsageExpectation binds prepared results to the single completed
+// allocator call on their current attempt.
+type ProviderUsageExpectation struct {
+	Provider     string
+	Model        string
+	InputTokens  uint64
+	OutputTokens uint64
+	MissingUsage bool
 }
 
 type Result struct {
@@ -66,6 +79,17 @@ func (s *Store) Complete(ctx context.Context, input CompleteJob, verify func(job
 	if err != nil {
 		return Result{}, false, err
 	}
+	if (inputs.analysisMode == ProviderAnalysisMode) != (input.ExpectedProviderUsage != nil) {
+		return Result{}, false, ErrCallPermitMismatch
+	}
+	if expected := input.ExpectedProviderUsage; expected != nil {
+		if permits != 1 {
+			return Result{}, false, ErrCallPermitMismatch
+		}
+		if err := job.verifyProviderUsage(ctx, *expected); err != nil {
+			return Result{}, false, err
+		}
+	}
 	var verifyTime time.Time
 	if err := job.tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&verifyTime); err != nil {
 		return Result{}, false, fmt.Errorf("read research validation clock: %w", err)
@@ -87,6 +111,40 @@ func (s *Store) Complete(ctx context.Context, input CompleteJob, verify func(job
 		return Result{}, false, fmt.Errorf("commit research completion: %w", err)
 	}
 	return result, true, nil
+}
+
+func (j lockedJob) verifyProviderUsage(ctx context.Context, expected ProviderUsageExpectation) error {
+	var callID string
+	var payload, digest []byte
+	err := j.tx.QueryRow(ctx, `SELECT p.call_id::text, u.payload, u.payload_sha256
+		FROM research_call_permits p JOIN research_call_usage u USING (job_id, call_id)
+		WHERE p.job_id = $1 AND p.attempt = $2`, j.id, j.attempt).Scan(&callID, &payload, &digest)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrCallPermitMismatch
+	}
+	if err != nil {
+		return fmt.Errorf("read prepared research call usage: %w", err)
+	}
+	expectedDigest := sha256.Sum256(payload)
+	if !bytes.Equal(digest, expectedDigest[:]) {
+		return errors.New("persisted prepared research call usage does not match its hash")
+	}
+	if !expected.matchesCall(callID, payload) {
+		return ErrCallPermitMismatch
+	}
+	return nil
+}
+
+func (e ProviderUsageExpectation) matchesCall(callID string, payload []byte) bool {
+	var call contract.ResearchLLMCall
+	if contract.Decode(payload, contract.ResearchLLMCallSchema, &call) != nil || call.ValidateProviderCall() != nil ||
+		call.RunID != callID || call.Status != "completed" || *call.Provider != e.Provider || *call.Model != e.Model {
+		return false
+	}
+	if call.InputTokens == nil || call.OutputTokens == nil {
+		return e.MissingUsage && e.InputTokens == 0 && e.OutputTokens == 0
+	}
+	return !e.MissingUsage && e.InputTokens == uint64(*call.InputTokens) && e.OutputTokens == uint64(*call.OutputTokens)
 }
 
 func (j lockedJob) insertCompletion(ctx context.Context, payload json.RawMessage, expiresAt time.Time) (Result, error) {

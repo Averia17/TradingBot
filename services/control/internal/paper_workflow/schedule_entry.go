@@ -240,7 +240,8 @@ func (c EntrySchedule) matchesJobIdentity(job storedJob, selectedSHA256 string) 
 	if c.Version == Version {
 		return job.Version == Version && job.IdentityRegistry == nil && len(job.SecurityBindings) == 0
 	}
-	if job.Version != IdentityVersion || !entryDigest.MatchString(selectedSHA256) || job.IdentityRegistry == nil ||
+	if (job.Version != IdentityVersion && job.Version != "0.3") ||
+		!entryDigest.MatchString(selectedSHA256) || job.IdentityRegistry == nil ||
 		*job.IdentityRegistry != c.Identity.Registry || len(job.SecurityBindings) != len(job.RequestedSymbols) ||
 		!independentEntryRefs(c.Identity.Registry, job.DataManifest) || !independentEntryRefs(c.Identity.QuoteTape, job.DataManifest) {
 		return false

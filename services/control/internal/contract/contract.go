@@ -115,6 +115,10 @@ var portfolioValidator = compile(portfolioSchema, "")
 
 var ResearchIdentityJob = compile(researchJobSchema, "#/$defs/IdentityJobRequest",
 	schemaResource{"https://tradingbot.local/portfolio.schema.json", portfolioSchema})
+var ResearchProviderJob = compile(researchJobSchema, "#/$defs/ProviderJobRequest",
+	schemaResource{"https://tradingbot.local/portfolio.schema.json", portfolioSchema})
+var ResearchIdentityJobs = compile(researchJobSchema, "#/$defs/IdentityJobs",
+	schemaResource{"https://tradingbot.local/portfolio.schema.json", portfolioSchema})
 
 var PaperAccountCreate = compile(paperSchema, "#/$defs/CreateAccount")
 var PaperReserve = compile(paperSchema, "#/$defs/Reserve")

@@ -141,6 +141,19 @@
         },
         "identity_registry": {
           "$ref": "#/$defs/ArchiveReference"
+        },
+        "analysis_mode": {
+          "anyOf": [
+            {
+              "const": "prepared_provider",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Analysis Mode"
         }
       },
       "required": [
@@ -161,7 +174,8 @@
         "min_bar_turnover_usd",
         "max_spread_bps",
         "universe_provider",
-        "identity_registry"
+        "identity_registry",
+        "analysis_mode"
       ],
       "title": "IdentitySelectionRequest",
       "type": "object"

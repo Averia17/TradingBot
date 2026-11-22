@@ -80,7 +80,8 @@ func validArchiveReference(ref ArchiveReference) bool {
 
 func (r Request) matchesIdentityJob(job storedJob, portfolio contract.Portfolio) bool {
 	binding := r.Identity
-	if binding == nil || r.Version != IdentityVersion || job.Version != "0.2" ||
+	boundJob := job.Version == "0.2" || (job.Version == "0.3" && job.AnalysisMode == jobs.ProviderAnalysisMode)
+	if binding == nil || r.Version != IdentityVersion || !boundJob ||
 		job.IdentityRegistry == nil || *job.IdentityRegistry != binding.Registry ||
 		len(binding.Securities) != len(job.RequestedSymbols) || len(job.SecurityBindings) != len(binding.Securities) {
 		return false
@@ -102,10 +103,11 @@ func (r Request) matchesIdentityJob(job storedJob, portfolio contract.Portfolio)
 
 func (r Request) matchesIdentity(job storedJob, result storedResult, portfolio contract.Portfolio) bool {
 	if r.Identity == nil {
-		return r.Version == Version && job.Version == "0.1" && result.Version != "0.3" &&
+		return r.Version == Version && job.Version == "0.1" && (result.Version == "0.1" || result.Version == "0.2") &&
 			job.IdentityRegistry == nil && len(job.SecurityBindings) == 0
 	}
-	if result.Version != "0.3" || !r.matchesIdentityJob(job, portfolio) {
+	boundResult := (job.Version == "0.2" && result.Version == "0.3") || (job.Version == "0.3" && result.Version == "0.4")
+	if !boundResult || !r.matchesIdentityJob(job, portfolio) {
 		return false
 	}
 	var metadata struct {
@@ -127,7 +129,7 @@ func CheckArchivedIdentityDispatch(raw []byte, job jobs.Job, receipt *jobs.Resul
 	if contract.Decode(raw, contract.PaperApplication, &req) != nil || req.Version != IdentityVersion ||
 		!req.validFollow() || req.JobID != job.ID || req.SnapshotContext.AccountID != accountID ||
 		req.Identity.Registry.SHA256 != registrySHA ||
-		contract.Decode(job.Request, contract.ResearchIdentityJob, &input) != nil ||
+		contract.Decode(job.Request, contract.ResearchIdentityJobs, &input) != nil ||
 		input.ID != job.ID || input.PolicyVersion != req.SnapshotContext.Policy.Version {
 		return false
 	}

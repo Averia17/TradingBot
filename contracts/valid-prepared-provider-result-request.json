@@ -1,0 +1,121 @@
+{
+  "result_schema_version": "0.4",
+  "worker_id": "fixture-worker",
+  "lease_token": "00000000-0000-0000-0000-000000000020",
+  "batch": {
+    "schema_version": "0.1",
+    "execution_mode": "research",
+    "run_id": "00000000-0000-0000-0000-000000000002",
+    "portfolio_snapshot_id": "00000000-0000-0000-0000-000000000001",
+    "as_of": "2026-10-04T12:00:00Z",
+    "created_at": "2026-10-04T12:00:00Z",
+    "expires_at": "2026-10-04T12:30:00Z",
+    "evidence_hashes": {
+      "TSLA:market_report": "d267375a9f0d74fe5d755be035522da1862f96d174437f782ff6ae9dca01cc74",
+      "TSLA:fundamentals_report": "2dd05823cf453f885f07e016e4e35294c883f20b59f92010cd2fe5d320ae06ad",
+      "TSLA:news_report": "c099386681ca21bd0bf69824742847c21e39f7bd0e65207a35f4a7873ff3be7e",
+      "NVDA:market_report": "ca2299892e08215a5130eeba4b983a0b0f64ab03efa50e6d99cd2a310263af05",
+      "NVDA:fundamentals_report": "f8b23ab55491e9bfa05d68b0090fe49fb78012d2891ac76025ad42864c49f633",
+      "NVDA:news_report": "dd20a2da34600184860899d8322dd95ef15f8e4ba667c80fbd4a47bdc3643449"
+    },
+    "intents": [
+      {
+        "symbol": "TSLA",
+        "action": "HOLD",
+        "notional_usd": "0",
+        "confidence": null,
+        "expected_return_pct": null,
+        "horizon": {
+          "min_hours": 24,
+          "max_hours": 720
+        },
+        "thesis": [
+          "Illustrative HOLD in the result wire fixture"
+        ],
+        "invalidation_conditions": [
+          "Illustrative change in the pinned evidence"
+        ],
+        "evidence_ids": [
+          "TSLA:market_report"
+        ],
+        "max_execution_cost_bps": 10,
+        "decision_id": "00000000-0000-0000-0000-000000000003"
+      },
+      {
+        "symbol": "NVDA",
+        "action": "HOLD",
+        "notional_usd": "0",
+        "confidence": null,
+        "expected_return_pct": null,
+        "horizon": {
+          "min_hours": 24,
+          "max_hours": 720
+        },
+        "thesis": [
+          "Illustrative HOLD in the result wire fixture"
+        ],
+        "invalidation_conditions": [
+          "Illustrative change in the pinned evidence"
+        ],
+        "evidence_ids": [
+          "NVDA:market_report"
+        ],
+        "max_execution_cost_bps": 10,
+        "decision_id": "00000000-0000-0000-0000-000000000004"
+      }
+    ]
+  },
+  "reports": {
+    "TSLA": {
+      "market_report": "Wire fixture for TSLA market_report; illustrative text.",
+      "fundamentals_report": "Wire fixture for TSLA fundamentals_report; illustrative text.",
+      "news_report": "Wire fixture for TSLA news_report; illustrative text."
+    },
+    "NVDA": {
+      "market_report": "Wire fixture for NVDA market_report; illustrative text.",
+      "fundamentals_report": "Wire fixture for NVDA fundamentals_report; illustrative text.",
+      "news_report": "Wire fixture for NVDA news_report; illustrative text."
+    }
+  },
+  "metadata": {
+    "source_mode": "prepared_archive_research",
+    "alpha_measured": false,
+    "intraday_pit_verified": false,
+    "llm_calls": 1,
+    "input_tokens": 480,
+    "output_tokens": 92,
+    "missing_usage_calls": 0,
+    "usd_cost": null,
+    "provenance": {
+      "job_id": "f700cba3-c634-4204-8669-1acd78612431",
+      "attempt": 1,
+      "policy_version": "test-1",
+      "data_manifest": {
+        "ref": "test/manifest.json",
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "worker_version": "0.1.0",
+      "upstream_version": "0.7.1",
+      "upstream_sha": "c4544913a14ed3df5f1ed7b9e8483270ce20682a",
+      "config_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "model_id": "gpt-6-sol",
+      "identity_registry": {
+        "ref": "test/research-identity.json",
+        "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+      },
+      "security_bindings": [
+        {
+          "symbol": "TSLA",
+          "security_id": "fixture-tesla"
+        },
+        {
+          "symbol": "NVDA",
+          "security_id": "fixture-nvidia"
+        }
+      ],
+      "projected_snapshot_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "model_provider": "openai",
+      "archive_source_mode": "local_archive"
+    }
+  }
+}

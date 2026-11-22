@@ -15,18 +15,27 @@ import (
 
 var workerIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 
+type providerClaimStore interface {
+	ClaimPreparedProvider(context.Context, string, string, time.Duration, string) (jobs.Lease, error)
+}
+
 func (h jobHTTP) claim(w http.ResponseWriter, r *http.Request) {
 	fields, ok := readWorkerFields(w, r)
 	if !ok {
 		return
 	}
 	registrySHA, scoped := fields["identity_registry_sha256"]
+	mode, configuredMode := fields["analysis_mode"]
 	fieldCount := 2
 	if scoped {
 		fieldCount++
 	}
+	if configuredMode {
+		fieldCount++
+	}
 	workerID, claimID := fields["worker_id"], strings.ToLower(fields["claim_id"])
-	if len(fields) != fieldCount || !jobUUID.MatchString(claimID) || scoped && !sha256Hex.MatchString(registrySHA) {
+	if len(fields) != fieldCount || !jobUUID.MatchString(claimID) || scoped && !sha256Hex.MatchString(registrySHA) ||
+		configuredMode && (!scoped || mode != jobs.ProviderAnalysisMode) {
 		writeError(w, http.StatusBadRequest, "invalid_request")
 		return
 	}
@@ -38,7 +47,14 @@ func (h jobHTTP) claim(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	var lease jobs.Lease
 	var err error
-	if scoped {
+	if configuredMode {
+		store, enabled := h.store.(providerClaimStore)
+		if !enabled {
+			writeError(w, http.StatusServiceUnavailable, "storage_unavailable")
+			return
+		}
+		lease, err = store.ClaimPreparedProvider(ctx, workerID, claimID, h.maxResearchAge, registrySHA)
+	} else if scoped {
 		store, enabled := h.store.(interface {
 			ClaimWithIdentityRegistry(context.Context, string, string, time.Duration, string) (jobs.Lease, error)
 		})

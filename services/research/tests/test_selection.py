@@ -362,3 +362,41 @@ def test_published_selection_schema_and_example():
     )
     assert plan["job"]["requested_symbols"] == ["TSLA"]
     assert plan["job"]["max_llm_calls"] == 17
+
+
+def test_expanded_periodic_screening_uses_full_roster_and_shared_call_limit():
+    root = Path(__file__).resolve().parents[3]
+    path = root / "services/research/examples/entry-cycles/expanded-screening.json"
+    screening = json.loads(path.read_bytes())
+    symbols = (
+        "NVDA AAPL MSFT AVGO AMD MU INTC TSM ASML PLTR GOOGL META AMZN TSLA NFLX "
+        "BRK.B JPM V WMT MCD XOM JNJ ABBV"
+    ).split()
+    assert [row["symbol"] for row in screening["candidates"]] == symbols
+    assert screening["top_k"] == screening["remaining_analysis_slots"] == 3
+    assert screening["calls_per_symbol"] == 16
+    assert screening["max_llm_calls"] == 33
+    _, example = stable_example()
+    request = screening | {
+        "job_id": example["job_id"],
+        "policy_version": example["policy_version"],
+        "portfolio": example["portfolio"],
+    }
+    registry = screening["identity_registry"]
+    pin = {"ref": registry["ref"], "sha256": hashlib.sha256((root / registry["ref"]).read_bytes()).hexdigest()}
+    assert pin == registry
+    plan = plan_research(root, request, trusted_identity_registry=pin)
+    assert plan["source_mode"] == "synthetic_fixture"
+    assert plan["job"]["requested_symbols"] == ["AVGO", "XOM"]
+    assert plan["job"]["max_llm_calls"] == 33
+    assert plan["job"]["identity_registry"] == registry
+    assert plan["job"]["security_bindings"] == [
+        {"symbol": "AVGO", "security_id": "fixture-expanded-avgo"},
+        {"symbol": "XOM", "security_id": "fixture-expanded-xom"},
+    ]
+    statuses = {row["symbol"]: row["status"] for row in plan["candidates"]}
+    assert statuses == {symbol: "capacity_exhausted" for symbol in symbols} | {
+        "AVGO": "selected",
+        "XOM": "selected",
+        "INTC": "insufficient_bars",
+    }

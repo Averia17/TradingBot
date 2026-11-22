@@ -1,5 +1,9 @@
 name: tradingbot-research
 
+x-paper-fill-kafka: &paper-fill-kafka
+  TRADINGBOT_KAFKA_BROKERS: kafka:9092
+  TRADINGBOT_TRADE_TOPIC: tradingbot.trade.filled.paper.v1
+
 services:
   postgres:
     image: postgres:17-alpine@sha256:d3244e8ce3f165ee3c93d9c4a4b1d0fe48b3a89e2287b717fdcbbde92d405065
@@ -86,6 +90,41 @@ services:
         read_only: true
         bind:
           create_host_path: false
+
+  provider-research:
+    extends:
+      service: research
+    profiles: [research-provider]
+    command:
+      - worker
+      - --control-url
+      - http://control:8080
+      - --archive-root
+      - /archive
+      - --identity-registry-ref
+      - '${TRADINGBOT_RESEARCH_IDENTITY_REGISTRY_REF:-}'
+      - --identity-registry-sha256
+      - '${TRADINGBOT_RESEARCH_IDENTITY_REGISTRY_SHA256:-}'
+      - --provider-config
+      - /opt/provider-config.json
+    environment:
+      HOME: /opt/provider-home
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+    networks: [workers, provider-egress]
+    volumes:
+      - type: bind
+        source: ${TRADINGBOT_RESEARCH_IDENTITY_ARCHIVE_DIR:-./paper-archive}
+        target: /archive
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${TRADINGBOT_RESEARCH_PROVIDER_CONFIG_PATH:-./provider-config.json}
+        target: /opt/provider-config.json
+        read_only: true
+        bind:
+          create_host_path: false
+      - provider-auth:/opt/provider-home/.tradingagents
 
   paper-entry: &paper-scheduler
     profiles: [paper-entry]
@@ -280,6 +319,51 @@ services:
       - *paper-quote-output
       - *paper-identity-archive
 
+  kafka:
+    extends:
+      file: ../notifications/compose.yaml
+      service: kafka
+    profiles: [paper-notifications]
+
+  kafka-init:
+    extends:
+      file: ../notifications/compose.yaml
+      service: kafka-init
+    profiles: [paper-notifications]
+    environment: *paper-fill-kafka
+
+  paper-fill-relay:
+    profiles: [paper-notifications]
+    image: tradingbot-trade-events:local
+    build:
+      context: ../../services/trade-events
+      args:
+        GO_IMAGE: ${TRADINGBOT_GO_BUILD_IMAGE:-golang:1.26.5-bookworm@sha256:53eeac89074db483fdf0ab3be1df32bf6e47562263d2d0d6baa7f26acb4957dd}
+    command: [-paper-ledger]
+    environment:
+      <<: *paper-fill-kafka
+      TRADINGBOT_DATABASE_URL: postgresql://research_control@postgres:5432/tradingbot?sslmode=disable
+    depends_on:
+      control:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+    networks: [storage, events]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+
+  paper-notifications:
+    extends:
+      file: ../notifications/compose.yaml
+      service: notifications
+    profiles: [paper-notifications]
+    environment:
+      <<: *paper-fill-kafka
+      TRADINGBOT_NOTIFICATION_GROUP: ${TRADINGBOT_PAPER_NOTIFICATION_GROUP:-tradingbot-paper-telegram-v1}
+    networks: [events, telegram-egress]
+    read_only: true
+
   evaluation:
     profiles: [evaluation]
     image: ${TRADINGBOT_EVALUATION_IMAGE:-tradingbot-evaluation:local}
@@ -294,6 +378,14 @@ volumes:
   research-data:
   paper-entry-journal:
   paper-review-journal:
+  provider-auth:
+  kafka-data:
+
+secrets:
+  telegram_bot_token:
+    environment: TRADINGBOT_PAPER_TELEGRAM_BOT_TOKEN
+  telegram_chat_id:
+    environment: TRADINGBOT_PAPER_TELEGRAM_CHAT_ID
 
 networks:
   storage:
@@ -301,3 +393,7 @@ networks:
   workers:
     internal: true
   local-api:
+  provider-egress:
+  events:
+    internal: true
+  telegram-egress:

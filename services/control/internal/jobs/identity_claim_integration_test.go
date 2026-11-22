@@ -65,3 +65,44 @@ func TestClaimsSeparateRegistryBoundJobsFromLegacyWorkers(t *testing.T) {
 		t.Fatalf("bound retry lost its identity: %+v %v", retry, err)
 	}
 }
+
+func TestProviderClaimsDoNotShareOfflineJobsOrClaimReplays(t *testing.T) {
+	ctx, dsn, db := testDatabase(t)
+	store := openTestStore(t, ctx, dsn)
+	registry := strings.Repeat("a", 64)
+	var ids []string
+	for i, version := range []string{"0.3", "0.2"} {
+		input := queueInput(t, i+1, databaseNow(t, ctx, db).Add(-time.Minute))
+		var wire map[string]any
+		if err := json.Unmarshal(input.Request, &wire); err != nil {
+			t.Fatal(err)
+		}
+		wire["job_schema_version"] = version
+		wire["identity_registry"] = map[string]string{"ref": "identity.json", "sha256": registry}
+		if version == "0.3" {
+			wire["analysis_mode"] = "prepared_provider"
+			input.Request, _ = json.Marshal(wire)
+			if _, _, err := store.Create(ctx, input, nil); !errors.Is(err, ErrConflict) {
+				t.Fatalf("provider job accepted multiple calls: %v", err)
+			}
+			wire["max_llm_calls"] = 1
+		}
+		input.Request, _ = json.Marshal(wire)
+		if _, created, err := store.Create(ctx, input, nil); err != nil || !created {
+			t.Fatalf("queue job %s: created=%t error=%v", version, created, err)
+		}
+		ids = append(ids, input.ID)
+	}
+	claimID := testIdentity(100)
+	offline, err := store.ClaimWithIdentityRegistry(ctx, "bound", claimID, testSnapshotWindow, registry)
+	if err != nil || offline.Job.ID != ids[1] {
+		t.Fatalf("offline worker claim: %+v %v", offline, err)
+	}
+	if _, err := store.ClaimPreparedProvider(ctx, "bound", claimID, testSnapshotWindow, registry); !errors.Is(err, ErrLeaseConflict) {
+		t.Fatalf("claim replay accepted a different analysis mode: %v", err)
+	}
+	provider, err := store.ClaimPreparedProvider(ctx, "provider", testIdentity(101), testSnapshotWindow, registry)
+	if err != nil || provider.Job.ID != ids[0] {
+		t.Fatalf("provider worker claim: %+v %v", provider, err)
+	}
+}

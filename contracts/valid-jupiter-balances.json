@@ -1,0 +1,30 @@
+{
+  "schema_version": "1",
+  "network": "solana-mainnet",
+  "owner": "BQ72nSv9f3PRyRKCBnHLVrerrv37CYTHm5h3s9VSGQDV",
+  "commitment": "finalized",
+  "requested_at": "2026-11-22T10:00:00Z",
+  "observed_at": "2026-11-22T10:00:00.4Z",
+  "expires_at": "2026-11-22T10:00:05.4Z",
+  "native": {"slot": 395000001, "amount_lamports": "100000000"},
+  "token_programs": [
+    {
+      "program_id": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+      "slot": 395000001,
+      "accounts": [
+        {
+          "address": "2PdyH9JcMTZ8818G7cnDdaGPvDS52aHs35PtQcMVsbE7",
+          "mint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+          "amount_raw": "500000000",
+          "decimals": 6,
+          "state": "initialized"
+        }
+      ]
+    },
+    {
+      "program_id": "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
+      "slot": 395000002,
+      "accounts": []
+    }
+  ]
+}
