@@ -111,15 +111,14 @@ def test_bound_research_reuses_selected_issuer_through_real_postgres(tmp_path):
     selected = plan_research(tmp_path, request_doc, trusted_identity_registry=registry)
     job = selected["job"]
     assert job["job_schema_version"] == "0.2"
-    control = build_go_command(tmp_path, "control")
-    env = os.environ | {
-        "TRADINGBOT_DATABASE_URL": DATABASE_URL,
+    trading_api = build_go_command(tmp_path, "trading-api")
+    env = offline_test_environment(DATABASE_URL) | {
         "TRADINGBOT_RESEARCH_IDENTITY_REGISTRY_SHA256": registry["sha256"],
     }
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
         listener.bind(("127.0.0.1", 0))
         port = listener.getsockname()[1]
-    with process([control, "--listen", f"127.0.0.1:{port}"], env) as control_process:
+    with process([trading_api, "--listen", f"127.0.0.1:{port}"], env) as control_process:
         wait_for_resource(port, "/readyz", control_process)
         assert request(port, "/v1/research/jobs", job)[0] == 201
         with closing(LoopbackConnection("127.0.0.1", port, timeout=5)) as connection:
@@ -177,7 +176,7 @@ def build_go_command(tmp_path, name):
     executable = tmp_path / (name + ".exe" if os.name == "nt" else name)
     subprocess.run(
         ["go", "build", "-mod=readonly", "-o", str(executable), f"./cmd/{name}"],
-        cwd=ROOT / "services/control",
+        cwd=ROOT / "services/trading-api",
         check=True,
         timeout=90,
     )
@@ -196,23 +195,36 @@ def paper_command(executable, policy, env, *arguments):
 
 
 def research_environment():
-    database_variables = {
+    storage_and_internal_variables = {
         "TRADINGBOT_DATABASE_URL",
         "TRADINGBOT_TEST_DATABASE_URL",
         "TRADINGBOT_E2E_DATABASE_URL",
+        "TRADINGBOT_OFFLINE_TEST_DATABASE_URL",
+        "TRADINGBOT_ACCOUNTS_DATABASE_URL",
+        "TRADINGBOT_ACCOUNTS_URL",
+        "TRADINGBOT_TRADING_API_URL",
+        "TRADINGBOT_PAPER_INTERNAL_TOKEN",
+        "TRADINGBOT_PAPER_INTERNAL_TOKEN_FILE",
     }
-    return {key: value for key, value in os.environ.items() if key not in database_variables}
+    return {key: value for key, value in os.environ.items() if key not in storage_and_internal_variables}
+
+
+def offline_test_environment(dsn):
+    return research_environment() | {
+        "TRADINGBOT_DATABASE_URL": dsn,
+        "TRADINGBOT_OFFLINE_TEST_DATABASE_URL": dsn,
+    }
 
 
 def test_worker_crash_preserves_observed_calls_and_keeps_orphan_budget_charged(tmp_path):
-    executable = build_go_command(tmp_path, "control")
+    executable = build_go_command(tmp_path, "trading-api")
     exporter = build_go_command(tmp_path, "research-usage-export")
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
         listener.bind(("127.0.0.1", 0))
         port = listener.getsockname()[1]
     origin = f"http://127.0.0.1:{port}"
     command = [executable, "-listen", f"127.0.0.1:{port}"]
-    env = os.environ | {"TRADINGBOT_DATABASE_URL": DATABASE_URL}
+    env = offline_test_environment(DATABASE_URL)
     book = json.loads((ROOT / "contracts/valid-portfolio.json").read_text(encoding="utf-8"))
     book.update(
         snapshot_id=str(uuid4()),
@@ -366,7 +378,7 @@ def settle_paper_round_trip(port, account_id, instrument):
 
 @pytest.mark.parametrize("archive_mode", [False, True], ids=["fixture", "archive"])
 def test_python_graph_result_is_persisted_by_go_control(tmp_path, archive_mode):
-    executable = build_go_command(tmp_path, "control")
+    executable = build_go_command(tmp_path, "trading-api")
     if archive_mode:
         paper_apply = build_go_command(tmp_path, "paper")
         paper_memory = build_go_command(tmp_path, "paper-memory")
@@ -396,7 +408,7 @@ def test_python_graph_result_is_persisted_by_go_control(tmp_path, archive_mode):
     }
     path = f"/v1/research/jobs/{job_id}/result"
     ctl = [executable, "-listen", f"127.0.0.1:{port}"]
-    env = os.environ | {"TRADINGBOT_DATABASE_URL": DATABASE_URL}
+    env = offline_test_environment(DATABASE_URL)
     worker = [
         sys.executable,
         "-m",
@@ -634,7 +646,7 @@ def test_python_graph_result_is_persisted_by_go_control(tmp_path, archive_mode):
             assert decisions == [("TSLA", "HOLD")]
             repeat = json.loads(subprocess.check_output(schedule_command, env=env, timeout=40))
             assert repeat["created"] is False and repeat["job_id"] == job_id
-            dispatched = paper_command(paper_apply, policy_path, env, "dispatch", "--account", account_id)
+            dispatched = paper_command(paper_apply, policy_path, env, "orders", "--account", account_id)
             assert dispatched["job_id"] == job_id and dispatched["application"] == {
                 "paper_apply_schema_version": "0.1",
                 "job_id": job_id,
@@ -645,7 +657,7 @@ def test_python_graph_result_is_persisted_by_go_control(tmp_path, archive_mode):
 
 
 def test_archived_catalyst_requeues_an_open_paper_position_for_offline_worker(tmp_path):
-    control_exe = build_go_command(tmp_path, "control")
+    control_exe = build_go_command(tmp_path, "trading-api")
     paper_apply = build_go_command(tmp_path, "paper")
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
         listener.bind(("127.0.0.1", 0))
@@ -664,7 +676,7 @@ def test_archived_catalyst_requeues_an_open_paper_position_for_offline_worker(tm
     instrument = next(
         rule["instrument"] for rule in policy["instruments"] if rule["symbol"] == "TSLA"
     )
-    env = os.environ | {"TRADINGBOT_DATABASE_URL": DATABASE_URL}
+    env = offline_test_environment(DATABASE_URL)
     control = [control_exe, "-listen", f"127.0.0.1:{port}"]
     worker = [
         sys.executable,
@@ -911,7 +923,7 @@ def test_archived_catalyst_requeues_an_open_paper_position_for_offline_worker(tm
 
         def dispatch():
             run = subprocess.run(
-                [paper_apply, "dispatch", "--account", account_id, "--policy", str(policy_path)],
+                [paper_apply, "orders", "--account", account_id, "--policy", str(policy_path)],
                 env=env,
                 stdout=subprocess.PIPE,
                 check=True,

@@ -16,7 +16,7 @@ usage, portfolio adapter и native-engine probe. Полное acceptance тре�
 [service-migration.md](service-migration.md). Новый backend пишем на Go,
 Python сохраняет upstream research/evaluation. Исходные acceptance gates ниже
 остаются обязательными; наличие новой архитектуры их не завершает.
-Scheduler, jobs, control и ledger относятся к Go-сервису `services/control/`.
+Scheduler, research jobs и учёт счёта относятся к Go-модулю `services/trading-api/`.
 Research и текущая диагностика Nautilus находятся в `services/research/`. Пути
 для ещё не реализованных компонентов обозначают предполагаемое размещение.
 
@@ -92,7 +92,7 @@ Research и текущая диагностика Nautilus находятся в
 
 - **Goal:** заменить ambiguous sizing/action outputs.
 - **Context:** upstream typed PM не готовый executable order.
-- **Files/components:** `contracts/`, `services/research/tradingbot/contracts.py`, `services/control/internal/contract/`, fixtures. Held-wrapper identity расширяется отдельным контрактом перед paper/live.
+- **Files/components:** `contracts/`, `services/research/tradingbot/contracts.py`, `services/trading-api/internal/contract/`, fixtures. Held-wrapper identity расширяется отдельным контрактом перед paper/live.
 - **Acceptance:** пять действий, target/delta/units, горизонт, expiry, триггер пересмотра, условия опровержения тезиса и ссылки на источники. Для риск-увеличивающих предложений — диапазон сценариев и ожидаемых изменений с явным источником оценки и статусом калибровки. Обработка плохих данных, истёкшего снимка и неизвестного бюджета завершается структурированной причиной отказа.
 - **Tests:** неизвестное действие, свободный текст, NaN, несовместимые единицы, stale snapshot, ссылки на отсутствующее evidence, invalid probabilities при их наличии и SELL без идентифицированной позиции.
 - **Dependencies:** P1-01. Для research проверяем на fixtures и публичных данных registry. Для работы с реальными held instruments требуется P0-04 и проверка конкретного account path.
@@ -143,7 +143,7 @@ Research и текущая диагностика Nautilus находятся в
 - **Текущий прогресс:** Go paper ledger хранит виртуальные счета, частичные и полные fills, резервы и журнал. Проверены перезапуск, восстановление копии, миграция исполнений из 0.1 и точные суммы через HTTP.
 - **Goal:** authoritative cash/intent/event identifiers.
 - **Context:** mutable Markdown не accounting ledger.
-- **Files/components:** `services/control/internal/ledger/`, PostgreSQL ledger migrations, `contracts/events.json`.
+- **Files/components:** `services/trading-api/internal/accounts/`, PostgreSQL ledger migrations, `contracts/events.json`.
 - **Acceptance:** events/positions/cashflows/intents/orders/reservations, unique idempotency keys, decimal precision, migration/rollback/backup policy.
 - **Tests:** conservation, duplicate event rejection, transactional rollback, migration on clean database.
 - **Dependencies:** P1-02.
@@ -274,7 +274,7 @@ Research и текущая диагностика Nautilus находятся в
 - **Текущий прогресс:** `paper-quote-compare` проверяет версию коэффициента и точную идентичность инструмента, размер, срок и settlement FX. Синтетические сравнения не подтверждают реальные котировки, asset registry и доступность площадки.
 - **Goal:** корректно сравнить wrappers/held SELL.
 - **Context:** token amounts разных issuers не взаимозаменяемы.
-- **Files/components:** `services/control/internal/venues/normalize/`, `services/evaluation/quote_compare.py`.
+- **Files/components:** `services/trading-api/internal/venues/normalize/`, `services/evaluation/quote_compare.py`.
 - **Acceptance:** ratio/decimals/reference normalization; sell only held instrument; chain/settlement/issuer constraints precede cost ranking.
 - **Tests:** wrong-mint best-price trap, changed multiplier, fee embedded, USDon≠USDC.
 - **Dependencies:** P3-01, P0-04.
@@ -284,7 +284,7 @@ Research и текущая диагностика Nautilus находятся в
 - **Текущий прогресс:** отчёт с замороженным cost ledger воспроизводит execution-net и operating-net NAV, сохраняя неизвестные расходы. Затраты вычитаются после симуляции. Измеренные chain, impact и failure costs нужны для полной фазы.
 - **Goal:** evaluator uses full economic costs.
 - **Context:** nominal 0-fee claims hide spread/gas.
-- **Files/components:** `services/evaluation/costs.py`, `services/control/internal/venues/costs/`.
+- **Files/components:** `services/evaluation/costs.py`, `services/trading-api/internal/venues/costs/`.
 - **Acceptance:** measured quote outputs + explicit fees, failed tx/priority/FX/issuer drag, rent locked separately, sensitivity when historical quotes absent.
 - **Tests:** no double-counting; net-output fixture, high-priority fee, depeg, refunded rent.
 - **Dependencies:** P2-05, P3-02, P3-03.
@@ -415,7 +415,7 @@ Research и текущая диагностика Nautilus находятся в
 - **Текущий прогресс:** `paper` проверяет policy, версию снимка, точный инструмент, расходы, TTL, достаточность средств и концентрацию. На PostgreSQL проверены исполнение по сохранённому решению, частичные fills и повтор без двойного списания. Отчёт `paper refusals` показывает зафиксированные до резервирования отказы по лимиту риска. [Процедура проверки](../runbooks/paper.md#отказы-проверки-риска-до-резервирования).
 - **Goal:** account limits перед simulated execution.
 - **Context:** AI decides signal, kernel only safety.
-- **Files/components:** `services/control/internal/risk/`, SQL reservation transactions, `config/risk.yaml`.
+- **Files/components:** `services/trading-api/internal/risk/`, SQL reservation transactions, `config/risk.yaml`.
 - **Acceptance:** один Go writer проверяет snapshot/registry version, account mode, exact units, eligibility, открытые резервы, лимиты позиции/совокупной экспозиции, turnover, fee, данные и quote TTL. BUY резервирует имеющийся USDC, SELL — exact held mint, обычные действия проходят по одной policy. При неизвестном статусе сохраняется резерв и действует явно заданное ограничение на новые операции.
 - **Tests:** одновременные BUY, stale version, превышение коррелированной экспозиции/fee cap, неизвестный баланс, рассогласование с лимитом инструмента или quote expiry, повтор события, no leverage.
 - **Dependencies:** P2-01, P1-02, P3-03.
@@ -433,13 +433,18 @@ Research и текущая диагностика Nautilus находятся в
 - **Текущий прогресс:** paper ledger атомарно сохраняет fill и событие уведомления. После таймаута хешированное локальное наблюдение связывается с исходной заявкой и котировкой. Проверены частичная сверка, снятие оставшегося резерва и точный повтор после перезапуска. Relay и consumer проверены с PostgreSQL, локальным Kafka и подставным приёмником. Для forward оценки нужны наблюдавшиеся рыночные котировки и согласованный ряд NAV с полными расходами.
 - **Goal:** prospective feasible fills, not rating-only results.
 - **Context:** quotes recorded after decision completion.
-- **Files/components:** `services/control/internal/venues/paper/`, `services/evaluation/forward.py`.
+- **Files/components:** `services/trading-api/internal/venues/paper/`, `services/evaluation/forward.py`.
 - **Acceptance:** отдельный paper account. Симулятор принимает только свежую наблюдаемую котировку после решения, явно помечает simulated fill и сохраняет reject/timeout. Ledger сравнивает расчётный и реализованный в симуляции output, публикует NAV включая idle capital и OPEX и синхронный benchmark. Forward run начинается после freeze.
 - **Notifications:** интегрировать отдельный сервис уведомлений с подтверждёнными paper fills, сохранив транзакционную запись outbox, стабильный ID исполнения и отсутствие события после rollback.
 - **Tests:** no stale/soft-as-guaranteed fill; outage retained; amount conservation, next-fill timestamp.
 - **Dependencies:** P5-02, P5-03, P3-04.
 
 ### [ ] P5-05 — Monitoring, backup and recovery
+
+- Trading API, Accounts и Trade Events используют отдельные PostgreSQL в
+  локальном Compose. До production нужны проверка восстановления на другом
+  хосте, эксплуатационные роли и проверка согласованности backup.
+  [ADR-005](../decisions/005-service-databases.md)
 
 - **Журнал входов:** проверка восстанавливает PostgreSQL и отдельный том
   журнала. Она различает задание, уже принятое базой, и запрос, который
@@ -452,7 +457,7 @@ Research и текущая диагностика Nautilus находятся в
 - **Текущий прогресс:** восстановление логического архива PostgreSQL проверено на чистом экземпляре. Сохранились резервы, история сделок, завершённые jobs и выданные разрешения. Прерванное задание продолжилось после истечения lease. `paper-check --pipeline` в одном снимке показывает задержки очереди, аренды, применения, подтверждения и публикации исполнений. [Процедура проверки](../runbooks/paper.md).
 - **Goal:** наблюдаемая эксплуатация и восстановление.
 - **Context:** paper выявляет operational problems до funds.
-- **Files/components:** `services/research/tradingbot/observability.py`, `services/control/internal/telemetry/`, `docs/runbooks/paper.md`, `deploy/`.
+- **Files/components:** `services/research/tradingbot/observability.py`, `services/trading-api/internal/telemetry/`, `docs/runbooks/paper.md`, `deploy/`.
 - **Acceptance:** trace chain, budgets/reconciliation/stale alerts, backups, successful restore and secret redaction; EU data-processing check recorded.
 - **Tests:** injected feed outage/NAV mismatch/spend spike; restored run resumes once; no credentials in logs.
 - **Dependencies:** P5-04.
@@ -490,13 +495,13 @@ Research и текущая диагностика Nautilus находятся в
   Сквозной тест проходит BUY и SELL через paper ledger, тестовые подписи,
   реальные обработчики адаптера и имитаторы Jupiter и Solana.
   Периодический тест связывает окна входа, события пересмотра и очередь
-  research с этим контуром через `paper dispatch --jupiter-fixture-url`.
+  research с этим контуром через `paper orders --jupiter-fixture-url`.
   Допуск, live reservations, производственный verifier/signer и сверка
   фактических fills в ledger открыты.
   [ADR-004](../decisions/004-jupiter-adapter.md).
 - **Goal:** minimal execution path без universal router.
 - **Context:** одна площадка после проверки допуска, расходов и хранения.
-- **Files/components:** адаптер выбранной площадки, `services/control/cmd/executor/`.
+- **Files/components:** адаптер выбранной площадки, `services/trading-api/cmd/executor/`.
 - **Acceptance:** связь `intent_id` → котировка → заявка → статус и сверка. Адаптер фиксирует request ID, сроки и правила повторной отправки. Для onchain-варианта проверяются срок действия транзакции, точные байты, signer slots и policy hash. Для кастодиального API проверяются полномочия ключа и lookup по ID заявки. Повтор после таймаута возможен только после сверки статуса предыдущей заявки.
 - **Tests:** записанный контракт API, истёкшая котировка, неизвестный статус, превышение минимальной суммы или лимита комиссии, отказ резервирования до отправки. Для onchain-варианта также проверяются неверная подпись и подмена сообщения.
 - **Dependencies:** P3-01, P5-03, G0/G3 access.
@@ -508,7 +513,7 @@ Research и текущая диагностика Nautilus находятся в
   Декодирование инструкций и lookup tables реального Metis открыто.
 - **Goal:** reject malicious built transaction до signing.
 - **Context:** quote provider untrusted; Token-2022/lookup tables critical.
-- **Files/components:** `services/control/internal/verify/`, adversarial transaction fixtures.
+- **Files/components:** `services/trading-api/internal/verify/`, adversarial transaction fixtures.
 - **Acceptance:** full resolved account/program/instruction decode, exact source/destination/mints/min-output/fees; unknown/delegate/authority/bridge rejected.
 - **Tests:** hidden transfer, fake ATA, changed recipient, unknown program, lookup-table mutation, token extension, fee drain.
 - **Dependencies:** P6-01, P0-04.
@@ -541,7 +546,7 @@ Research и текущая диагностика Nautilus находятся в
   Независимые live RPC и сверка фактических fills открыты.
 - **Goal:** exactly-once economic effect where chain semantics allow.
 - **Context:** API timeout ≠ failed transaction.
-- **Files/components:** `services/control/internal/orders/`, `services/control/internal/reconcile/`, SQL order events.
+- **Files/components:** `services/trading-api/internal/orders/`, `services/trading-api/internal/reconcile/`, SQL order events.
 - **Acceptance:** submitted/unknown/confirmed/finalized/reconciled states; independent RPC balances; before resend status and expiry checks, reserved balances remain conservative.
 - **Tests:** timeout then late finalization, node disagreement, duplicate callback, expired blockhash/resubmit, partial portfolio completion.
 - **Dependencies:** P6-01, P5-03.
@@ -568,7 +573,7 @@ Research и текущая диагностика Nautilus находятся в
 
 - **Goal:** add xChange/Ondo only when measurable benefit justified.
 - **Context:** not prerequisite for one-path pilot; no speculative API implementation.
-- **Files/components:** `services/control/internal/venues/xchange/` или `ondo/`, generated clients/fixtures.
+- **Files/components:** `services/trading-api/internal/venues/xchange/` или `ondo/`, generated clients/fixtures.
 - **Acceptance:** approved access/minimum/settlement asset; normalized quotes, decoded transaction policy and reconciliation; if unavailable ticket deferred without blocking pilot.
 - **Tests:** hard/soft, attestation expiry, issuer limits/halts, USDon residual balance, held-wrapper exit.
 - **Dependencies:** own P0-01/P3 evidence, P6-07.

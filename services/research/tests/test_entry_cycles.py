@@ -12,7 +12,13 @@ from threading import Barrier
 from uuid import uuid4
 
 import pytest
-from test_worker_postgres import build_go_command, process, request, wait_for_resource
+from test_worker_postgres import (
+    build_go_command,
+    offline_test_environment,
+    process,
+    request,
+    wait_for_resource,
+)
 
 from tradingbot.entry_cycles import ENTRY_CYCLE_PLAN, StagedEntry, _persist, poll_cycles, run_cycles
 from tradingbot.snapshots import ArchiveReference, read_pinned_json
@@ -545,15 +551,13 @@ def test_command_schedules_two_occurrences_and_replays_them_on_postgres(tmp_path
     _, plan, bundle = identity_fixture(tmp_path) if stable else fixture(tmp_path)
     account_id = str(uuid4())
     plan["account_id"] = account_id
-    control = build_go_command(tmp_path, "control")
+    trading_api = build_go_command(tmp_path, "trading-api")
     paper_apply = build_go_command(tmp_path, "paper")
-    env = os.environ | {
-        "TRADINGBOT_DATABASE_URL": os.environ["TRADINGBOT_ENTRY_CYCLE_TEST_DATABASE_URL"]
-    }
+    env = offline_test_environment(os.environ["TRADINGBOT_ENTRY_CYCLE_TEST_DATABASE_URL"])
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
         listener.bind(("127.0.0.1", 0))
         port = listener.getsockname()[1]
-    with process([control, "-listen", f"127.0.0.1:{port}"], env) as running:
+    with process([trading_api, "-listen", f"127.0.0.1:{port}"], env) as running:
         wait_for_resource(port, "/readyz", running)
         assert (
             request(

@@ -2,11 +2,11 @@
 
 **Решение принято 05.10.2026.** Это целевая архитектура и порядок перехода.
 Доступны Python research CLI, локальная stateless-валидация и research queue
-в Go control с durable create/read, claim, heartbeat и сохранением синтетического
+в Trading API с durable create/read, claim, heartbeat и сохранением синтетического
 результата. Go fixture worker выполняет транспортный цикл задания. Python worker
 запускает настоящий граф TradingAgents с локальными тестовыми моделями и получает
 разрешение из общего бюджета задания перед каждым вызовом. Локальный Compose
-упаковывает Go control, PostgreSQL и worker. Nautilus запускается в отдельно
+упаковывает Trading API, Accounts, их PostgreSQL и worker. Nautilus запускается в отдельно
 закреплённом evaluation окружении. Go paper ledger ведёт виртуальные счета и
 частичные и полные симулированные исполнения через локальный API.
 Правила для разработчиков: [AGENTS.md](../AGENTS.md).
@@ -15,21 +15,21 @@
 
 | Компонент | Язык | Ответственность | Runtime статус |
 |---|---|---|---|
-| Control/account | Go | API, scheduler, jobs/leases/outbox, snapshots, ledger, reservations, deterministic risk, costs, reconciliation | `services/control/`: health, capabilities, stateless validation, PostgreSQL jobs, leases и результаты demo |
-| Fixture worker | Go | Claim, heartbeat и публикация синтетического результата по выданному снимку | `services/control/cmd/research-fixture-worker`, отдельная офлайн-команда |
+| Trading API | Go | HTTP API, снимки, research jobs, аренды, лимиты вызовов и проверка результатов | Модуль `services/trading-api/`, бинарник и Compose-сервис `trading-api` |
+| Fixture worker | Go | Claim, heartbeat и публикация синтетического результата по выданному снимку | `services/trading-api/cmd/research-fixture-worker`, отдельная офлайн-команда |
 | Research worker | Python | TradingAgents graph, provider SDK/callbacks, portfolio arbitration, evidence, usage; выдаёт research batch | `tradingbot worker` забирает job, продлевает lease и публикует результат офлайн-графа |
 | Evaluation worker | Python | Nautilus replay/backtest/paper evaluation, execution-cost models, benchmarks | `services/evaluation` с собственным lock; native probe и синтетический хронологический replay |
-| Paper ledger | Go | Виртуальные деньги, позиции, резервы и журнал исполнений | `services/control/internal/ledger` с PostgreSQL, версиями состояния и историей paper fills |
-| Paper workflow | Go | Снимки счёта, планирование входов и применение сохранённых решений по политике владельца | `services/control/internal/paper_workflow` связывает research с paper ledger. Команда `paper` запускает операции |
+| Accounts | Go | Виртуальные деньги, позиции, резервы и журнал исполнений | Процесс `accounts` владеет PostgreSQL счёта и обслуживает торговые операции по HTTP |
+| Paper workflow | Go | Снимки счёта, планирование входов и применение сохранённых решений по политике владельца | `services/trading-api/internal/paper_workflow` связывает research с учётом. Compose-сервисы `orders` и `orders-identity` запускают `paper orders` |
 | Paper quote collector | Go | Проверяет ответы локального тестового HTTP-источника и формирует ленту котировок `0.3` | Команда `paper-quote-collect` возвращает SHA-256 для закрепления ленты владельцем |
 | Venue quotes | Go | Читает публичные рыночные наблюдения через HTTP v1 | `services/venue-quotes`, [стаканы Binance Spot и Dzengi](../contracts/venue-order-book.schema.json) и [котировки Jupiter Swap v2](../contracts/venue-quote.schema.json) |
 | Jupiter Adapter | Go | Котировки и цены Jupiter, остатки Solana, подготовка, отправка одобренного BUY/SELL и наблюдение статуса | `services/venue-quotes/cmd/jupiter-adapter`, [HTTP v1](../contracts/jupiter-adapter.schema.json), [ADR-004](decisions/004-jupiter-adapter.md) |
-| Execution worker | Go | Allowed venue quotes/build/submit/status; без ключа и права менять policy | Будущий модуль control, затем отдельный process |
+| Execution worker | Go | Allowed venue quotes/build/submit/status; без ключа и права менять policy | Будущий модуль Trading API, затем отдельный процесс |
 | Independent verifier/signer | Go | Decode transaction, owner limits/allowlists, approval exact hash, signing | Отдельный future live host/identity |
 | Trade events | Go | Публикует события через pgqueue и Kafka | `services/trade-events/` с тестовым входом и отдельным relay для outbox paper ledger |
 | Notifications | Go | Читает исполнения из Kafka, отправляет уведомления и обрабатывает аналитические команды владельца | `services/notifications/`, команды включаются при наличии URL Analytics |
 | Portfolio analytics | Go | Читает события счёта и оценки из Kafka, считает NAV, P&L и доходность, предоставляет read-only API для Telegram | `services/portfolio-analytics/`, локальный paper-счёт USD. [ADR-003](decisions/003-portfolio-analytics.md) |
-| PostgreSQL | SQL | Durable state/jobs/events и constraints; economic writes только через control | Локальные migrations для research snapshots/jobs/outbox, production deployment впереди |
+| PostgreSQL | SQL | Авторитетные research jobs, состояние виртуального счёта и transactional outbox | Trading API, Accounts, Trade Events и Portfolio Analytics владеют своими PostgreSQL |
 
 `paper-quote-collect` и `paper-quote-pin` публикуют полностью записанные файлы
 без перезаписи существующих. `paper-quote-pin` и `paper follow` используют
@@ -98,7 +98,7 @@ loopback HTTP, `TRADINGBOT_JUPITER_SUBMISSION_DATABASE_URL`,
 go -C services/venue-quotes test -mod=readonly -count=1 -v ./internal/jupiter_rehearsal
 ```
 
-Прогон запускает Control на loopback, использует обычные ручки адаптера
+Прогон запускает Trading API на loopback, использует обычные ручки адаптера
 и удаляет созданную схему по завершении. Тестовый транспорт отвечает на
 запросы Jupiter и Solana внутри процесса. Подписание использует временный
 кошелёк и отдельный ключ одобрения. Подписывается только заранее определённая
@@ -111,7 +111,7 @@ go -C services/venue-quotes test -mod=readonly -count=1 -v ./internal/jupiter_re
 
 #### Jupiter в периодическом paper-цикле
 
-`paper dispatch --jupiter-fixture-url` подключает локальный тестовый
+`paper orders --jupiter-fixture-url` подключает локальный тестовый
 расчёт Jupiter через числовой loopback-адрес. Закреплённая котировка с
 `execution: "jupiter_fixture"` выбирает этот режим и связывается с заявкой
 при резервировании. Запрос на расчёт привязан к исследованию, ордеру,
@@ -122,12 +122,12 @@ go -C services/venue-quotes test -mod=readonly -count=1 -v ./internal/jupiter_re
 отклоняется. [Контракт расчёта](../contracts/paper-jupiter-fixture.schema.json)
 
 Сквозной тест запускает штатные команды планирования и диспетчеризации,
-Control и worker с заданными тестовыми решениями через обычный протокол
+Trading API и worker с заданными тестовыми решениями через обычный протокол
 аренды и публикации результатов. Он использует локальный тестовый PostgreSQL
 из `TRADINGBOT_TEST_DATABASE_URL` и дочерний тестовый сервер Jupiter.
 
 ```powershell
-go -C services/control test -mod=readonly -count=1 -v -run '^TestScheduledPaperJupiterRehearsal$' ./cmd/paper
+go -C services/trading-api test -mod=readonly -count=1 -v -run '^TestScheduledPaperJupiterRehearsal$' ./cmd/paper
 ```
 
 ### Paper
@@ -164,7 +164,7 @@ HTTP API доступны из Go: подключение к удалённом�
 Ускорение provider inference этой архитектурой не измерено; производительность
 нашего кода проверяем профилированием и latency/cost метриками.
 
-Сначала два service runtime: Go control и Python research. Evaluation запускается
+Сначала два service runtime: Trading API и Python research. Evaluation запускается
 offline по отдельному профилю и получает независимое окружение при упаковке
 Nautilus. Executor становится отдельным service перед выделением его production
 credentials; signer всегда отдельная signing boundary. Аналитики внутри
@@ -176,12 +176,20 @@ TradingAgents остаются частью одного upstream graph.
 flowchart LR
     DATA[Market data / news / actions] --> SNAP[Immutable data snapshot]
     subgraph APP[EU application host]
-        CTRL[Control/account service: Go]
-        DB[(PostgreSQL ledger + jobs + outbox)]
+        CTRL[Trading API: Go]
+        JOBS[(Research jobs PostgreSQL)]
+        ACC[Accounts: Go]
+        LEDGER[(Accounts PostgreSQL)]
+        RELAY[Trade Events]
+        QUEUE[(Trade Events PostgreSQL)]
         RES[Research worker: Python + TradingAgents]
         EVAL[Evaluation worker: Python + Nautilus]
         EXEC[Execution worker: Go, future]
-        CTRL <--> DB
+        CTRL <--> JOBS
+        CTRL <-->|paper account HTTP| ACC
+        ACC <--> LEDGER
+        RELAY <-->|outbox HTTP| ACC
+        RELAY <--> QUEUE
         CTRL -->|job + portfolio snapshot + budget| RES
         RES -->|typed research batch + evidence + usage| CTRL
         CTRL -->|frozen snapshots + decisions| EVAL
@@ -202,7 +210,7 @@ flowchart LR
     OWNER[Owner cold treasury and policy] --> VERIFY
 ```
 
-Control выбирает разрешённый universe и immutable state. AI определяет торговое
+Trading API выбирает разрешённый universe и immutable state. AI определяет торговое
 решение; Go проверяет его допустимость. Go kernel не подменяет стратегию набором
 BUY/SELL сигналов. Python batch не является командой подписи и не переписывает
 авторитетный portfolio state. Research/paper stages не подключают signer.
@@ -241,7 +249,7 @@ Go-команда `perp-screen` проверяет доступность дан
 
 ```powershell
 $perpScreenBin = Join-Path $env:TEMP 'tradingbot-perp-screen.exe'
-go -C services/control build -mod=readonly -o $perpScreenBin ./cmd/perp-screen
+go -C services/trading-api build -mod=readonly -o $perpScreenBin ./cmd/perp-screen
 uv --directory services/research run --frozen tradingbot perp-research `
   --study ../../contracts/valid-perp-research-study.json `
   --screen-binary $perpScreenBin `
@@ -298,7 +306,7 @@ USD, и по USD с поправкой на риск должен превыша
 
 ```powershell
 $equityRouteBin = Join-Path $env:TEMP 'tradingbot-equity-route.exe'
-go -C services/control build -mod=readonly -o $equityRouteBin ./cmd/equity-route
+go -C services/trading-api build -mod=readonly -o $equityRouteBin ./cmd/equity-route
 & $equityRouteBin --study contracts/valid-equity-route-study.json `
   --theses contracts/valid-equity-route-theses.json
 ```
@@ -343,7 +351,7 @@ $study | Set-Content -LiteralPath $studyPath -Encoding utf8
 $batch = Get-Content -Raw contracts/valid-equity-route-theses.json | ConvertFrom-Json
 $batch.study_sha256 = (Get-FileHash -LiteralPath $studyPath -Algorithm SHA256).Hash.ToLowerInvariant()
 $batch | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $thesesPath -Encoding utf8
-go -C services/control run -mod=readonly ./cmd/equity-route --study $studyPath --theses $thesesPath
+go -C services/trading-api run -mod=readonly ./cmd/equity-route --study $studyPath --theses $thesesPath
 ```
 
 Для рыночного прогона нужен архив с актуальными наблюдениями и правилами
@@ -362,12 +370,12 @@ Ledger повторно проверяет версию счёта под бло
 [Контракт команды](../contracts/paper-apply.schema.json).
 
 `schedule-review` пишет контекст применения и задание одной транзакцией
-в PostgreSQL. `paper dispatch` читает завершённые записи своего
+в PostgreSQL. `paper orders` читает завершённые записи своего
 счёта и использует тот же жизненный цикл, что `paper follow`.
 Проверенная котировка фиксируется атомарно с резервом. При восстановлении
 используются эти сохранённые байты, даже если владелец сменил текущую политику.
 Диспетчер подтверждает завершение после сохранения квитанции ledger.
-В профиле `paper` контейнер research видит только архив и HTTP Control.
+В профиле `paper` контейнер research видит только архив и HTTP Trading API.
 После таймаута локальное наблюдение с хешем разрешает остаток исходной
 виртуальной заявки. PostgreSQL проверяет идентичность котировки и сохраняет
 исход наблюдения в событиях ledger. Запись и восстановление истории outbox
@@ -427,7 +435,7 @@ research независимо сверяет архив и реестр. Каж�
 исходные файлы, даты и совокупный бюджет. Хеш реестра сохраняется в
 квитанции каждого варианта вместе с хешами шагов и конфигураций.
 
-`schedule-entry` использует выданный Control снимок и хеш локального
+`schedule-entry` использует выданный Trading API снимок и хеш локального
 результата отбора. Допущенный вход использует то же атомарное сохранение
 задания и контекста применения, что пересмотр позиции. Фиксация forward
 эксперимента связывает файлы конфигурации с составом стратегий и протоколом
@@ -436,7 +444,7 @@ research независимо сверяет архив и реестр. Каж�
 Локальный процесс `entry_cycles` обрабатывает хешированный план и сохраняет
 входы Go в журнале до отправки. Профиль `paper-entry` монтирует архив для
 чтения и сохраняет журнал в отдельном томе. Очередь обслуживает research
-worker через Control. Профиль `paper-quote` читает хешированную синтетическую
+worker через Trading API. Профиль `paper-quote` читает хешированную синтетическую
 ленту счёта и сохраняет закреплённые котировки для завершённых заданий.
 Диспетчер читает ту же директорию. После смены политики продолжение
 зарезервированного ордера сверяет исходное применение и закреплённую
@@ -445,8 +453,8 @@ worker через Control. Профиль `paper-quote` читает хешир�
 Профиль `research-provider` берёт только подготовленные задания `0.3` по
 пину реестра и режиму `prepared_provider`. Подготовленный архив
 `local_archive` проходит ту же проекцию устойчивых ID. Перед одним вызовом
-портфельной модели worker получает разрешение Control, после ответа отправляет
-квитанцию с моделью и usage. В одной транзакции Control сопоставляет квитанцию
+портфельной модели worker получает разрешение Trading API, после ответа отправляет
+квитанцию с моделью и usage. В одной транзакции Trading API сопоставляет квитанцию
 и результат `0.4` с текущей арендой, пинами и job budget. Пересмотр
 открытой позиции наследует режим принятого входа. Диспетчер использует
 обычный paper risk и котировку с наблюдением после сохранения результата.
@@ -511,7 +519,7 @@ lease/attempt/heartbeat, результат публикуется отдель�
 
 Job envelope `0.1` для create/read содержит immutable research portfolio,
 ссылку и хеш data manifest, requested symbols, policy version и call budget.
-Control возвращает durable ACK после commit snapshot, job и creation outbox.
+Trading API возвращает durable ACK после commit snapshot, job и creation outbox.
 PostgreSQL выдаёт и продлевает один действующий lease на job по своему времени.
 Попытку идентифицируют worker ID, claim ID, номер и уникальный token.
 Повтор того же claim в пределах lease возвращает уже выданную попытку.
@@ -521,7 +529,7 @@ Completion принимает метаданные `synthetic_fixture` в кон
 SHA upstream, хеш конфигурации и учёт вызовов публикует Python worker.
 Go fixture worker публикует без обращения к моделям, используя только выданный
 snapshot и universe. При потере ответа он повторяет тот же claim ID или payload
-completion. Control сравнивает batch с сохранённым snapshot и universe, пересчитывает
+completion. Trading API сравнивает batch с сохранённым snapshot и universe, пересчитывает
 evidence hashes из текста и проверяет lease перед записью. Результат, статус
 и outbox commit атомарно. Для тестовых моделей USD billing неизвестен.
 Для локального PIT-архива worker сверяет хеш и доступность каждой записи
@@ -531,13 +539,13 @@ evidence hashes из текста и проверяет lease перед зап�
 `evidence_hashes`, `intents` и `schema_version="0.1"`.
 
 Job envelope `0.2` сохраняет ссылку на реестр владельца и упорядоченную
-привязку запрошенных тикеров к `security_id`. Control принимает новый
+привязку запрошенных тикеров к `security_id`. Trading API принимает новый
 контракт при включённом пине SHA-256. Транзакция аренды выбирает задания
 конкретного реестра и сохраняет пин вместе с ID попытки. Для старых
 заданий используется пустой пин. Архивный worker сверяет точную ссылку
 и хеш отдельно от задания, проверяет доступный листинг и передаёт
 в TradingAgents срез выбранной бумаги. Результат `0.3` содержит исходные
-привязки и SHA-256 проекции. Control сверяет привязки с исходным заданием.
+привязки и SHA-256 проекции. Trading API сверяет привязки с исходным заданием.
 Выгрузка хранит точные байты запроса и результата для воспроизведения среза.
 
 Для каждого модельного вызова Go проверяет действующий lease и резервирует один
@@ -570,25 +578,29 @@ Research DTO описан [общими JSON Schema и fixtures](../contracts/).
 Python сериализует amounts десятичными строками. Go проверяет схему,
 freshness и согласованность распределения с переданным portfolio и universe.
 И диагностика, и локальное создание job получают research portfolio от
-вызывающей стороны. Сохранённая запись фиксирует этот ввод. Control проверяет
+вызывающей стороны. Сохранённая запись фиксирует этот ввод. Trading API проверяет
 сохранённые хеши перед выдачей и проверяет attempt и snapshot при записи результата.
 Доступность содержимого data manifest проверяется при интеграции с архивом.
 Право на paper/live execution задаётся отдельными протоколами.
 
 ## Данные и полномочия
 
-PostgreSQL хранит авторитетное состояние внутреннего учёта. Control владеет
-ledger, reservations и account serialization. Фактические остатки Solana-кошелька
-наблюдаются отдельно через RPC. Job creation и outbox фиксируются атомарно;
-worker не держит SQL transaction во время provider calls. Research работает
-через control contract без прямых write credentials к balances/reservations.
-Evaluation может иметь собственную область хранения результатов, с ограниченной
-ролью; она не меняет реальный ledger. Research jobs используют PostgreSQL.
-Kafka используется для событий об исполненных сделках по [ADR-002](decisions/002-trade-notifications.md).
-`trade-events` владеет outbox и соединением с PostgreSQL. `notifications`
-имеет доступ к Kafka и Telegram. Сервисы собираются из отдельных Go-модулей,
-обмениваются событиями по версионированному JSON-контракту и разворачиваются
-через [Compose](../deploy/notifications/compose.yaml).
+Trading API владеет PostgreSQL заданий, снимков, аренд и бюджета. Accounts
+хранит авторитетное состояние виртуальных счетов, резервы, исполнения и outbox
+в собственном PostgreSQL. `orders` и планировщики работают через HTTP.
+Контекст применения решения хранится в той же транзакции, что research job.
+[Внутренний контракт заданий](../contracts/internal-jobs-http.schema.json)
+Исполнение и запись outbox хранятся в транзакции Accounts.
+
+Trade Events читает outbox Accounts по HTTP, пишет в свой PostgreSQL и
+подтверждает чтение после commit. Kafka доставляет исполнения в Notifications
+и историю счёта в Portfolio Analytics. Portfolio Analytics хранит свою
+проекцию в PostgreSQL `portfolio_analytics`. База `notifications` в отдельном
+Compose-проекте принадлежит Trade Events и хранит его очередь.
+[ADR-005](decisions/005-service-databases.md) · [Research Compose](../deploy/research/compose.yaml) · [Compose аналитики](../deploy/notifications/analytics.compose.yaml)
+
+Фактические остатки Solana-кошелька наблюдаются через RPC. Evaluation получает
+архивные данные и выгрузки результатов для отдельной оценки.
 
 Большие evidence/data objects хранятся как immutable files/object archive;
 в SQL — hashes, timestamps, versions и ссылки. Outputs и memory lessons не
@@ -623,7 +635,7 @@ Go consumer знает наш protocol; имена upstream Python functions д�
 
 Research и evaluation имеют отдельные `pyproject.toml`, `uv.lock` и Dockerfile.
 В research остаётся дополнительная зависимость для локальной проверки Nautilus.
-Go/control и execution/signer сохраняют собственные версии при обновлении TA,
+Trading API и execution/signer сохраняют собственные версии при обновлении TA,
 если наш protocol не изменился. Breaking protocol change требует versioned
 migration и совместного rollout, без ручного merge с чужими исходниками.
 

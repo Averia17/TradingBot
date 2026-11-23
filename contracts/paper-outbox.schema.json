@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Accounts outbox HTTP responses v1",
+  "description": "Committed entries and account heads for the paper outbox relay. Request limits and acknowledgement semantics are defined by the owner HTTP API.",
+  "anyOf": [
+    {
+      "$ref": "#/$defs/FillEntry"
+    },
+    {
+      "$ref": "#/$defs/AccountEntry"
+    },
+    {
+      "$ref": "paper-account-head.schema.json"
+    },
+    {
+      "$ref": "#/$defs/AccountHistory"
+    },
+    {
+      "$ref": "#/$defs/AccountHeads"
+    }
+  ],
+  "$defs": {
+    "UUID": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$"
+    },
+    "FillEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "account_id",
+        "event_id",
+        "payload"
+      ],
+      "properties": {
+        "account_id": {
+          "$ref": "#/$defs/UUID"
+        },
+        "event_id": {
+          "$ref": "#/$defs/UUID"
+        },
+        "payload": {
+          "$ref": "paper-fill-event.schema.json"
+        }
+      }
+    },
+    "AccountEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "account_id",
+        "event_id",
+        "account_version",
+        "payload"
+      ],
+      "properties": {
+        "account_id": {
+          "$ref": "#/$defs/UUID"
+        },
+        "event_id": {
+          "$ref": "#/$defs/UUID"
+        },
+        "account_version": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9223372036854775807
+        },
+        "payload": {
+          "$ref": "paper-account-event.schema.json"
+        }
+      }
+    },
+    "AccountHistory": {
+      "type": "array",
+      "maxItems": 128,
+      "items": {
+        "$ref": "#/$defs/AccountEntry"
+      }
+    },
+    "AccountHeads": {
+      "type": "array",
+      "maxItems": 128,
+      "items": {
+        "$ref": "paper-account-head.schema.json"
+      }
+    }
+  }
+}

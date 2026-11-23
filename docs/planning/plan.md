@@ -44,7 +44,7 @@ research-решения через Go, повтор после сбоя, арх�
 
 | Порядок | Что строим и проверяем | Условие перехода |
 |---|---|---|
-| 1 · S1 | Go control и строгая граница Python → Go. Общие fixtures, точные строковые суммы, version/expiry/evidence и фактические health/capabilities | Go принимает Python-produced исследовательский результат и отклоняет несовместимый ввод. Локально проверены package gates и HTTP |
+| 1 · S1 | Trading API и строгая граница Python → Go. Общие fixtures, точные строковые суммы, version/expiry/evidence и фактические health/capabilities | Go принимает Python-produced исследовательский результат и отклоняет несовместимый ввод. Локально проверены package gates и HTTP |
 | 2 · S2 | Версионированный job envelope, immutable portfolio/data snapshot и ledger-independent research queue. Сначала durable create/read, затем lease/heartbeat, fenced completion и outbox | Реальный PostgreSQL, ACK после commit, restart, конкурентный lease, idempotency по ID/hash, late results отклоняются, retry ограничен |
 | 3.1 · S3a ✓ | Go fixture worker забирает задание, использует сохранённый снимок и возвращает синтетический результат через действующий контракт | Отдельные процессы control и worker с PostgreSQL прошли полный цикл офлайн. Результат читается после перезапуска, повтор после потери ответа дедуплицируется, просроченная попытка отклоняется |
 | 3.2 · S3b ✓ | Python worker запускает граф TradingAgents с тестовыми моделями и сохраняет usage и provenance | Go принял и сохранил результат, связанный с выданным снимком, попыткой, версиями и манифестом. Внешние сервисы в прогоне не вызывались |
@@ -869,7 +869,7 @@ Alerts только actionable: risk/fee breach, unauthorized signing attempt, h
 
 Python: pinned TradingAgents checkout, Pydantic contracts, pandas/Arrow/Parquet, NautilusTrader, pytest, provider SDKs. Qlib optional после простого scorer. Go: generated venue clients, maintained Solana SDK, decimal/integer math, pgx, stdlib HTTP/TLS. PostgreSQL: versioned migrations, transactional outbox/jobs. Local research работает на Windows, deployment планируется на Linux в ЕС.
 
-Первый Compose profile объединяет Go control, PostgreSQL и Python research worker. Evaluation имеет отдельные Python dependencies, executor выделяется перед подключением торговых credentials, signer работает на отдельном host. Schedule/job leasing в PostgreSQL, один account writer. Начальные metrics/logging используют стандартные библиотеки. Версии, SBOM и лицензии фиксируются при сборке artifacts.
+Первый Compose profile объединяет Trading API, PostgreSQL и Python research worker. Evaluation имеет отдельные Python dependencies, executor выделяется перед подключением торговых credentials, signer работает на отдельном host. Schedule/job leasing в PostgreSQL, один account writer. Начальные metrics/logging используют стандартные библиотеки. Версии, SBOM и лицензии фиксируются при сборке artifacts.
 
 EU VPS не гарантирует EU data processing у LLM/vendor. До реальных персональных/портфельных данных проверить provider region, retention, DPA и account terms. KYC документы не передавать LLM. Cloud-region requirements — отдельный deployment gate.
 
@@ -882,16 +882,16 @@ docs/                             архитектура, ADR и история 
 docs/planning/                    основной план, backlog и порядок перехода
 docs/research/                    реестр источников и сохранённые материалы
 contracts/                        версионированные JSON Schema и fixtures
-services/control/                 Go control, research jobs и проверка контрактов
+services/trading-api/              Trading API, research jobs и проверка контрактов
+services/trading-api/internal/accounts/ схема и операции учёта виртуального счёта
 services/research/                 Python CLI, адаптеры, Nautilus probe, тесты и locks
 services/research/vendor/          чистые upstream checkouts вне Git
 services/trade-events/             тестовый приём fill, PostgreSQL outbox и Kafka producer
 services/notifications/            Kafka consumer и отправка в Telegram
 deploy/notifications/              локальный Compose для trade-events и notifications
-services/control/internal/ledger/ будущая схема и операции экономического ledger
-services/control/internal/risk/   будущие caps, reservations и freshness checks
-services/control/internal/venues/ будущие Jupiter, xChange, Ondo и broker adapters
-services/control/internal/verify/ будущая decoded transaction policy
+services/trading-api/internal/risk/   будущие caps, reservations и freshness checks
+services/trading-api/internal/venues/ будущие Jupiter, xChange, Ondo и broker adapters
+services/trading-api/internal/verify/ будущая decoded transaction policy
 services/evaluation/               будущая независимая среда оценки
 signer/                           будущая изолированная policy без ключей в Git
 data/manifests/                   будущие hashes и PIT metadata
@@ -1007,7 +1007,7 @@ S1–S3 покрывают исследовательский цикл от ко
 
 ## 37. Final recommendation: START / DO NOT START / START WITH CONDITIONS
 
-Начинаем с research и развиваем его до forward paper. Используем чистый pinned TradingAgents и Nautilus, Go control + PostgreSQL с immutable archive, отдельные Python adapters и поддерживаемые SDK. Собственные компоненты отвечают за PIT inputs, wire contracts, ledger, cost-aware routing, deterministic limits, independent verifier и reconciliation.
+Начинаем с research и развиваем его до forward paper. Используем чистый pinned TradingAgents и Nautilus, Trading API + PostgreSQL с immutable archive, отдельные Python adapters и поддерживаемые SDK. Собственные компоненты отвечают за PIT inputs, wire contracts, ledger, cost-aware routing, deterministic limits, independent verifier и reconciliation.
 
 Для резидентства в Беларуси первым сравниваем Dzengi с доступными альтернативами по чистой стоимости входа и выхода. Выбираем live-маршрут после проверки допуска, надёжности вывода и условий хранения. Для onchain пилота cold treasury и ключи принадлежат владельцу, а изолированный signer работает в пределах выделенного торгового остатка.
 

@@ -5,12 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"os"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/goware/pgqueue"
-	"github.com/jackc/pgx/v5"
 	"github.com/twmb/franz-go/pkg/kfake"
 	"github.com/twmb/franz-go/pkg/kgo"
 )
@@ -25,53 +26,51 @@ func TestPaperAccountRelayPublishesCommittedEventAndHead(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := pgx.BeginFunc(ctx, db, func(tx pgx.Tx) error {
-		for _, name := range []string{"001_accounts.sql", "009_account_outbox.sql"} {
-			sql, err := os.ReadFile("../../../control/internal/ledger/" + name)
-			if err != nil {
-				return err
+	var published, acknowledged atomic.Bool
+	var headVersion atomic.Int64
+	headVersion.Store(event.AccountVersion)
+	entry := paperOutboxEntry{AccountID: event.AccountID, EventID: event.EventID, AccountVersion: event.AccountVersion, Payload: data}
+	source := testPaperSource(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		head := paperAccountHead{Version: "1.0", AccountID: event.AccountID, AccountVersion: headVersion.Load(), ObservedAt: time.Now().UTC()}
+		switch r.Method + " " + r.URL.Path {
+		case "GET /internal/v1/paper/outbox/accounts/next":
+			if !published.Load() || acknowledged.Load() {
+				w.WriteHeader(http.StatusNoContent)
+				return
 			}
-			if _, err := tx.Exec(ctx, string(sql), pgx.QueryExecModeSimpleProtocol); err != nil {
-				return err
+			_ = json.NewEncoder(w).Encode(entry)
+		case "POST /internal/v1/paper/outbox/accounts/" + event.AccountID + "/1/" + event.EventID + "/ack":
+			acknowledged.Store(true)
+			w.WriteHeader(http.StatusNoContent)
+		case "GET /internal/v1/paper/outbox/heads":
+			_ = json.NewEncoder(w).Encode([]paperAccountHead{head})
+		case "GET /internal/v1/paper/outbox/heads/" + event.AccountID:
+			_ = json.NewEncoder(w).Encode(head)
+		case "GET /internal/v1/paper/outbox/accounts/" + event.AccountID:
+			entries := []paperOutboxEntry{}
+			if r.URL.Query().Get("after") == "0" {
+				entries = append(entries, entry)
 			}
+			_ = json.NewEncoder(w).Encode(entries)
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
 		}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
+	})
 	box, err := Open(ctx, dsn)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer box.Close()
-	tx, err := db.Begin(ctx)
-	if err != nil {
-		t.Fatal(err)
+	if queued, err := box.queueOnePaperAccount(ctx, source); err != nil || queued {
+		t.Fatalf("empty outbox queued: queued=%v err=%v", queued, err)
 	}
-	defer tx.Rollback(ctx)
-	const zeroHash = "0000000000000000000000000000000000000000000000000000000000000000"
-	if _, err := tx.Exec(ctx, `INSERT INTO paper_accounts (account_id,creation_hash,cash_usd,version)
-		VALUES ($1,decode($3,'hex'),1000,$2)`, event.AccountID, event.AccountVersion, zeroHash); err != nil {
-		t.Fatal(err)
+	published.Store(true)
+	if queued, err := box.queueOnePaperAccount(ctx, source); err != nil || !queued || !acknowledged.Load() {
+		t.Fatalf("committed event was not queued and acknowledged: queued=%v err=%v", queued, err)
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO paper_events (account_id,event_id,account_version,kind,request_hash,payload)
-		VALUES ($1,$2,$3,'paper_account.created',decode($4,'hex'),'{}')`, event.AccountID, event.EventID, event.AccountVersion, zeroHash); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := tx.Exec(ctx, `INSERT INTO paper_account_outbox (account_id,account_version,event_id,payload,created_at)
-		VALUES ($1,$2,$3,$4,clock_timestamp())`, event.AccountID, event.AccountVersion, event.EventID, data); err != nil {
-		t.Fatal(err)
-	}
-	if queued, err := box.queueOnePaperAccount(ctx); err != nil || queued {
-		t.Fatalf("uncommitted event was moved to the relay: queued=%v err=%v", queued, err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if queued, err := box.queueOnePaperAccount(ctx); err != nil || !queued {
-		t.Fatalf("committed event was not queued: queued=%v err=%v", queued, err)
-	}
-	if queued, err := box.queueOnePaperAccount(ctx); err != nil || queued {
+	if queued, err := box.queueOnePaperAccount(ctx, source); err != nil || queued {
 		t.Fatalf("committed event handed off twice: queued=%v err=%v", queued, err)
 	}
 
@@ -96,7 +95,7 @@ func TestPaperAccountRelayPublishesCommittedEventAndHead(t *testing.T) {
 	}))
 	relayCtx, cancel := context.WithCancel(ctx)
 	done := make(chan error, 1)
-	go func() { done <- reopened.RelayPaperAccounts(relayCtx, producer, time.Minute) }()
+	go func() { done <- reopened.RelayPaperAccounts(relayCtx, producer, source, time.Minute) }()
 	defer func() {
 		cancel()
 		if err := <-done; err != nil && !errors.Is(err, context.Canceled) {
@@ -149,7 +148,7 @@ func TestPaperAccountRelayPublishesCommittedEventAndHead(t *testing.T) {
 		case <-time.After(20 * time.Millisecond):
 		}
 	}
-	if replayed, err := reopened.ReplayPaperAccount(ctx, producer, event.AccountID); err != nil || replayed != 1 {
+	if replayed, err := ReplayPaperAccount(ctx, producer, source, event.AccountID); err != nil || replayed != 1 {
 		t.Fatalf("replay failed: count=%d err=%v", replayed, err)
 	}
 	fetches := consumer.PollRecords(ctx, 1)
@@ -160,10 +159,8 @@ func TestPaperAccountRelayPublishesCommittedEventAndHead(t *testing.T) {
 	if len(records) != 1 || records[0].Topic != PaperAccountTopic || !bytes.Equal(records[0].Value, publishedBytes) {
 		t.Fatal("replay bytes differ from the normal account event")
 	}
-	if _, err := db.Exec(ctx, `UPDATE paper_accounts SET version=2 WHERE account_id=$1`, event.AccountID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := reopened.ReplayPaperAccount(ctx, producer, event.AccountID); err == nil {
+	headVersion.Store(2)
+	if _, err := ReplayPaperAccount(ctx, producer, source, event.AccountID); err == nil {
 		t.Fatal("replay accepted a missing source version")
 	}
 }

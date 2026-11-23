@@ -24,11 +24,11 @@ def checked(condition, message):
         raise RuntimeError(message)
 
 
-def request(origin, path, expected, body=None):
+def request(origin, path, expected, body=None, *, timeout=3):
     payload = json.dumps(body).encode() if body is not None else None
     req = Request(origin + path, payload, {"Content-Type": "application/json"})
     try:
-        with HTTP.open(req, timeout=3) as response:
+        with HTTP.open(req, timeout=timeout) as response:
             status, raw = response.status, response.read()
     except HTTPError as exc:
         with exc:
@@ -114,7 +114,7 @@ def completed_result(origin, job):
 
 def check_research_replay(compose, root, job, receipt):
     exported = compose(
-        "exec", "-T", "control", "research-replay-export", "--job", job["job_id"], capture=True
+        "exec", "-T", "trading-api", "research-replay-export", "--job", job["job_id"], capture=True
     ).encode("utf-8")
     as_of = datetime.fromisoformat(job["portfolio"]["as_of"])
     completed = datetime.fromisoformat(receipt["completed_at"])
@@ -178,7 +178,7 @@ def check_research_replay(compose, root, job, receipt):
 
 def check_research_call_usage(compose, root, job, receipt):
     exported = compose(
-        "exec", "-T", "control", "research-usage-export", "--job", job["job_id"], capture=True
+        "exec", "-T", "trading-api", "research-usage-export", "--job", job["job_id"], capture=True
     ).encode("utf-8")
     permits = json.loads(exported)
     expected = receipt["result"]["metadata"]["llm_calls"]
@@ -347,6 +347,37 @@ def write_paper_entry_plan(root, account_id, first):
     )
 
 
+def check_paper_relay(compose, account_id):
+    profile = ("--profile", "paper-notifications")
+    compose(*profile, "up", "-d", "--build", "paper-fill-relay")
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        offset = compose(
+            *profile, "exec", "-T", "kafka", "kafka-get-offsets",
+            "--bootstrap-server", "kafka:9092", "--topic", "tradingbot.trade.filled.paper.v1",
+            capture=True,
+        ).strip()
+        status = compose(
+            *profile, "exec", "-T", "accounts-postgres", "psql", "-U", "accounts", "-d", "accounts", "-Atc",
+            f"SELECT count(*) FROM paper_fill_outbox WHERE account_id='{account_id}' AND queued_at IS NOT NULL",
+            capture=True,
+        ).strip()
+        if offset == "tradingbot.trade.filled.paper.v1:0:1" and status == "1":
+            break
+        time.sleep(0.5)
+    else:
+        raise RuntimeError("paper fill was not handed off through Accounts HTTP to Kafka")
+    checked(
+        compose(
+            *profile, "exec", "-T", "trade-events-postgres", "psql", "-U", "trade_events",
+            "-d", "trade_events", "-Atc",
+            "SELECT count(*)=1 AND to_regclass('paper_accounts') IS NULL AND to_regclass('research_jobs') IS NULL FROM pgqueue_tasks",
+            capture=True,
+        ).strip() == "t",
+        "Trade Events database did not contain exactly one locally queued task",
+    )
+
+
 def check_scheduled_paper(compose, origin, root, env):
     def sql(query):
         return compose(
@@ -391,7 +422,7 @@ def check_scheduled_paper(compose, origin, root, env):
     )
     compose(
         "--profile", "paper-entry", "--profile", "paper-quote", "--profile", "paper",
-        "up", "-d", "--no-build", "paper-entry", "paper-quote", "paper-dispatch",
+        "up", "-d", "--no-build", "paper-entry", "paper-quote", "orders",
     )
     initial = await_dispatch(lambda rows: bool(rows))
     checked(len(initial) == 1, "did not observe first admission before the second window")
@@ -447,10 +478,15 @@ def main():
     env = os.environ | {"TRADINGBOT_CONTROL_PORT": str(free_port())}
     images = {
         name: env.setdefault(
-            f"TRADINGBOT_{name.upper().replace('-', '_')}_IMAGE",
+            variable,
             f"tradingbot-{name}:local" if args.skip_build else f"tradingbot-{name}:{project}",
         )
-        for name in ("control", "research", "evaluation", "paper-entry")
+        for name, variable in (
+            ("trading-api", "TRADINGBOT_CONTROL_IMAGE"),
+            ("research", "TRADINGBOT_RESEARCH_IMAGE"),
+            ("evaluation", "TRADINGBOT_EVALUATION_IMAGE"),
+            ("paper-entry", "TRADINGBOT_PAPER_ENTRY_IMAGE"),
+        )
     }
     original = images["research"]
     candidate = f"tradingbot-research:{project}-candidate"
@@ -473,7 +509,7 @@ def main():
             "config", "--quiet",
         )
         for binary, arguments in (
-            ("paper", ("dispatch", "--help")),
+            ("paper", ("orders", "--help")),
             ("paper", ("schedule-entry", "--help")),
             ("paper", ("schedule-review", "--help")),
             ("paper-check", ("--help",)),
@@ -497,7 +533,7 @@ def main():
                 "none",
                 "--entrypoint",
                 f"/usr/local/bin/{binary}",
-                images["control"],
+                images["trading-api"],
                 *arguments,
             )
         review_plan_schema = ROOT / "contracts/paper-review-cycle-plan.schema.json"
@@ -509,7 +545,7 @@ def main():
             packaged_review_schema == json.loads(review_plan_schema.read_text(encoding="utf-8")),
             "packaged review cycle schema differs from the published contract",
         )
-        compose("up", "-d", "--wait", "--wait-timeout", "60", "--no-build", "postgres", "control")
+        compose("up", "-d", "--wait", "--wait-timeout", "60", "--no-build", "postgres", "accounts", "trading-api")
         capabilities = request(origin, "/v1/capabilities", 200)
         checked(capabilities["research_job_call_budget"], "missing durable budget capability")
         checked(capabilities["research_call_usage"], "missing durable model usage capability")
@@ -518,9 +554,32 @@ def main():
             "unexpected execution capabilities",
         )
         paper_path, paper_account = check_paper_order(origin)
+        def owner_schema(container, user, database, own_table, foreign_table):
+            return compose(
+                "exec", "-T", container, "psql", "-U", user, "-d", database, "-Atc",
+                f"SELECT to_regclass('{own_table}') IS NOT NULL AND to_regclass('{foreign_table}') IS NULL",
+                capture=True,
+            ).strip() == "t"
+
+        checked(
+            owner_schema("postgres", "research_control", "tradingbot", "research_jobs", "paper_accounts"),
+            "research database contains foreign account tables or lacks its own schema",
+        )
+        checked(
+            owner_schema("accounts-postgres", "accounts", "accounts", "paper_accounts", "research_jobs"),
+            "accounts database contains foreign research tables or lacks its own schema",
+        )
+        compose("stop", "accounts-postgres")
+        try:
+            request(origin, "/readyz", 200)
+            request(origin, paper_path, 503, timeout=8)
+            reject_incompatible_result(origin)
+        finally:
+            compose("up", "-d", "--wait", "--wait-timeout", "60", "--no-build", "accounts")
+        checked(request(origin, paper_path, 200) == paper_account, "accounts state changed after restarting its database")
         paper_health = json.loads(
             compose(
-                "exec", "-T", "control", "paper-check", "--account",
+                "exec", "-T", "trading-api", "paper-check", "--account",
                 paper_account["account_id"], "--pipeline", capture=True,
             )
         )
@@ -529,15 +588,15 @@ def main():
             and paper_health["pipeline"]["fill_relay"]["pending_fills"] == 1,
             "paper pipeline check did not report its pending fill",
         )
+        check_paper_relay(compose, paper_account["account_id"])
         daily_budget = json.loads(
-            compose("exec", "-T", "control", "research-budget", "show", capture=True)
+            compose("exec", "-T", "trading-api", "research-budget", "show", capture=True)
         )
         checked(
             daily_budget["status"] == "unconfigured" and daily_budget["recorded_permits"] == 0,
             "fresh PostgreSQL reported an unexpected daily budget",
         )
-        reject_incompatible_result(origin)
-        control_id = compose("ps", "-q", "control", capture=True).strip()
+        trading_api_id = compose("ps", "-q", "trading-api", capture=True).strip()
         database_id = compose("ps", "-q", "postgres", capture=True).strip()
         initial_job = enqueue(origin, "before")
         compose("up", "-d", "--no-build", "--no-deps", "research")
@@ -567,8 +626,8 @@ def main():
         compose("up", "-d", "--no-build", "--no-deps", "--force-recreate", "research")
         completed_result(origin, queued_again)
         checked(
-            compose("ps", "-q", "control", capture=True).strip() == control_id,
-            "Control was replaced",
+            compose("ps", "-q", "trading-api", capture=True).strip() == trading_api_id,
+            "Trading API was replaced",
         )
         checked(
             compose("ps", "-q", "postgres", capture=True).strip() == database_id,
@@ -611,7 +670,7 @@ def main():
             finally:
                 compose(
                     "--profile", "paper", "--profile", "paper-entry", "--profile", "paper-quote",
-                    "stop", "paper-research", "paper-dispatch", "paper-entry", "paper-quote",
+                    "stop", "paper-research", "orders", "paper-entry", "paper-quote",
                 )
         compose("--profile", "evaluation", "run", "--rm", "--pull", "never", "evaluation")
         evaluation = json.loads(
@@ -669,7 +728,8 @@ def main():
     finally:
         compose(
             "--profile", "evaluation", "--profile", "paper", "--profile", "paper-entry",
-            "--profile", "paper-quote", "--profile", "paper-review-cycles", "down", "--volumes",
+            "--profile", "paper-quote", "--profile", "paper-review-cycles",
+            "--profile", "paper-notifications", "down", "--volumes",
         )
 
 

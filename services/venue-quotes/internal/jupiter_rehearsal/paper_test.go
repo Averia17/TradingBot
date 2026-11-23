@@ -65,9 +65,9 @@ func startPaper(t *testing.T) *paperHarness {
 	buildCtx, cancelBuild := context.WithTimeout(t.Context(), 2*time.Minute)
 	defer cancelBuild()
 	bins := t.TempDir()
-	control := buildPaperBinary(t, buildCtx, bins, "control")
+	tradingAPI := buildPaperBinary(t, buildCtx, bins, "trading-api")
 	paperCLI := buildPaperBinary(t, buildCtx, bins, "paper")
-	address := startPaperControl(t, control, dsn)
+	address := startPaperAPI(t, tradingAPI, dsn)
 	transport := &http.Transport{}
 	t.Cleanup(transport.CloseIdleConnections)
 	return &paperHarness{
@@ -198,7 +198,7 @@ func buildPaperBinary(t *testing.T, ctx context.Context, bins, name string) stri
 		path += ".exe"
 	}
 	cmd := exec.CommandContext(ctx, "go", "build", "-mod=readonly", "-o", path, "./cmd/"+name)
-	cmd.Dir = filepath.Join("..", "..", "..", "control")
+	cmd.Dir = filepath.Join("..", "..", "..", "trading-api")
 	for _, entry := range os.Environ() {
 		key, _, _ := strings.Cut(entry, "=")
 		key = strings.ToUpper(key)
@@ -208,7 +208,7 @@ func buildPaperBinary(t *testing.T, ctx context.Context, bins, name string) stri
 	}
 	cmd.Env = append(cmd.Env, "GOWORK=off")
 	if err := cmd.Run(); err != nil {
-		t.Fatalf("build control workspace command %s failed", name)
+		t.Fatalf("build Trading API workspace command %s failed", name)
 	}
 	return path
 }
@@ -222,16 +222,16 @@ func paperRuntimeEnv(dsn string) []string {
 			env = append(env, entry)
 		}
 	}
-	return append(env, "TRADINGBOT_DATABASE_URL="+dsn)
+	return append(env, "TRADINGBOT_OFFLINE_TEST_DATABASE_URL="+dsn)
 }
 
-func startPaperControl(t *testing.T, binary, dsn string) string {
+func startPaperAPI(t *testing.T, binary, dsn string) string {
 	t.Helper()
 	cmd := exec.CommandContext(t.Context(), binary, "-listen", "127.0.0.1:0")
 	cmd.Env = paperRuntimeEnv(dsn)
 	stderr, err := cmd.StderrPipe()
 	if err != nil || cmd.Start() != nil {
-		t.Fatal("start local paper control API")
+		t.Fatal("start local Trading API")
 	}
 	done := make(chan struct{})
 	ready := make(chan string, 1)
@@ -242,7 +242,7 @@ func startPaperControl(t *testing.T, binary, dsn string) string {
 		for scanner.Scan() {
 			line := scanner.Text()
 			_, address, found := strings.Cut(line, " address=")
-			if !found || !strings.Contains(line, "research control listening") {
+			if !found || !strings.Contains(line, "trading API listening") {
 				continue
 			}
 			host, port, err := net.SplitHostPort(address)
@@ -262,13 +262,13 @@ func startPaperControl(t *testing.T, binary, dsn string) string {
 	select {
 	case address := <-ready:
 		if address == "" {
-			t.Fatal("local paper control stopped during startup")
+			t.Fatal("local Trading API stopped during startup")
 		}
 		return address
 	case <-time.After(30 * time.Second):
-		t.Fatal("local paper control did not report loopback readiness")
+		t.Fatal("local Trading API did not report loopback readiness")
 	case <-t.Context().Done():
-		t.Fatal("rehearsal canceled while starting paper control")
+		t.Fatal("rehearsal canceled while starting the Trading API")
 	}
 	return ""
 }
@@ -371,8 +371,17 @@ func (p *paperHarness) reconcile(path, digest string, recorded bool) paperOrder 
 		Recorded bool       `json:"recorded"`
 		Order    paperOrder `json:"order"`
 	}
-	if err != nil || json.Unmarshal(raw, &receipt) != nil || receipt.SHA256 != digest || receipt.Recorded != recorded {
-		p.t.Fatal("paper reconcile did not return the expected verified receipt")
+	if exitErr, ok := err.(*exec.ExitError); ok {
+		p.t.Fatalf("paper reconcile exited unsuccessfully: %v: %s", err, exitErr.Stderr)
+	}
+	if err != nil {
+		p.t.Fatalf("run paper reconcile: %v", err)
+	}
+	if err := json.Unmarshal(raw, &receipt); err != nil {
+		p.t.Fatalf("decode paper reconciliation receipt: %v", err)
+	}
+	if receipt.SHA256 != digest || receipt.Recorded != recorded {
+		p.t.Fatalf("paper reconcile returned an unexpected digest or recorded flag: recorded=%t, want=%t", receipt.Recorded, recorded)
 	}
 	return receipt.Order
 }
@@ -407,14 +416,14 @@ func (p *paperHarness) request(method, path string, expected int, payload, targe
 	}
 	response, err := p.httpClient.Do(request)
 	if err != nil {
-		p.t.Fatal("local paper control request failed")
+		p.t.Fatal("local Trading API request failed")
 	}
 	defer response.Body.Close()
 	if response.StatusCode != expected {
 		p.t.Fatalf("paper control %s returned HTTP %d, expected %d", method, response.StatusCode, expected)
 	}
 	if err := json.NewDecoder(io.LimitReader(response.Body, 32<<10)).Decode(target); err != nil {
-		p.t.Fatal("decode local paper control response")
+		p.t.Fatal("decode local Trading API response")
 	}
 }
 

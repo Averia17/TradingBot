@@ -1,0 +1,105 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tradingbot.local/contracts/paper-diagnostics-http.schema.json",
+  "title": "Internal owner diagnostics for paper-check",
+  "$defs": {
+    "ID": {"$ref": "paper-check.schema.json#/$defs/id"},
+    "Instant": {"$ref": "paper-check.schema.json#/$defs/stamp"},
+    "Issue": {"$ref": "paper-check.schema.json#/$defs/issue"},
+    "Digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "DurationNS": {"type": "integer", "minimum": 1, "maximum": 9223372036854775807},
+    "ResearchRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["account_id", "pipeline"],
+      "properties": {
+        "account_id": {"$ref": "#/$defs/ID"},
+        "job_id": {"$ref": "#/$defs/ID"},
+        "pipeline": {"type": "boolean"}
+      }
+    },
+    "ResearchRow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["job", "request_sha256", "binding_valid"],
+      "properties": {
+        "job": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["job_id", "stage", "research_status", "attempt_count", "job_created_at", "application_receipt"],
+          "properties": {
+            "job_id": {"$ref": "#/$defs/ID"},
+            "stage": {"const": ""},
+            "research_status": {"$ref": "paper-check.schema.json#/$defs/researchStatus"},
+            "attempt_count": {"type": "integer", "minimum": 0},
+            "job_created_at": {"$ref": "#/$defs/Instant"},
+            "application_receipt": {"const": false},
+            "lease_expires_at": {"$ref": "#/$defs/Instant"},
+            "research_completed_at": {"$ref": "#/$defs/Instant"},
+            "finished_at": {"$ref": "#/$defs/Instant"},
+            "finished_status": {"enum": ["hold", "applied", "expired", "snapshot_stale", "research_failed", "research_expired"]}
+          }
+        },
+        "completed_attempt": {"type": "integer", "minimum": 1},
+        "request_sha256": {"$ref": "#/$defs/Digest"},
+        "binding_valid": {"type": "boolean"}
+      }
+    },
+    "ResearchResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["checked_at", "issues", "pipeline_rows", "truncated"],
+      "properties": {
+        "checked_at": {"$ref": "#/$defs/Instant"},
+        "budget": {"$ref": "paper-check.schema.json#/$defs/researchBudget"},
+        "issues": {"type": "array", "items": {"$ref": "#/$defs/Issue"}},
+        "pipeline_rows": {"type": "array", "maxItems": 100, "items": {"$ref": "#/$defs/ResearchRow"}},
+        "truncated": {"type": "boolean"}
+      }
+    },
+    "AccountRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["account_id", "unknown_after_ns", "stall_after_ns", "pipeline"],
+      "properties": {
+        "account_id": {"$ref": "#/$defs/ID"},
+        "unknown_after_ns": {"$ref": "#/$defs/DurationNS"},
+        "stall_after_ns": {"$ref": "#/$defs/DurationNS"},
+        "pipeline": {"type": "boolean"},
+        "job_ids": {"type": "array", "uniqueItems": true, "maxItems": 100, "items": {"$ref": "#/$defs/ID"}},
+        "jobs_cutoff": {"$ref": "#/$defs/Instant"}
+      },
+      "if": {"properties": {"pipeline": {"const": true}}},
+      "then": {"required": ["jobs_cutoff"]},
+      "else": {"not": {"anyOf": [{"required": ["job_ids"]}, {"required": ["jobs_cutoff"]}]}}
+    },
+    "Application": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["job_id", "request_sha256", "created_at", "has_receipt", "valid"],
+      "properties": {
+        "job_id": {"$ref": "#/$defs/ID"},
+        "request_sha256": {"$ref": "#/$defs/Digest"},
+        "created_at": {"$ref": "#/$defs/Instant"},
+        "has_receipt": {"type": "boolean"},
+        "order_id": {"$ref": "#/$defs/ID"},
+        "order_status": {"enum": ["reserved", "unknown", "partially_filled", "cancelled", "filled"]},
+        "valid": {"type": "boolean"}
+      }
+    },
+    "AccountResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["account_id", "checked_at", "account_version", "projection_version", "issues", "applications", "fill_relay"],
+      "properties": {
+        "account_id": {"$ref": "#/$defs/ID"},
+        "checked_at": {"$ref": "#/$defs/Instant"},
+        "account_version": {"type": "integer", "minimum": 0},
+        "projection_version": {"type": "integer", "minimum": 0},
+        "issues": {"type": "array", "items": {"$ref": "#/$defs/Issue"}},
+        "applications": {"type": "array", "maxItems": 100, "items": {"$ref": "#/$defs/Application"}},
+        "fill_relay": {"$ref": "paper-check.schema.json#/$defs/fillRelay"}
+      }
+    }
+  }
+}

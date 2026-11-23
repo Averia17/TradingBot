@@ -3,12 +3,12 @@ package outbox
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
 
 	"github.com/goware/pgqueue"
-	"github.com/jackc/pgx/v5"
 	"github.com/twmb/franz-go/pkg/kgo"
 	"golang.org/x/sync/errgroup"
 
@@ -38,13 +38,21 @@ func runHandoff(ctx context.Context, worker *pgqueue.Worker, name string, queueO
 	group.Go(func() error {
 		for runCtx.Err() == nil {
 			moved, err := queueOne(runCtx)
+			if runCtx.Err() != nil {
+				return nil
+			}
+			delay := time.Second
 			if err != nil {
-				return err
+				if !errors.Is(err, errPaperSourceUnavailable) {
+					return err
+				}
+				slog.Warn("account outbox handoff interrupted", "stream", name, "error", err)
+				delay = 5 * time.Second
 			}
 			if !moved {
 				select {
 				case <-runCtx.Done():
-				case <-time.After(time.Second):
+				case <-time.After(delay):
 				}
 			}
 		}
@@ -53,32 +61,27 @@ func runHandoff(ctx context.Context, worker *pgqueue.Worker, name string, queueO
 	return group.Wait()
 }
 
-func (o *Outbox) handoff(ctx context.Context, name string, move func(context.Context, pgx.Tx) (bool, error)) (bool, error) {
+// handoff commits to this service's database before the caller acknowledges Accounts over HTTP.
+func (o *Outbox) handoff(ctx context.Context, queueName, key string, payload []byte) error {
 	tx, err := o.db.Conn.Begin(ctx)
 	if err != nil {
-		return false, fmt.Errorf("begin %s handoff: %w", name, err)
+		return fmt.Errorf("begin outbox handoff: %w", err)
 	}
-	committed := false
 	defer func() {
-		if committed {
-			return
-		}
 		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Second)
 		defer cancel()
 		_ = tx.Rollback(cleanup)
 	}()
-	if _, err := tx.Exec(ctx, `SET LOCAL synchronous_commit='on'`); err != nil {
-		return false, fmt.Errorf("configure durable %s handoff: %w", name, err)
+	if _, err := tx.Exec(ctx, "SET LOCAL synchronous_commit='on'"); err != nil {
+		return fmt.Errorf("configure durable outbox handoff: %w", err)
 	}
-	moved, err := move(ctx, tx)
-	if err != nil || !moved {
-		return false, err
+	if _, err := enqueueExactTask(ctx, tx, queueName, key, payload); err != nil {
+		return err
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return false, fmt.Errorf("commit %s handoff: %w", name, err)
+		return fmt.Errorf("commit outbox handoff: %w", err)
 	}
-	committed = true
-	return true, nil
+	return nil
 }
 
 type relay struct {

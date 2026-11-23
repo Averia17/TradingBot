@@ -40,7 +40,7 @@ def _registry():
 
 
 def review_registry_sha256():
-    """Return the deterministic synthetic registry pin before Control starts."""
+    """Return the deterministic synthetic registry pin before Trading API starts."""
     return hashlib.sha256(_encode(_registry())).hexdigest()
 
 
@@ -213,7 +213,7 @@ def _apply_opening(compose, root, account_id, job_id, policy, registry, tape):
     quotes.mkdir(mode=0o777)
     quotes.chmod(0o777)
 
-    def control(binary, *arguments, read_only):
+    def run_trading_api_command(binary, *arguments, read_only):
         output = compose(
             "run",
             "--rm",
@@ -227,13 +227,13 @@ def _apply_opening(compose, root, account_id, job_id, policy, registry, tape):
             f"{root.as_posix()}:/archive:ro",
             "--volume",
             f"{quotes.as_posix()}:/quotes" + (":ro" if read_only else ""),
-            "control",
+            "trading-api",
             *arguments,
             capture=True,
         )
         return json.loads(output)
 
-    quote = control(
+    quote = run_trading_api_command(
         "paper-quote-pin",
         "--account",
         account_id,
@@ -248,9 +248,9 @@ def _apply_opening(compose, root, account_id, job_id, policy, registry, tape):
     checked(
         quote["job_id"] == job_id and quote["status"] == "pinned", "firm opening quote not pinned"
     )
-    applied = control(
+    applied = run_trading_api_command(
         "paper",
-        "dispatch",
+        "orders",
         "--account",
         account_id,
         "--policy",

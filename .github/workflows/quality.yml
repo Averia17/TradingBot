@@ -76,7 +76,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
-      GO_MODULES: services/control services/trade-events services/notifications services/portfolio-analytics services/venue-quotes
+      GO_MODULES: services/trading-api services/trade-events services/notifications services/portfolio-analytics services/venue-quotes
     services:
       postgres:
         image: postgres:17-alpine@sha256:d3244e8ce3f165ee3c93d9c4a4b1d0fe48b3a89e2287b717fdcbbde92d405065
@@ -99,9 +99,9 @@ jobs:
       - name: Install Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version-file: services/control/go.mod
+          go-version-file: services/trading-api/go.mod
           cache-dependency-path: |
-            services/control/go.sum
+            services/trading-api/go.sum
             services/trade-events/go.sum
             services/notifications/go.sum
             services/portfolio-analytics/go.sum
@@ -174,7 +174,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     env:
-      TRADINGBOT_CONTROL_IMAGE: tradingbot-control:quality
+      TRADINGBOT_CONTROL_IMAGE: tradingbot-trading-api:quality
       TRADINGBOT_PAPER_ENTRY_IMAGE: tradingbot-paper-entry:quality
     steps:
       - name: Check out our code

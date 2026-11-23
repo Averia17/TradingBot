@@ -377,5 +377,5 @@ def test_claim_redirect_is_not_followed_or_retried(monkeypatch):
     ],
 )
 def test_control_url_rejects_credentials_and_non_origins(url):
-    with pytest.raises(ValueError, match="Control URL"):
+    with pytest.raises(ValueError, match="Trading API URL"):
         worker.run_worker(url, WORKER_ID, analyze=lambda *a: RESULT)

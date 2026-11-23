@@ -1,4 +1,4 @@
-"""Run one leased research attempt at a time through the Control API."""
+"""Run one leased research attempt at a time through Trading API."""
 
 import json
 import logging
@@ -48,7 +48,7 @@ class ControlError(RuntimeError):
         self.status = status
         self.retryable = retryable
         super().__init__(
-            f"Control returned HTTP {status}" if status else "Control response unavailable"
+            f"Trading API returned HTTP {status}" if status else "Trading API response unavailable"
         )
 
 
@@ -105,7 +105,7 @@ class ControlClient:
                 raise ValueError
         except ValueError:
             raise ValueError(
-                "Control URL must be an HTTP or HTTPS origin without credentials"
+                "Trading API URL must be an HTTP or HTTPS origin without credentials"
             ) from None
         self._connection = HTTPSConnection if parsed.scheme == "https" else HTTPConnection
         self._host = parsed.hostname
@@ -116,7 +116,7 @@ class ControlClient:
         self, endpoint: str, body: bytes, expected: tuple[int, ...], timeout: float | None = None
     ) -> dict | None:
         if len(body) > _MAX_REQUEST_BYTES:
-            raise ValueError("Control request exceeds body limit")
+            raise ValueError("Trading API request exceeds body limit")
         return self._request("POST", _JOBS_PATH + endpoint, body, expected, timeout)
 
     def get(self, path: str) -> dict | None:
@@ -345,10 +345,10 @@ class _Worker:
                         and isinstance(results, list) and result_version in results
                     ):
                         if self.provider_config is not None:
-                            raise RuntimeError("Control does not advertise prepared-provider research")
-                        raise RuntimeError("Control does not advertise identity-bound research")
+                            raise RuntimeError("Trading API does not advertise prepared-provider research")
+                        raise RuntimeError("Trading API does not advertise identity-bound research")
                 return True
-            message = "Control does not advertise durable research call usage"
+            message = "Trading API does not advertise durable research call usage"
             _LOG.error(message)
             raise RuntimeError(message)
         return False
@@ -524,7 +524,7 @@ class _Worker:
             if self.stop.is_set():
                 return
             try:
-                # Control can replay a committed response after the original lease expires.
+                # Trading API can replay a committed response after the original lease expires.
                 response = self.control.post(
                     lease.job_id + "/complete",
                     body,
@@ -589,7 +589,7 @@ def run_worker(
     identity_registry: ArchiveReference | dict | None = None,
     provider_config: dict | None = None,
 ) -> None:
-    """Poll Control with offline models by default, or explicitly use prepared-provider jobs."""
+    """Poll Trading API with offline models by default, or opt in to prepared-provider jobs."""
     provider = None
     profile = "offline"
     if provider_config is not None:

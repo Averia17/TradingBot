@@ -4,14 +4,14 @@
 [ADR-001](../decisions/001-go-services-python-adapters.md) принят.
 Существующие Python CLI и upstream updater продолжают работать.
 
-## [x] S1 — Go control foundation и общий wire contract
+## [x] S1 — Trading API foundation и общий wire contract
 
 **Статус на 14.11.2026.** Python и Go используют общие serialization schemas
-и fixtures. Локальный Go control проверен реальным HTTP-запросом на свежем
+и fixtures. Локальный Trading API проверен реальным HTTP-запросом на свежем
 выводе Python demo. Health подтверждает liveness, capabilities сообщают
 о research validation. Денежные строки проходят без округления.
 
-**Scope:** Go module `services/control/`, `cmd/control`, строгая проверка research batch,
+**Scope:** Go module `services/trading-api/`, `cmd/trading-api`, строгая проверка research batch,
 health/capabilities и общие Python/Go fixtures. Сохраняем Python CLI и его
 входные форматы. На wire передаём decimal strings и явные поля с defaults.
 
@@ -45,7 +45,7 @@ unknown fields/version/mode, invalid precision/ranges и expiry отклоняю
   15 минут и срока свежести снимка. Heartbeat не продлевает чужую, истёкшую или
   заменённую попытку. После трёх истёкших попыток job получает `failed`.
   Устаревший снимок при обходе очереди получает `expired`.
-- [x] **S2c · Completion.** Control проверяет batch по сохранённым portfolio,
+- [x] **S2c · Completion.** Trading API проверяет batch по сохранённым portfolio,
   universe и snapshot hash, пересчитывает хеши evidence по тексту отчётов.
   Результат записывается, пока действуют и попытка, и batch. Result, статус
   `completed` и outbox сохраняются одной транзакцией. Совпадающий повтор той же
@@ -75,7 +75,7 @@ job consume/heartbeat/result protocol, call cap, usage/provenance и cancellatio
 - [x] **S3b · TradingAgents graph.** `tradingbot worker` выполняет настоящий граф
   через offline scripted models и публикует `0.2` с usage и provenance.
   Ошибка модели, схемы или лимита останавливает попытку без результата. Worker
-  журналирует причину и идентификатор попытки, Control учитывает истечение lease.
+  журналирует причину и идентификатор попытки, Trading API учитывает истечение lease.
   [Сквозная проверка](../verification.md#s3b--python-tradingagents-worker).
 - [x] **S3c · Retry budget.** Каждому вызову предшествует durable permit в
   PostgreSQL. При потере ACK или worker слот остаётся списанным, а следующая
@@ -111,7 +111,7 @@ lease expiry, duplicate and cancellation fixtures; existing M1 suite зелён�
    Продлевать lease во время обработки, прекращать попытку при потере lease
    и поддержать остановку процесса. Проверить, что batch связан с полученным
    снимком и что worker прекращает публикацию при известной потере lease.
-3. **Сквозная проверка.** Запустить Go control и Go fixture worker отдельными
+3. **Сквозная проверка.** Запустить Trading API и Go fixture worker отдельными
    процессами с тестовой PostgreSQL. Проверить `create → claim → heartbeat →
    complete → read`, чтение результата после перезапуска Go, повтор completion
    после потери ответа и отклонение результата просроченной попытки. Для
@@ -124,8 +124,8 @@ immutable images, Compose application profile, release manifest и contract CI.
 Никаких signer credentials в application profile.
 
 **Acceptance:** candidate TA worker проходит contract tests с текущим Go;
-заменяется только research artifact, control/evaluation версии не меняются;
-drain/rollback сохраняет jobs/results/ledger. Evaluation использует Nautilus
+заменяется только research artifact с сохранением версий Trading API и
+evaluation. Drain/rollback сохраняет jobs/results/ledger. Evaluation использует Nautilus
 в своём окружении. Readiness сообщает фактические version/SHA/protocol.
 
 **Verification:** Compose smoke, artifact digest/provenance, restart/rollback
@@ -159,7 +159,7 @@ quote TTL. Ticker из research DTO обозначает underlying. Evaluation 
 **Verification:** ledger invariants/precision, concurrent account decisions,
 restart/reconcile, cost accounting и chronological PIT replay tests.
 
-Реализованы автономно проверяемые части S5. Go Control ведёт отдельные виртуальные
+Реализованы автономно проверяемые части S5. Go Trading API ведёт отдельные виртуальные
 счета с точными суммами, версиями, резервами и журналом. `paper-replay` проверяет
 хеш тестовой котировки и задаёт детерминированный исход. `unknown` держит резерв,
 `cancelled` освобождает остаток, частичное и полное исполнения меняют cash и
@@ -175,7 +175,7 @@ restart/reconcile, cost accounting и chronological PIT replay tests.
 сокращают доступный остаток. Отмена восстанавливает его.
 `schedule-review` проверяет снимок, версию счёта и хеш архива. Один триггер
 создаёт одно durable задание. Повтор использует первый сохранённый снимок.
-Новые задания планировщика передают контекст в `paper dispatch`
+Новые задания планировщика передают контекст в `paper orders`
 через ту же транзакцию записи. Диспетчер ждёт результат и проверенную
 котировку, фиксирует её с резервом и подтверждает применение после записи
 квитанции. Отдельный paper-профиль Compose конфигурирует этот поток.

@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Private Trading API jobs HTTP v1",
+  "$defs": {
+    "UUID": {"type": "string", "pattern": "^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$"},
+    "Digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "Bytes": {"type": "string", "minLength": 4, "contentEncoding": "base64", "contentMediaType": "application/json"},
+    "CreateBytes": {"$ref": "#/$defs/Bytes", "maxLength": 349528},
+    "Clock": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["now"],
+      "properties": {"now": {"type": "string", "format": "date-time"}}
+    },
+    "CreatePaperJob": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["job_id", "request", "snapshot_id", "snapshot", "account_id", "application"],
+      "properties": {
+        "job_id": {"$ref": "#/$defs/UUID"},
+        "request": {"$ref": "#/$defs/CreateBytes", "description": "Decoded bytes must satisfy the research job contract."},
+        "snapshot_id": {"$ref": "#/$defs/UUID"},
+        "snapshot": {"$ref": "#/$defs/CreateBytes", "description": "Decoded bytes must satisfy the portfolio contract."},
+        "account_id": {"$ref": "#/$defs/UUID"},
+        "application": {"$ref": "#/$defs/CreateBytes", "description": "Decoded bytes must satisfy the paper application request contract."},
+        "registry_sha256": {"$ref": "#/$defs/Digest"},
+        "replay_only": {"type": "boolean"},
+        "admit_through": {"type": "string", "format": "date-time"}
+      }
+    },
+    "Job": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["job_id", "request", "status", "created_at"],
+      "properties": {
+        "job_id": {"$ref": "#/$defs/UUID"},
+        "request": {"$ref": "#/$defs/Bytes"},
+        "status": {"enum": ["queued", "leased", "completed", "failed", "expired"]},
+        "created_at": {"type": "string", "format": "date-time"}
+      }
+    },
+    "Result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["job_id", "attempt", "completed_at", "payload"],
+      "properties": {
+        "job_id": {"$ref": "#/$defs/UUID"},
+        "attempt": {"type": "integer", "minimum": 1},
+        "completed_at": {"type": "string", "format": "date-time"},
+        "payload": {"$ref": "#/$defs/Bytes"}
+      }
+    },
+    "Dispatch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["job_id", "account_id", "request", "request_sha256"],
+      "properties": {
+        "job_id": {"$ref": "#/$defs/UUID"},
+        "account_id": {"$ref": "#/$defs/UUID"},
+        "request": {"$ref": "#/$defs/Bytes"},
+        "request_sha256": {"$ref": "#/$defs/Digest"}
+      }
+    },
+    "DispatchPage": {
+      "type": "array",
+      "maxItems": 32,
+      "items": {"$ref": "#/$defs/Dispatch"}
+    },
+    "FinishDispatch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["account_id", "request_sha256", "status"],
+      "properties": {
+        "account_id": {"$ref": "#/$defs/UUID"},
+        "request_sha256": {"$ref": "#/$defs/Digest"},
+        "status": {"enum": ["hold", "applied", "expired", "snapshot_stale", "research_failed", "research_expired"]}
+      }
+    },
+    "CompletedPaperResearch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["job", "result"],
+      "properties": {
+        "job": {"$ref": "#/$defs/Job"},
+        "result": {"$ref": "#/$defs/Result"},
+        "dispatch": {"$ref": "#/$defs/Dispatch"}
+      }
+    }
+  }
+}

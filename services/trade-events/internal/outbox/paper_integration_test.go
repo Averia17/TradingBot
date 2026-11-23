@@ -3,14 +3,16 @@ package outbox
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/goware/pgqueue"
-	"github.com/jackc/pgx/v5"
 	"github.com/twmb/franz-go/pkg/kfake"
 	"github.com/twmb/franz-go/pkg/kgo"
 
@@ -19,20 +21,15 @@ import (
 
 func TestPaperLedgerHandoffAndKafkaAcknowledgement(t *testing.T) {
 	ctx, dsn, db := testPostgres(t)
-	for _, migration := range []string{"001_accounts.sql", "002_orders.sql", "003_partial_fills.sql", "004_fill_outbox.sql"} {
-		sql, err := os.ReadFile("../../../control/internal/ledger/" + migration)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := db.Exec(ctx, string(sql), pgx.QueryExecModeSimpleProtocol); err != nil {
-			t.Fatal(err)
-		}
-	}
-	data, err := os.ReadFile("../../../../contracts/valid-paper-fill-event.json")
+	data, err := os.ReadFile("../../../../contracts/valid-paper-outbox-fill.json")
 	if err != nil {
 		t.Fatal(err)
 	}
-	event, err := fill_event.DecodePaper(data)
+	var entry paperOutboxEntry
+	if err := json.Unmarshal(data, &entry); err != nil {
+		t.Fatal(err)
+	}
+	event, err := fill_event.DecodePaper(entry.Payload)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -42,75 +39,46 @@ func TestPaperLedgerHandoffAndKafkaAcknowledgement(t *testing.T) {
 	}
 	defer box.Close()
 
-	tx, err := db.Begin(ctx)
-	if err != nil {
-		t.Fatal(err)
+	var mu sync.Mutex
+	var available, ackBroken, acknowledged bool
+	source := testPaperSource(t, func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		switch r.Method + " " + r.URL.Path {
+		case "GET /internal/v1/paper/outbox/fills/next":
+			if !available || acknowledged {
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(entry)
+		case "POST /internal/v1/paper/outbox/fills/" + event.AccountID + "/" + event.FillEventID + "/ack":
+			if ackBroken {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
+			acknowledged = true
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+	if queued, err := box.queueOnePaper(ctx, source); err != nil || queued {
+		t.Fatalf("empty outbox queued: queued=%v err=%v", queued, err)
 	}
-	defer tx.Rollback(ctx)
-	if _, err := tx.Exec(ctx, `INSERT INTO paper_accounts (account_id,creation_hash,cash_usd,version)
-		VALUES ($1,decode(repeat('00',32),'hex'),19,3)`, event.AccountID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := tx.Exec(ctx, `INSERT INTO paper_orders (account_id,order_id,decision_id,quote_id,request,request_hash,status,account_version,created_at)
-		VALUES ($1,$2,$3,$4,'{}',decode(repeat('00',32),'hex'),'filled',3,$5)`, event.AccountID, event.OrderID, event.DecisionID, event.QuoteID, event.FilledAt); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := tx.Exec(ctx, `INSERT INTO paper_events (account_id,event_id,account_version,kind,request_hash,payload,recorded_at)
-		VALUES ($1,$2,3,'paper_order.filled',decode(repeat('00',32),'hex'),'{}',$3)`, event.AccountID, event.FillEventID, event.RecordedAt); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := tx.Exec(ctx, `INSERT INTO paper_fills (account_id,order_id,event_id,gross_usd,fee_usd,observed_at,quantity_raw)
-		VALUES ($1,$2,$3,1,0.00000001,$4,3)`, event.AccountID, event.OrderID, event.FillEventID, event.FilledAt); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := tx.Exec(ctx, `INSERT INTO paper_fill_outbox (account_id,event_id,payload,created_at) VALUES ($1,$2,$3,$4)`,
-		event.AccountID, event.FillEventID, data, event.RecordedAt); err != nil {
-		t.Fatal(err)
-	}
-	if queued, err := box.queueOnePaper(ctx); err != nil || queued {
-		t.Fatalf("uncommitted fill was moved to the relay: queued=%v err=%v", queued, err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		t.Fatal(err)
-	}
-
-	if _, err := db.Exec(ctx, `ALTER TABLE paper_fill_outbox ADD CONSTRAINT test_reject_handoff CHECK (queued_at IS NULL)`); err != nil {
-		t.Fatal(err)
-	}
-	if queued, err := box.queueOnePaper(ctx); err == nil || queued {
-		t.Fatalf("failed handoff was acknowledged: queued=%v err=%v", queued, err)
+	mu.Lock()
+	available, ackBroken = true, true
+	mu.Unlock()
+	if queued, err := box.queueOnePaper(ctx, source); !errors.Is(err, errPaperSourceUnavailable) || queued {
+		t.Fatalf("lost acknowledgement was reported as completed: queued=%v err=%v", queued, err)
 	}
 	var tasks int
-	if err := db.QueryRow(ctx, `SELECT count(*) FROM pgqueue_tasks`).Scan(&tasks); err != nil || tasks != 0 {
-		t.Fatalf("handoff failure left a queue task: tasks=%d err=%v", tasks, err)
-	}
-	if _, err := db.Exec(ctx, `ALTER TABLE paper_fill_outbox DROP CONSTRAINT test_reject_handoff`); err != nil {
-		t.Fatal(err)
-	}
-	var handoffs sync.WaitGroup
-	results := make(chan bool, 4)
-	for range 4 {
-		handoffs.Go(func() {
-			queued, err := box.queueOnePaper(ctx)
-			if err != nil {
-				t.Error(err)
-			}
-			results <- queued
-		})
-	}
-	handoffs.Wait()
-	close(results)
-	moved := 0
-	for queued := range results {
-		if queued {
-			moved++
-		}
-	}
-	if moved != 1 {
-		t.Fatalf("concurrent handoff created %d tasks", moved)
+	if err := db.QueryRow(ctx, `SELECT count(*) FROM pgqueue_tasks`).Scan(&tasks); err != nil || tasks != 1 {
+		t.Fatalf("HTTP outage lost the durable queue task: tasks=%d err=%v", tasks, err)
 	}
 
-	// A fresh process with no in-memory state sends the durable pgqueue entry.
+	// A fresh relay must publish the durable task even while the account endpoint is down.
 	reopened, err := Open(ctx, dsn)
 	if err != nil {
 		t.Fatal(err)
@@ -133,7 +101,7 @@ func TestPaperLedgerHandoffAndKafkaAcknowledgement(t *testing.T) {
 	}))
 	relayCtx, cancel := context.WithCancel(ctx)
 	done := make(chan error, 1)
-	go func() { done <- reopened.RelayPaper(relayCtx, producer) }()
+	go func() { done <- reopened.RelayPaper(relayCtx, producer, source) }()
 	defer func() {
 		cancel()
 		if err := <-done; err != nil && !errors.Is(err, context.Canceled) {
@@ -146,7 +114,7 @@ func TestPaperLedgerHandoffAndKafkaAcknowledgement(t *testing.T) {
 	}
 	records := fetches.Records()
 	if len(records) != 1 || string(records[0].Key) != event.ID {
-		t.Fatalf("Kafka did not receive the one paper fill")
+		t.Fatal("Kafka did not receive the one paper fill")
 	}
 	if !bytes.Equal(records[0].Value, queuedPayload) {
 		t.Fatal("published paper fill differs from the queued bytes")
@@ -155,21 +123,57 @@ func TestPaperLedgerHandoffAndKafkaAcknowledgement(t *testing.T) {
 	if err != nil || decoded != event {
 		t.Fatalf("published fill differs from ledger fact: %+v, %v", decoded, err)
 	}
+	mu.Lock()
+	ackBroken = false
+	mu.Unlock()
 	for {
 		task, err := reopened.queue.Get(ctx, taskID)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if task.Status == pgqueue.TaskStatusCompleted {
+		mu.Lock()
+		acked := acknowledged
+		mu.Unlock()
+		if acked && task.Status == pgqueue.TaskStatusCompleted {
 			break
 		}
 		select {
 		case <-ctx.Done():
-			t.Fatal("paper task was not completed after Kafka ACK")
+			t.Fatal("paper task was not acknowledged after recovery and Kafka ACK")
 		case <-time.After(20 * time.Millisecond):
 		}
 	}
 	if err := db.QueryRow(ctx, `SELECT count(*) FROM pgqueue_tasks`).Scan(&tasks); err != nil || tasks != 1 {
 		t.Fatalf("reopened relay changed task count: tasks=%d err=%v", tasks, err)
+	}
+}
+
+func testPaperSource(t *testing.T, handler http.HandlerFunc) *PaperSource {
+	t.Helper()
+	const token = "test-account-outbox-token"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer "+token {
+			t.Error("paper source did not authenticate its request")
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		handler.ServeHTTP(w, r)
+	}))
+	t.Cleanup(server.Close)
+	source, err := NewPaperSource(server.URL, token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(source.Close)
+	return source
+}
+
+func TestPaperSourceRejectsRedirects(t *testing.T) {
+	source := testPaperSource(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Location", "http://invalid.example/paper")
+		w.WriteHeader(http.StatusTemporaryRedirect)
+	})
+	if _, err := source.next(t.Context(), "fills"); err == nil || errors.Is(err, errPaperSourceUnavailable) {
+		t.Fatalf("non-successful redirect: %v", err)
 	}
 }

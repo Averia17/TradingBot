@@ -25,15 +25,17 @@ benchmark после комиссий, spread/slippage, chain fees, LLM, дан�
 Сейчас работает Python research M1: TradingAgents adapter, typed portfolio
 arbitration, JSON contracts, call budget, offline demo и native Nautilus probe.
 `DecisionBatch` версии `0.1` допускает только `execution_mode="research"`.
-Go control проверяет research batch и с PostgreSQL ведёт задания, аренды,
+Trading API проверяет research batch и с PostgreSQL ведёт задания, аренды,
 общий бюджет вызовов и результаты. Python worker исполняет pinned граф
 TradingAgents с офлайн-моделями и архивными снимками. Go ведёт виртуальный
 счёт, точные резервы, полные и частичные исполнения. `paper` связывает
 результат research и виртуальное исполнение по тестовой котировке с policy
 владельца. Nautilus проверяет исторические сценарии в отдельном окружении.
 Go планировщик пересмотра создаёт durable research jobs из состояния
-paper-позиции и хешированных архивных событий. События исполнений paper ledger
-через отдельный режим relay попадают в pgqueue и Kafka. Отдельный Compose-проект
+paper-позиции и хешированных архивных событий. Trading API, Accounts и Trade
+Events владеют отдельными PostgreSQL. Процессы orders и relay получают чужие
+данные по HTTP. События исполнений через outbox Accounts попадают в pgqueue
+Trade Events и Kafka. [ADR-005](docs/decisions/005-service-databases.md). Отдельный Compose-проект
 содержит тестовый HTTP-вход и Telegram consumer.
 Подписание, live execution и развёртывание live-контура остаются в будущих
 срезах.
@@ -45,7 +47,7 @@ balances, readiness зависимостей или результат плат�
 
 ## Языки и границы сервисов
 
-- **Go — основной язык нового собственного backend:** control API, scheduler,
+- **Go — основной язык нового собственного backend:** Trading API, scheduler,
   jobs/leases, ledger, reservations, deterministic risk, quotes/routing,
   execution, reconciliation и signer policy/verifier.
 - **Python — адаптеры к Python ecosystem:** TradingAgents/LangChain/provider
@@ -56,7 +58,7 @@ balances, readiness зависимостей или результат плат�
   совместимость с поддерживаемой библиотекой или дублирует её реализацию.
 - Go и Python взаимодействуют через версионированные контракты. Go runtime
   не импортирует Python и не зависит от общего изменяемого `.venv`.
-- Сначала Go control + Python research; evaluation получает собственный runtime
+- Сначала Trading API + Python research; evaluation получает собственный runtime
   при упаковке Nautilus. Executor сначала модуль Go, самостоятельный процесс
   при выделении его полномочий. Signer — отдельный host/identity на live этапе.
 - Не выделять каждого аналитика TradingAgents в микросервис. Один monorepo,
@@ -141,7 +143,8 @@ drain либо истекают по lease; повторный attempt прох�
 ## Структура и разработка
 
 - `services/research/` содержит Python-пакет `tradingbot`, тесты, locks и updater.
-- `services/control/` владеет Go control API и хранением research jobs.
+- `services/trading-api/` содержит Trading API, очередь research jobs и учёт
+  виртуального счёта в пакете `internal/accounts`.
 - `services/trade-events/` владеет тестовым exchange endpoint и pgqueue outbox.
 - `services/notifications/` владеет Kafka consumer и отправкой в Telegram.
 
@@ -180,7 +183,7 @@ Retry только для операций с доказанной idempotency; 
 snapshot, decision, quote и transaction IDs; метрики отражают latency/cost/failure.
 
 При изменении contract обновлять schema, producer/consumer fixtures и docs.
-Экспорт Python обновляет `contracts/`. Go control проверяет вход по встроенным
+Экспорт Python обновляет `contracts/`. Trading API проверяет вход по встроенным
 JSON-схемам. Их нужно обновлять вместе с опубликованным контрактом.
 Breaking change — новая версия и migration plan. Архитектурное решение — ADR.
 Обновлять current-state/backlog после реализации, сохраняя исторические evidence.
@@ -197,14 +200,14 @@ uv --directory services/research build --no-sources
 uv --directory services/research run --no-project --python 3.12 python scripts/upstream.py verify
 ```
 
-Go-проверки из корня на примере `services/control`.
+Go-проверки из корня на примере `services/trading-api`.
 
 ```powershell
-gofmt -l services/control services/trade-events services/notifications
-go -C services/control mod verify
-go -C services/control vet -mod=readonly ./...
-go -C services/control test -mod=readonly ./...
-go -C services/control build -mod=readonly ./...
+gofmt -l services/trading-api services/trade-events services/notifications
+go -C services/trading-api mod verify
+go -C services/trading-api vet -mod=readonly ./...
+go -C services/trading-api test -mod=readonly ./...
+go -C services/trading-api build -mod=readonly ./...
 ```
 
 Дополнительные Go-модули проверять теми же командами, задав их каталог в `-C`.

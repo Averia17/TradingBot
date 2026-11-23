@@ -8,7 +8,7 @@
 |---|---|
 | [`services/research`](services/research/) | Python CLI, адаптеры TradingAgents и Nautilus, тесты и upstream locks |
 | [`services/evaluation`](services/evaluation/) | Исторические прогоны Nautilus, эталоны и оценка расходов |
-| [`services/control`](services/control/) | Go API, research jobs, PostgreSQL и тесты |
+| [`services/trading-api`](services/trading-api/) | Go API, research jobs, PostgreSQL и тесты |
 | [`services/trade-events`](services/trade-events/) | Тестовый приём исполнений, pgqueue outbox и публикация в Kafka |
 | [`services/notifications`](services/notifications/) | Kafka consumer и личные уведомления в Telegram |
 | [`services/portfolio-analytics`](services/portfolio-analytics/) | Go-проекция paper-счёта и отчёты NAV, P&L и доходности. [Запуск](docs/runbooks/paper.md#аналитика-портфеля-в-telegram) |
@@ -115,10 +115,10 @@ Invoke-RestMethod -Method Post -Uri http://127.0.0.1:18083/v1/quotes -ContentTyp
 исполнимостью. [Контракт HTTP v1](contracts/venue-quote.schema.json) и
 [синтетический пример нормализованного ответа](contracts/valid-venue-quote-observation.json).
 
-## Локальный Go control
+## Локальный Trading API
 
 ```powershell
-go -C services/control run ./cmd/control
+go -C services/trading-api run ./cmd/trading-api
 ```
 
 По умолчанию адрес `127.0.0.1:8080`. `GET /healthz` проверяет liveness,
@@ -129,10 +129,15 @@ go -C services/control run ./cmd/control
 Это локальная диагностика на данных вызывающей стороны.
 
 Чтобы включить локальное хранилище заданий, перед запуском задайте
-`TRADINGBOT_DATABASE_URL` для выделенной PostgreSQL. Control проверяет доступ и
+`TRADINGBOT_DATABASE_URL` для выделенной PostgreSQL. Trading API проверяет доступ и
 применяет миграции при старте. `GET /readyz` проверяет доступность
-настроенной базы. Локальный API работает с доверенного окружения, настройка
-межсервисного доступа входит в этап deployment.
+базы заданий. Для запуска Accounts вне Compose задайте его собственную
+`TRADINGBOT_ACCOUNTS_DATABASE_URL` и запустите `go -C services/trading-api run
+./cmd/accounts --listen 127.0.0.1:18081`. Укажите Trading API адрес Accounts
+через `TRADINGBOT_ACCOUNTS_URL`. Оба процесса используют одинаковый
+`TRADINGBOT_PAPER_INTERNAL_TOKEN` или файл `TRADINGBOT_PAPER_INTERNAL_TOKEN_FILE`.
+Accounts использует отдельный `TRADINGBOT_ACCOUNTS_OUTBOX_TOKEN` или
+`TRADINGBOT_ACCOUNTS_OUTBOX_TOKEN_FILE` для relay.
 
 `POST /v1/research/jobs` принимает JSON с `job_schema_version: "0.1"`,
 `job_id` (UUID), `portfolio`, `requested_symbols`, `data_manifest`
@@ -142,7 +147,7 @@ go -C services/control run ./cmd/control
 `200` с сохранённым заданием, даже если исходный snapshot уже устарел. Повтор
 ID с другим содержимым возвращает `409`. UUID приводятся к нижнему регистру,
 `as_of` — к UTC. Порядок массивов и запись decimal strings сохраняются.
-Control проверяет формат `data_manifest` и сохраняет ссылку и хеш. Чтение
+Trading API проверяет формат `data_manifest` и сохраняет ссылку и хеш. Чтение
 файла и проверка его содержимого входят в будущую интеграцию с архивом.
 
 Worker вызывает `POST /v1/research/jobs/claim` с `worker_id` и UUID `claim_id`.
@@ -164,7 +169,7 @@ lease задание может получить новую попытку с н
 `worker_id`, `lease_token`, `batch`, `reports` и `metadata`. Версия `0.1`
 принимает `synthetic_fixture`. Версия `0.2` принимает результат графа TradingAgents
 с тестовыми моделями, наблюдаемыми вызовами и происхождением результата.
-Control проверяет batch по сохранённым portfolio и universe, а хеши evidence
+Trading API проверяет batch по сохранённым portfolio и universe, а хеши evidence
 по тексту отчётов. Запись результата, статус `completed` и событие outbox
 фиксируются одной транзакцией. Первый запрос возвращает `201`. Повтор той же
 попытки с тем же содержимым возвращает прежний результат с `200`, в том числе
@@ -179,33 +184,33 @@ Control проверяет batch по сохранённым portfolio и univer
 даты сутки без лимита блокируют новые вызовы.
 
 ```powershell
-go -C services/control run ./cmd/research-budget show
-go -C services/control run ./cmd/research-budget set --day $budgetUtcDay --max-calls 64
+go -C services/trading-api run ./cmd/research-budget show
+go -C services/trading-api run ./cmd/research-budget set --day $budgetUtcDay --max-calls 64
 ```
 
-Перед первой активацией остановите экземпляры Control предыдущей версии.
+Перед первой активацией остановите экземпляры Trading API предыдущей версии.
 Показатели относятся к количеству выданных разрешений. Выставленные
 провайдером расходы учитываются отдельно.
 
 ### Офлайн worker для research jobs
 
-Для отдельного локального Go control с тестовыми заданиями и настроенной
+Для отдельного локального Trading API с тестовыми заданиями и настроенной
 PostgreSQL запустите в другом терминале:
 
 ```powershell
-go -C services/control run ./cmd/research-fixture-worker --control-url http://127.0.0.1:8080
+go -C services/trading-api run ./cmd/research-fixture-worker --control-url http://127.0.0.1:8080
 ```
 
 Worker опрашивает тестовую очередь, продлевает lease, строит синтетический
 `HOLD` для каждого символа из сохранённого снимка и возвращает `synthetic_fixture`
-с нулём LLM-вызовов. Он обращается к Go control по HTTP. Настройки базы нужны только
-control. Сохранённый результат доступен через `GET /v1/research/jobs/{id}/result`.
+с нулём LLM-вызовов. Он обращается к Trading API по HTTP. Настройки PostgreSQL
+задаются для API. Сохранённый результат доступен через `GET /v1/research/jobs/{id}/result`.
 При потере ответа worker повторяет claim с тем же ID и отправляет прежний payload
 completion. Если lease утрачен, новая публикация отменяется. `Ctrl+C`
 останавливает worker.
 
 Для проверки ошибок транспорта и идемпотентности используйте отдельную тестовую
-PostgreSQL и `TRADINGBOT_TEST_DATABASE_URL`, затем выполните Go-тесты control.
+PostgreSQL и `TRADINGBOT_TEST_DATABASE_URL`, затем выполните Go-тесты `services/trading-api`.
 
 ### Офлайн worker с графом TradingAgents
 
@@ -223,7 +228,7 @@ upstream, хеш конфигурации, манифест и номер поп
 в зависимости от требуемого вида результата.
 
 До каждого вызова Python отправляет `POST /v1/research/jobs/{id}/authorize-call`
-с `worker_id`, `lease_token` и UUID `call_id`. Control проверяет действующую
+с `worker_id`, `lease_token` и UUID `call_id`. Trading API проверяет действующую
 аренду, записывает разрешение в PostgreSQL и возвращает `201`. Если ответ
 потерян, повтор с тем же ID и действующей арендой возвращает `200` и прежнюю
 квитанцию. В ней есть `remaining_llm_calls` на момент выдачи разрешения.
@@ -235,7 +240,7 @@ USD billing и подтверждение полноты и прав на рын
 
 Для сквозного прогона укажите `TRADINGBOT_E2E_DATABASE_URL` отдельной пустой
 PostgreSQL и запустите `pytest tests/test_worker_postgres.py` из окружения
-research. Тест собирает Go control и запускает worker отдельным процессом.
+research. Тест собирает Trading API и запускает worker отдельным процессом.
 
 В режиме `tradingbot worker --archive-root <путь>` worker сверяет SHA-256
 `data_manifest` с локальным файлом, выбирает только доступные к `as_of`
@@ -281,7 +286,7 @@ uv --directory services/research run --offline --frozen python -m tradingbot.ing
 Для предварительного отбора используйте SHA-256 архива и снимок счёта.
 Команда фильтрует кандидатов по допуску, свежести, обороту и спреду. Она
 отдаёт приоритет открытой позиции со свежим событием и ранжирует остальные
-по ROC из stockstats. Вывод содержит `job` для Go Control либо `null`,
+по ROC из stockstats. Вывод содержит `job` для Go Trading API либо `null`,
 если подходящий набор не укладывается в лимит. Владелец указывает остаток
 дневных слотов. Сформированное задание несёт собственный durable лимит
 вызовов, включая один вызов на распределение портфеля.
@@ -308,7 +313,7 @@ $env:TRADINGBOT_RESEARCH_IDENTITY_ARCHIVE_DIR = (Resolve-Path services/research/
 $env:TRADINGBOT_RESEARCH_IDENTITY_REGISTRY_REF = 'identity-registry.json'
 $registryPath = Join-Path $env:TRADINGBOT_RESEARCH_IDENTITY_ARCHIVE_DIR $env:TRADINGBOT_RESEARCH_IDENTITY_REGISTRY_REF
 $env:TRADINGBOT_RESEARCH_IDENTITY_REGISTRY_SHA256 = (Get-FileHash $registryPath -Algorithm SHA256).Hash.ToLowerInvariant()
-docker compose -f deploy/research/compose.yaml --profile research-identity up -d --build postgres control identity-research
+docker compose -f deploy/research/compose.yaml --profile research-identity up -d --build postgres accounts trading-api identity-research
 ```
 
 Передайте те же `--identity-registry-ref` и `--identity-registry-sha256`
@@ -332,15 +337,24 @@ uv --directory services/research run --offline --frozen tradingbot verify-identi
 
 ## Локальный офлайн-контур в Docker Compose
 
-Go control, PostgreSQL и Python worker запускаются из корня репозитория.
-Control доступен на `127.0.0.1:18080`. PostgreSQL доступна только control по
-отдельной внутренней сети. Research работает в сети без внешнего доступа, а
-профиль `evaluation` запускает Nautilus без сетевого интерфейса Docker.
+Trading API, Accounts, их PostgreSQL и Python worker запускаются из корня репозитория.
+Сервис `trading-api` использует образ `tradingbot-trading-api:local` по умолчанию.
+С хоста API доступен на `127.0.0.1:18080`, а внутри Compose — на
+`http://trading-api:8080`. Research worker обращается к API через внутреннюю
+сеть. Процессы paper обращаются к Trading API и Accounts по HTTP. Relay из
+профиля `paper-notifications` использует свой PostgreSQL и читает outbox
+Accounts по HTTP. [Границы данных](docs/decisions/005-service-databases.md)
+Профиль `evaluation` запускает Nautilus без сетевого интерфейса Docker.
 
 ```powershell
 docker compose -f deploy/research/compose.yaml up -d --build --wait
 docker compose -f deploy/research/compose.yaml --profile evaluation run --rm --build evaluation
 ```
+
+Раздельный стек создаёт новые тома `jobs-data`, `accounts-data` и
+`trade-events-data`. Виртуальный счёт создаётся заново. Для существующего
+локального проекта добавьте `--remove-orphans` к `up` с теми же профилями,
+чтобы заменить старые процессы.
 
 Для автономного запуска создайте виртуальный счёт и задайте его UUID через
 `TRADINGBOT_PAPER_ACCOUNT_ID`. Укажите абсолютные пути к существующим
@@ -357,7 +371,7 @@ docker compose -f deploy/research/compose.yaml --profile evaluation run --rm --b
   при UID 65532. Диспетчер открывает эту директорию для чтения.
 
 ```powershell
-docker compose -f deploy/research/compose.yaml --profile paper --profile paper-entry --profile paper-quote up -d --build postgres control paper-research paper-entry paper-quote paper-dispatch
+docker compose -f deploy/research/compose.yaml --profile paper --profile paper-entry --profile paper-quote up -d --build postgres accounts trading-api paper-research paper-entry paper-quote orders
 ```
 
 Для пересмотра открытых позиций добавьте `review.json` в конфиг и включите
@@ -378,7 +392,7 @@ docker compose -f deploy/research/compose.yaml --profile paper --profile paper-e
 [Пример ленты](contracts/valid-paper-identity-quote-tape.json).
 
 ```powershell
-docker compose -f deploy/research/compose.yaml --profile research-identity --profile paper-entry --profile paper-identity up -d --build postgres control identity-research paper-entry paper-identity-quote paper-identity-dispatch
+docker compose -f deploy/research/compose.yaml --profile research-identity --profile paper-entry --profile paper-identity up -d --build postgres accounts trading-api identity-research paper-entry paper-identity-quote orders-identity
 ```
 
 Ленту `0.3` можно собрать командой `paper-quote-collect`. Она запрашивает
@@ -401,7 +415,7 @@ docker compose -f deploy/research/compose.yaml --profile research-identity --pro
 ```powershell
 $requestPath = (Resolve-Path contracts/valid-paper-quote-collection.json).Path
 $tapePath = Join-Path $PWD 'quote-tape.fixture.json'
-go -C services/control run ./cmd/paper-quote-collect --request $requestPath --source http://127.0.0.1:8765/quote --out $tapePath --as-of 2026-11-18T14:31:03Z
+go -C services/trading-api run ./cmd/paper-quote-collect --request $requestPath --source http://127.0.0.1:8765/quote --out $tapePath --as-of 2026-11-18T14:31:03Z
 ```
 
 Для сквозной проверки BUY → SELL задайте `TRADINGBOT_TEST_DATABASE_URL`.
@@ -410,7 +424,7 @@ go -C services/control run ./cmd/paper-quote-collect --request $requestPath --so
 исходного лота, итоговый баланс и повтор команд без дублей.
 
 ```powershell
-go -C services/control test -mod=readonly -count=1 -v -run '^TestCollectedFixtureQuoteFlowsThroughStablePaperDispatch$' ./cmd/paper
+go -C services/trading-api test -mod=readonly -count=1 -v -run '^TestCollectedFixtureQuoteFlowsThroughStablePaperDispatch$' ./cmd/paper
 ```
 
 Если в этом же Compose-проекте уже работает сервис `research` для
@@ -432,11 +446,11 @@ Compose-проект, отправляет тестовые задания, пр
 выданные разрешения на вызовы учитываются. Установите `TRADINGBOT_RESEARCH_IMAGE`
 на проверенный тег или digest и выполните `up -d --no-deps --no-build --force-recreate research`
 для того же Compose-файла. Для отката используйте идентификатор прежнего образа.
-Control, оценка и том БД при этом остаются на месте.
+Trading API, оценка и том БД при этом остаются на месте.
 
 ### Виртуальный paper-счёт
 
-Control с PostgreSQL может создать виртуальный счёт через `POST /v1/paper/accounts`
+Trading API передаёт запрос Accounts, который создаёт виртуальный счёт через `POST /v1/paper/accounts`
 с `account_id` и `initial_cash_usd` в виде строки. Чтение счёта доступно через
 `GET /v1/paper/accounts/{id}`. Резервируйте полную BUY или SELL заявку через
 `POST /v1/paper/accounts/{id}/orders`. Она связана с версией счёта, инструментом,
@@ -453,10 +467,10 @@ ID решения и котировки, предельной комиссией
 [JSON Schema](contracts/paper-account.schema.json).
 
 Этот API принимает тестовые данные для локального исполнения. Проверки денег и
-количеств выполняет PostgreSQL. Команда `go -C services/control run ./cmd/paper-replay
+количеств выполняет PostgreSQL. Команда `go -C services/trading-api run ./cmd/paper-replay
 --intent <intent.json> --quote <quote.json>` применяет к ledger локальную тестовую
-котировку, которую intent привязывает по SHA-256. Нужна `TRADINGBOT_DATABASE_URL`
-для Control DB с созданным paper account. Повторы используют устойчивые ID.
+котировку, которую intent привязывает по SHA-256. Запускайте эту команду
+с `TRADINGBOT_ACCOUNTS_DATABASE_URL` и созданным paper account. Повторы используют устойчивые ID.
 [Формат входа и результата](contracts/paper-replay.schema.json).
 Котировка 0.2 с `execution: "partial"` указывает `executed_quantity_raw` и
 цену всей заявки. Симулятор рассчитывает пропорциональную сумму и комиссию
@@ -464,11 +478,14 @@ ID решения и котировки, предельной комиссией
 
 Для применения сохранённого research-решения сначала подготовьте policy
 владельца и массив наблюдавшихся цен с `at` и `available_at`. Передайте
-абсолютные пути к файлам при запуске через `go -C`.
+абсолютные пути к файлам при запуске через `go -C`. Укажите HTTP-адреса
+через `TRADINGBOT_ACCOUNTS_URL` и `TRADINGBOT_TRADING_API_URL`, а также файл
+внутреннего credential через `TRADINGBOT_PAPER_INTERNAL_TOKEN_FILE`.
+Compose передаёт эти настройки своим процессам автоматически.
 
 ```powershell
-go -C services/control run ./cmd/paper snapshot --account $accountId --policy $policyPath --marks $marksPath
-go -C services/control run ./cmd/paper apply --policy $policyPath --request $requestPath --quote $quotePath
+go -C services/trading-api run ./cmd/paper snapshot --account $accountId --policy $policyPath --marks $marksPath
+go -C services/trading-api run ./cmd/paper apply --policy $policyPath --request $requestPath --quote $quotePath
 ```
 
 Первая команда выдаёт `portfolio` для research job и `snapshot_context` для
@@ -489,16 +506,16 @@ go -C services/control run ./cmd/paper apply --policy $policyPath --request $req
 продолжить тот же ордер даже при удалённом исходном файле.
 
 ```powershell
-go -C services/control run ./cmd/paper follow --request $requestPath --policy $policyPath --quote-root $quoteRoot --poll-interval 5s
+go -C services/trading-api run ./cmd/paper follow --request $requestPath --policy $policyPath --quote-root $quoteRoot --poll-interval 5s
 ```
 
-Файл для `follow` или `dispatch` может выпустить `paper-quote-pin` из
+Файл для `follow` или `orders` может выпустить `paper-quote-pin` из
 сохранённой синтетической ленты. Для задания пересмотра контекст читается
 из durable записи в PostgreSQL. Используется подходящая котировка,
 наблюдавшаяся и полученная после завершения задания и ещё не истёкшая.
 
 ```powershell
-go -C services/control run ./cmd/paper-quote-pin --job $jobId --tape $tapePath --sha256 $tapeHash --quote-root $quoteRoot
+go -C services/trading-api run ./cmd/paper-quote-pin --job $jobId --tape $tapePath --sha256 $tapeHash --quote-root $quoteRoot
 ```
 
 Для автоматического выбора котировок используйте архив версии `0.2` с
@@ -511,7 +528,7 @@ go -C services/control run ./cmd/paper-quote-pin --job $jobId --tape $tapePath -
 [Пример ленты счёта](contracts/valid-paper-account-quote-tape.json).
 
 ```powershell
-go -C services/control run ./cmd/paper-quote-pin --account $accountId --tape $tapePath --sha256 $tapeHash --quote-root $quoteRoot --poll-interval 2s
+go -C services/trading-api run ./cmd/paper-quote-pin --account $accountId --tape $tapePath --sha256 $tapeHash --quote-root $quoteRoot --poll-interval 2s
 ```
 
 Для сравнения синтетических котировок на одной экспозиции запустите
@@ -521,7 +538,7 @@ go -C services/control run ./cmd/paper-quote-pin --account $accountId --tape $ta
 В расчёте к сумме котировки добавляются только внешние комиссии.
 
 ```powershell
-go -C services/control run ./cmd/paper-quote-compare --input ../../contracts/valid-paper-quote-comparison.json
+go -C services/trading-api run ./cmd/paper-quote-compare --input ../../contracts/valid-paper-quote-comparison.json
 ```
 
 Для серии наблюдений `paper-quote-study` сверяет два хеша. План задаёт
@@ -534,7 +551,7 @@ $plan = (Resolve-Path contracts/valid-paper-quote-study-plan.json).Path
 $observations = (Resolve-Path contracts/valid-paper-quote-study-observations.json).Path
 $planPin = (Get-FileHash $plan).Hash.ToLowerInvariant()
 $observationsPin = (Get-FileHash $observations).Hash.ToLowerInvariant()
-go -C services/control run ./cmd/paper-quote-study --plan $plan --plan-sha256 $planPin --observations $observations --observations-sha256 $observationsPin
+go -C services/trading-api run ./cmd/paper-quote-study --plan $plan --plan-sha256 $planPin --observations $observations --observations-sha256 $observationsPin
 ```
 
 Для каждого набора расчёт требует заранее заданного покрытия и
@@ -561,7 +578,7 @@ go -C services/control run ./cmd/paper-quote-study --plan $plan --plan-sha256 $p
 снимок. Укажите абсолютные пути к конфигу и директории архива.
 
 ```powershell
-go -C services/control run ./cmd/paper schedule-review --config $reviewConfig --archive-root $archiveRoot --poll-interval 30s
+go -C services/trading-api run ./cmd/paper schedule-review --config $reviewConfig --archive-root $archiveRoot --poll-interval 30s
 ```
 
 С `--poll-interval` конфиг перечитывается перед каждым проходом. Передайте
@@ -578,7 +595,7 @@ go -C services/control run ./cmd/paper schedule-review --config $reviewConfig --
 
 ```powershell
 $paperCLI = Join-Path ([System.IO.Path]::GetTempPath()) ('tradingbot-paper-' + [Guid]::NewGuid() + '.exe')
-go -C services/control build -mod=readonly -o $paperCLI ./cmd/paper
+go -C services/trading-api build -mod=readonly -o $paperCLI ./cmd/paper
 uv --directory services/research run --offline --frozen tradingbot prepare-identity-review --paper-cli $paperCLI --archive-root $archiveRoot --account $accountId --order $openingOrderId --as-of $cutoff --policy $policyPath --marks $marksPath --data-manifest-ref $manifestRef --data-manifest-sha256 $manifestHash --identity-registry-ref $registryRef --identity-registry-sha256 $registryHash --quote-tape-ref $quoteTapeRef --quote-tape-sha256 $quoteTapeHash --max-llm-calls 32 > $reviewConfig
 & $paperCLI schedule-review --config $reviewConfig --archive-root $archiveRoot --identity-registry-sha256 $registryHash
 ```
@@ -589,7 +606,7 @@ Go возвращает `not_due` до положенного пересмотр
 В Compose `paper-review` читает тот же конфиг из `review.json` и использует
 `TRADINGBOT_RESEARCH_IDENTITY_REGISTRY_SHA256`. Задание `0.2` получает воркер
 `identity-research` с тем же пином. Для виртуального применения работают
-`paper-identity-quote` и `paper-identity-dispatch`.
+`paper-identity-quote` и `orders-identity`.
 
 Для автоматического пересмотра подготовьте [план окон](contracts/paper-review-cycle-plan.schema.json).
 [Синтетический пример](contracts/valid-paper-identity-review-cycle-plan.json) показывает привязку к открытию и архивному событию.
@@ -601,7 +618,7 @@ Go возвращает `not_due` до положенного пересмотр
 $env:TRADINGBOT_PAPER_REVIEW_PLAN_REF = 'review-plan.json'
 $env:TRADINGBOT_PAPER_REVIEW_PLAN_SHA256 = (Get-FileHash (Join-Path $env:TRADINGBOT_PAPER_ARCHIVE_DIR $env:TRADINGBOT_PAPER_REVIEW_PLAN_REF)).Hash.ToLowerInvariant()
 $env:TRADINGBOT_RESEARCH_IDENTITY_ARCHIVE_DIR = $env:TRADINGBOT_PAPER_ARCHIVE_DIR
-docker compose -f deploy/research/compose.yaml --profile research-identity --profile paper-review-cycles up -d --build postgres control identity-research paper-review-cycles
+docker compose -f deploy/research/compose.yaml --profile research-identity --profile paper-review-cycles up -d --build postgres accounts trading-api identity-research paper-review-cycles
 ```
 
 Укажите пины реестра `TRADINGBOT_RESEARCH_IDENTITY_REGISTRY_REF` и
@@ -621,7 +638,7 @@ docker compose -f deploy/research/compose.yaml --profile research-identity --pro
 задание и сохраняет контекст применения в той же транзакции.
 
 ```powershell
-go -C services/control run ./cmd/paper schedule-entry --config $entryConfig --selection $selectionPath --archive-root $archiveRoot
+go -C services/trading-api run ./cmd/paper schedule-entry --config $entryConfig --selection $selectionPath --archive-root $archiveRoot
 ```
 
 [Контракт расписания входа](contracts/paper-apply.schema.json#/$defs/EntryScheduleRequest) · [Пример расписания](contracts/valid-paper-entry-schedule.json).
@@ -649,7 +666,7 @@ uv --directory services/research run --offline --frozen python -m tradingbot.ent
 процесс ожидал очередных окон, добавьте `--poll-interval-seconds 1`.
 В примере даты исторические. [Схема плана](contracts/paper-entry-cycle-plan.schema.json) · [Пример плана](contracts/valid-paper-entry-cycle-plan.json).
 
-Новые задания пересмотра получают durable запись для `dispatch` в той же
+Новые задания пересмотра получают запись для обработки заявок в той же
 транзакции. Диспетчер выбирает завершённые задания заданного счёта,
 сопоставляет policy владельца и выполняет `follow`. Подтверждение наступает
 после записи результата применения. Если процесс сбился между этими шагами,
@@ -659,15 +676,17 @@ uv --directory services/research run --offline --frozen python -m tradingbot.ent
 Новые резервы проходят по действующей политике.
 
 ```powershell
-go -C services/control run ./cmd/paper dispatch --account $accountId --policy $policyPath --quote-root $quoteRoot --poll-interval 5s
+go -C services/trading-api run ./cmd/paper orders --account $accountId --policy $policyPath --quote-root $quoteRoot --poll-interval 5s
 ```
+
+Прежняя команда `paper dispatch` остаётся совместимым алиасом.
 
 Чтобы передать фактические исходы в следующее исследование, экспортируйте
 их из paper ledger к заданному `as_of`. Команда добавит в новый архив
 ограниченное число реализованных исходов с ID исполнения и точными суммами.
 
 ```powershell
-go -C services/control run ./cmd/paper-memory --account $accountId --as-of $snapshotAsOf --policy $policyPath --input $marketArchivePath --input-sha256 $marketArchiveHash --output $newArchivePath
+go -C services/trading-api run ./cmd/paper-memory --account $accountId --as-of $snapshotAsOf --policy $policyPath --input $marketArchivePath --input-sha256 $marketArchiveHash --output $newArchivePath
 ```
 
 Журнал уроков фиксирует результат конкретного виртуального SELL по FIFO
@@ -679,9 +698,9 @@ go -C services/control run ./cmd/paper-memory --account $accountId --as-of $snap
 событий выбранного урока.
 
 ```powershell
-go -C services/control run ./cmd/paper-memory record-lesson --account $accountId --fill-event $sellFillEventId --event $recordEventId
-go -C services/control run ./cmd/paper-memory correct-lesson --account $accountId --lesson $lessonId --event $correctionEventId --expected-revision 1 --action retract
-go -C services/control run ./cmd/paper-memory lessons --account $accountId --lesson $lessonId --as-of $snapshotAsOf --history
+go -C services/trading-api run ./cmd/paper-memory record-lesson --account $accountId --fill-event $sellFillEventId --event $recordEventId
+go -C services/trading-api run ./cmd/paper-memory correct-lesson --account $accountId --lesson $lessonId --event $correctionEventId --expected-revision 1 --action retract
+go -C services/trading-api run ./cmd/paper-memory lessons --account $accountId --lesson $lessonId --as-of $snapshotAsOf --history
 ```
 
 [Контракт события журнала уроков](contracts/paper-memory-lesson.schema.json).
@@ -699,7 +718,7 @@ go -C services/control run ./cmd/paper-memory lessons --account $accountId --les
 меняют фактический результат к `as_of`, сохраняя исход на горизонте.
 
 ```powershell
-go -C services/control run ./cmd/paper-thesis-outcome --input $outcomeInput --sha256 $outcomeHash
+go -C services/trading-api run ./cmd/paper-thesis-outcome --input $outcomeInput --sha256 $outcomeHash
 ```
 
 [Схема отчёта](contracts/paper-thesis-outcome.schema.json) · [Пример входа](contracts/valid-paper-thesis-outcome-input.json).
@@ -721,7 +740,7 @@ go -C services/control run ./cmd/paper-thesis-outcome --input $outcomeInput --sh
 помечается как контрфактуальный.
 
 ```powershell
-go -C services/control run ./cmd/paper-shadow-outcome --input $shadowInput --sha256 $shadowHash --entry $entryObservation --exit $exitObservation
+go -C services/trading-api run ./cmd/paper-shadow-outcome --input $shadowInput --sha256 $shadowHash --entry $entryObservation --exit $exitObservation
 ```
 
 [Контракт контрфактуальной оценки](contracts/paper-shadow-outcome.schema.json).
@@ -731,7 +750,7 @@ go -C services/control run ./cmd/paper-shadow-outcome --input $shadowInput --sha
 контекстом, в котором учтены зафиксированные комиссии. Бенчмарк и OPEX
 в эти исходы не входят. [Схема исхода](contracts/paper-outcome.schema.json).
 
-Для создания заданий по готовому расписанию запустите `go -C services/control run
+Для создания заданий по готовому расписанию запустите `go -C services/trading-api run
 ./cmd/research-scheduler --once --config <schedule.json> --archive-root <путь>`.
 Планировщик проверяет хеш архива и вычисляет ID из расписания и времени события.
 Повтор того же запуска возвращает существующее задание. Для собственного прогона
@@ -744,7 +763,7 @@ go -C services/control run ./cmd/paper-shadow-outcome --input $shadowInput --sha
 
 При запуске после пропуска Go сохраняет в PostgreSQL наблюдение о явно
 заданном календарном окне, закрытом не более 24 часов назад. Для проверки
-возьмите `job_id` из лога планировщика и прочитайте запись через Control.
+возьмите `job_id` из лога планировщика и прочитайте запись через Trading API.
 
 ```powershell
 Invoke-RestMethod "http://127.0.0.1:18080/v1/research/schedule-occurrences/$researchJobId"
@@ -766,7 +785,7 @@ SHA-256. `research-schedule-coverage` читает PostgreSQL одним сни�
 вне отчёта. [Схема покрытия](contracts/research-schedule-coverage.schema.json).
 
 ```powershell
-go -C services/control run ./cmd/research-schedule-coverage --config $schedulePath --sha256 $scheduleHash
+go -C services/trading-api run ./cmd/research-schedule-coverage --config $schedulePath --sha256 $scheduleHash
 ```
 
 Независимый Nautilus replay читает подготовленные тестовые котировки и заявки.
@@ -823,7 +842,7 @@ PostgreSQL. `research-replay` принимает хеши экспорта и о
 
 ```powershell
 # Перенаправление байтов stdout поддерживается в PowerShell 7.4+.
-go -C services/control run ./cmd/research-replay-export --job $jobId > $exportPath
+go -C services/trading-api run ./cmd/research-replay-export --job $jobId > $exportPath
 $exportHash = (Get-FileHash $exportPath).Hash.ToLowerInvariant()
 $tapeHash = (Get-FileHash $tapePath).Hash.ToLowerInvariant()
 uv --directory services/evaluation run --offline --frozen tradingbot-evaluation research-replay $exportPath $tapePath --export-sha256 $exportHash --tape-sha256 $tapeHash --require-snapshot-continuity
@@ -1088,7 +1107,7 @@ NAV учитывают симулированный спред и комисси
 `uninvested-cash` с тем же стартовым капиталом.
 
 ```powershell
-go -C services/control run ./cmd/paper-nav --input $paperNavInput --sha256 $inputHash
+go -C services/trading-api run ./cmd/paper-nav --input $paperNavInput --sha256 $inputHash
 uv --directory services/evaluation run --offline --frozen tradingbot-evaluation paper-evidence examples/paper-cash-protocol.json examples/paper-cash-nav.json --protocol-sha256 811c97f1b0d0c36d9473ab8612af964d6e2e8fc1d759728e5d46c89db35e417f
 ```
 
@@ -1098,7 +1117,7 @@ uv --directory services/evaluation run --offline --frozen tradingbot-evaluation 
 с пропущенной ценой сохраняет код 1.
 
 ```powershell
-go -C services/control run ./cmd/paper-nav --input $paperNavInput --sha256 $inputHash --verify-report $navPath --report-sha256 $navHash
+go -C services/trading-api run ./cmd/paper-nav --input $paperNavInput --sha256 $inputHash --verify-report $navPath --report-sha256 $navHash
 ```
 
 Для синтетического сравнения с индексом полной доходности передайте
@@ -1159,12 +1178,12 @@ uv --directory services/evaluation run --offline --frozen tradingbot-evaluation 
 с тем же ID. После аварии разрешение без ответа остаётся занятым и
 отображается как неизвестный расход в отчёте. Чтение включает прежние
 попытки, даже если итоговый результат пришёл от нового процесса.
-При локальной замене сначала обновите Control. Worker проверяет поддержку
+При локальной замене сначала обновите Trading API. Worker проверяет поддержку
 записи вызовов до получения задания.
 
 ```powershell
 # TRADINGBOT_DATABASE_URL указывает на локальную PostgreSQL
-go -C services/control run ./cmd/research-usage-export --job $researchJobId > $permitArchivePath
+go -C services/trading-api run ./cmd/research-usage-export --job $researchJobId > $permitArchivePath
 $permitPin = (Get-FileHash $permitArchivePath).Hash.ToLowerInvariant()
 uv --directory services/evaluation run --offline --frozen tradingbot-evaluation research-costs --rates $ratesPath $ratesPin --permit-archive $permitArchivePath $permitPin
 ```
@@ -1223,7 +1242,7 @@ HTTP `201` подтверждает commit тестового fill и outbox. П
 
 Для подтверждённых **виртуальных** исполнений включите профиль
 `paper-notifications` в [research Compose](deploy/research/compose.yaml).
-Relay читает outbox из PostgreSQL Control, публикует события в
+Relay читает outbox из PostgreSQL Trading API, публикует события в
 `tradingbot.trade.filled.paper.v1`, а consumer использует отдельную группу и
 секреты `TRADINGBOT_PAPER_TELEGRAM_BOT_TOKEN` и
 `TRADINGBOT_PAPER_TELEGRAM_CHAT_ID`. Уведомления помечены как симуляция.
@@ -1311,12 +1330,12 @@ docker compose -f deploy/research/compose.yaml --profile research-provider run -
 docker compose -f deploy/research/compose.yaml --profile research-provider --profile paper-entry --profile paper-review-cycles --profile paper-identity up -d --build
 ```
 
-Укажите те же пины реестра и данных в настройках Control и планов. Планы
+Укажите те же пины реестра и данных в настройках Trading API и планов. Планы
 содержат конечный набор окон. Данные и котировки публикует владелец плана.
 Профиль выделяет подготовленные задания `0.3` для отдельного воркера,
 который получает durable permit до запроса модели и сохраняет квитанцию
 использования. Go принимает результат `0.4` после сверки с сохранённой
-квитанцией и привязкой к снимку. `paper-identity-dispatch` применяет
+квитанцией и привязкой к снимку. `orders-identity` применяет
 допущенное решение к виртуальному счёту. [Архитектура](docs/architecture.md)
 
 Офлайн-проверка использует временную PostgreSQL и тестовую модель на
@@ -1331,7 +1350,7 @@ $env:TRADINGBOT_PROVIDER_TEST_DATABASE_URL = $testDatabaseUrl
 uv --directory services/research run --offline --frozen pytest -v tests/test_provider_postgres.py
 $env:TRADINGBOT_TEST_DATABASE_URL = $testDatabaseUrl
 $env:TRADINGBOT_TEST_JUPITER_NOTIFICATIONS = '1'
-go -C services/control test -mod=readonly -count=1 -v -run '^TestScheduledPaperJupiterRehearsal$' ./cmd/paper
+go -C services/trading-api test -mod=readonly -count=1 -v -run '^TestScheduledPaperJupiterRehearsal$' ./cmd/paper
 ```
 
 По умолчанию проверка уведомлений поднимает локальную реализацию протокола
@@ -1359,7 +1378,7 @@ uv --directory services/research run --frozen --extra evaluation pytest
 uv --directory services/research run --frozen --extra evaluation ruff check tradingbot tests scripts
 uv --directory services/research build --no-sources
 uv --directory services/evaluation run --frozen pytest
-go -C services/control test -mod=readonly ./...
+go -C services/trading-api test -mod=readonly ./...
 go -C services/trade-events test -mod=readonly ./...
 go -C services/notifications test -mod=readonly ./...
 go -C services/portfolio-analytics test -mod=readonly ./...

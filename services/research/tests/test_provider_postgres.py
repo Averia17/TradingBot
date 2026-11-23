@@ -21,6 +21,7 @@ from test_worker_postgres import (
     ROOT,
     LoopbackConnection,
     build_go_command,
+    offline_test_environment,
     process,
     request,
     wait_for_resource,
@@ -153,20 +154,26 @@ def test_scheduled_provider_buy_and_catalyst_sell_apply_to_real_paper_ledger(tmp
         if database.port is None or len(paths) != 1 or not re.fullmatch(r"provider_paper_[a-z0-9]+", paths[0]):
             pytest.fail("provider notification integration requires a dedicated loopback provider_paper schema")
     with ThreadPoolExecutor(max_workers=3) as executor:
-        control, paper, pin = executor.map(
-            lambda name: build_go_command(tmp_path, name), ("control", "paper", "paper-quote-pin")
+        trading_api, paper, pin = executor.map(
+            lambda name: build_go_command(tmp_path, name), ("trading-api", "paper", "paper-quote-pin")
         )
     account_id = str(uuid4())
-    scheduled = datetime.now(UTC) + timedelta(seconds=2)
-    entry_ref, owner, archive, marks = setup_entry(tmp_path, account_id, scheduled)
-    registry, tape = owner["identity_registry"], owner["quote_tape"]
-    env = os.environ | {
-        "TRADINGBOT_DATABASE_URL": DATABASE_URL,
-        "TRADINGBOT_RESEARCH_IDENTITY_REGISTRY_SHA256": registry["sha256"],
-    }
+    env = offline_test_environment(DATABASE_URL)
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
         listener.bind(("127.0.0.1", 0))
         port = listener.getsockname()[1]
+    api = [trading_api, "-listen", f"127.0.0.1:{port}"]
+    with process(api, env) as startup:
+        wait_for_resource(port, "/readyz", startup)
+        status, account = request(
+            port, "/v1/paper/accounts", {"account_id": account_id, "initial_cash_usd": "1000"},
+        )
+        assert status == 201
+    # Build the pinned schedule after the account exists even on a slow host.
+    scheduled = max(datetime.now(UTC), datetime.fromisoformat(account["created_at"])) + timedelta(seconds=2)
+    entry_ref, owner, archive, marks = setup_entry(tmp_path, account_id, scheduled)
+    registry, tape = owner["identity_registry"], owner["quote_tape"]
+    env["TRADINGBOT_RESEARCH_IDENTITY_REGISTRY_SHA256"] = registry["sha256"]
     quote_root = tmp_path / "quotes"
     quote_root.mkdir()
     observed = []
@@ -208,7 +215,7 @@ def test_scheduled_provider_buy_and_catalyst_sell_apply_to_real_paper_ledger(tmp
         else:
             pytest.fail("no eligible owner-pinned synthetic quote became visible")
         assert datetime.fromisoformat(published["observed_at"]) > datetime.fromisoformat(receipt["completed_at"])
-        applied, = command(paper, env, *dispatch)
+        applied, = command(paper, env, *order_arguments)
         assert (applied["job_id"], applied["status"]) == (job_id, "applied")
         execution = applied["application"]["execution"]
         assert execution["security_id"] == "fixture-current"
@@ -221,16 +228,15 @@ def test_scheduled_provider_buy_and_catalyst_sell_apply_to_real_paper_ledger(tmp
         return order["order_id"], fill["event_id"]
 
     route = f"/v1/paper/accounts/{account_id}"
-    dispatch = (
-        "dispatch", "--account", account_id, "--policy", str(tmp_path / owner["policy"]["ref"]),
+    order_arguments = (
+        "orders", "--account", account_id, "--policy", str(tmp_path / owner["policy"]["ref"]),
         "--quote-root", str(quote_root), "--archive-root", str(tmp_path),
         "--identity-quote-tape-sha256", tape["sha256"],
     )
     monkeypatch.setattr(worker, "HTTPConnection", LoopbackConnection)
     monkeypatch.setattr(prepared_provider, "_create_model", model)
-    with process([control, "-listen", f"127.0.0.1:{port}"], env) as running:
+    with process(api, env) as running:
         wait_for_resource(port, "/readyz", running)
-        assert request(port, "/v1/paper/accounts", {"account_id": account_id, "initial_cash_usd": "1000"})[0] == 201
         time.sleep(max(0, (scheduled - datetime.now(UTC)).total_seconds()))
         journal = tmp_path / "entry-journal"
         entry, = entry_cycles.run_cycles(
@@ -266,7 +272,7 @@ def test_scheduled_provider_buy_and_catalyst_sell_apply_to_real_paper_ledger(tmp
                 final = request(port, route)[1]
                 assert (final["version"], final["cash_usd"], final["reserved_cash_usd"]) == (5, "1015", "0")
                 assert not final["positions"]
-                assert not command(paper, env, *dispatch)
+                assert not command(paper, env, *order_arguments)
                 assert request(port, route)[1] == final
             finally:
                 stop.set()
@@ -280,7 +286,7 @@ def test_scheduled_provider_buy_and_catalyst_sell_apply_to_real_paper_ledger(tmp
         subprocess.run(
             ["go", "test", "-mod=readonly", "-count=1", "-v",
              "-run", "^TestPreparedProviderPaperNotifications$", "./cmd/paper"],
-            cwd=ROOT / "services/control", timeout=150, check=True,
+            cwd=ROOT / "services/trading-api", timeout=150, check=True,
             env=env | {
                 "TRADINGBOT_TEST_PROVIDER_NOTIFICATION_DSN": DATABASE_URL,
                 "TRADINGBOT_TEST_PROVIDER_NOTIFICATION_ACCOUNT": account_id,

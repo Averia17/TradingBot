@@ -4,8 +4,30 @@ x-paper-fill-kafka: &paper-fill-kafka
   TRADINGBOT_KAFKA_BROKERS: kafka:9092
   TRADINGBOT_TRADE_TOPIC: tradingbot.trade.filled.paper.v1
 
+x-trading-api-build: &trading-api-build
+  context: ../../services/trading-api
+  args:
+    GO_IMAGE: ${TRADINGBOT_GO_BUILD_IMAGE:-golang:1.26.5-bookworm@sha256:53eeac89074db483fdf0ab3be1df32bf6e47562263d2d0d6baa7f26acb4957dd}
+
+x-paper-token-mount: &paper-token-mount
+  type: volume
+  source: internal-token
+  target: /run/tradingbot/internal
+  read_only: true
+
+x-outbox-token-mount: &outbox-token-mount
+  type: volume
+  source: outbox-token
+  target: /run/tradingbot/outbox
+  read_only: true
+
+x-paper-service-endpoints: &paper-service-endpoints
+  TRADINGBOT_TRADING_API_URL: http://trading-api:8080
+  TRADINGBOT_ACCOUNTS_URL: http://accounts:8081
+  TRADINGBOT_PAPER_INTERNAL_TOKEN_FILE: /run/tradingbot/internal/token
+
 services:
-  postgres:
+  postgres: &local-postgres
     image: postgres:17-alpine@sha256:d3244e8ce3f165ee3c93d9c4a4b1d0fe48b3a89e2287b717fdcbbde92d405065
     environment:
       POSTGRES_DB: tradingbot
@@ -18,21 +40,101 @@ services:
       retries: 20
     networks: [storage]
     volumes:
-      - research-data:/var/lib/postgresql/data
+      - jobs-data:/var/lib/postgresql/data
 
-  control:
-    image: ${TRADINGBOT_CONTROL_IMAGE:-tradingbot-control:local}
-    build:
-      context: ../../services/control
-      args:
-        GO_IMAGE: ${TRADINGBOT_GO_BUILD_IMAGE:-golang:1.26.5-bookworm@sha256:53eeac89074db483fdf0ab3be1df32bf6e47562263d2d0d6baa7f26acb4957dd}
+  accounts-postgres:
+    <<: *local-postgres
+    environment:
+      POSTGRES_DB: accounts
+      POSTGRES_USER: accounts
+      POSTGRES_HOST_AUTH_METHOD: trust
+    healthcheck:
+      test: [CMD, pg_isready, -h, 127.0.0.1, -U, accounts, -d, accounts]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+    networks: [accounts-storage]
+    volumes:
+      - accounts-data:/var/lib/postgresql/data
+
+  trade-events-postgres:
+    <<: *local-postgres
+    profiles: [paper-notifications]
+    environment:
+      POSTGRES_DB: trade_events
+      POSTGRES_USER: trade_events
+      POSTGRES_HOST_AUTH_METHOD: trust
+    healthcheck:
+      test: [CMD, pg_isready, -h, 127.0.0.1, -U, trade_events, -d, trade_events]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+    networks: [events-storage]
+    volumes:
+      - trade-events-data:/var/lib/postgresql/data
+
+  paper-internal-token:
+    image: busybox:latest@sha256:dc2d74b28e4cf8984fa52af1f39bc7c3d9c73760b41a74d629f5d11b1ab28616
+    network_mode: none
+    read_only: true
+    command:
+      - sh
+      - -ec
+      - |
+        initialize() {
+          if [ ! -s "$$1/token" ]; then
+            token=$$(od -An -tx1 -N32 /dev/urandom | tr -d '[:space:]')
+            test "$${#token}" -eq 64
+            umask 077
+            printf '%s' "$$token" > "$$1/token.tmp"
+            chmod 0444 "$$1/token.tmp"
+            mv "$$1/token.tmp" "$$1/token"
+          fi
+        }
+        initialize /internal
+        initialize /outbox
+    volumes:
+      - internal-token:/internal
+      - outbox-token:/outbox
+
+  accounts:
+    image: ${TRADINGBOT_CONTROL_IMAGE:-tradingbot-trading-api:local}
+    build: *trading-api-build
+    entrypoint: [/usr/local/bin/accounts]
+    command: [--listen, 0.0.0.0:8081]
+    environment:
+      TRADINGBOT_ACCOUNTS_DATABASE_URL: postgresql://accounts@accounts-postgres:5432/accounts?sslmode=disable
+      TRADINGBOT_PAPER_INTERNAL_TOKEN_FILE: /run/tradingbot/internal/token
+      TRADINGBOT_ACCOUNTS_OUTBOX_TOKEN_FILE: /run/tradingbot/outbox/token
+    depends_on:
+      accounts-postgres:
+        condition: service_healthy
+      paper-internal-token:
+        condition: service_completed_successfully
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, http://127.0.0.1:8081/readyz]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - *paper-token-mount
+      - *outbox-token-mount
+    networks: [accounts-storage, paper-api, accounts-events]
+    read_only: true
+
+  trading-api:
+    image: ${TRADINGBOT_CONTROL_IMAGE:-tradingbot-trading-api:local}
+    build: *trading-api-build
     command: [--listen, 0.0.0.0:8080]
     environment:
+      <<: *paper-service-endpoints
       TRADINGBOT_DATABASE_URL: postgresql://research_control@postgres:5432/tradingbot?sslmode=disable
       TRADINGBOT_RESEARCH_IDENTITY_REGISTRY_SHA256: ${TRADINGBOT_RESEARCH_IDENTITY_REGISTRY_SHA256:-}
     depends_on:
       postgres:
         condition: service_healthy
+      paper-internal-token:
+        condition: service_completed_successfully
     healthcheck:
       test: [CMD, wget, -q, -O, /dev/null, http://127.0.0.1:8080/readyz]
       interval: 2s
@@ -40,16 +142,18 @@ services:
       retries: 20
     ports:
       - '127.0.0.1:${TRADINGBOT_CONTROL_PORT:-18080}:8080'
-    networks: [storage, workers, local-api]
+    volumes:
+      - *paper-token-mount
+    networks: [storage, workers, local-api, paper-api]
     read_only: true
 
   research:
     image: ${TRADINGBOT_RESEARCH_IMAGE:-tradingbot-research:local}
     build:
       context: ../../services/research
-    command: [worker, --control-url, 'http://control:8080']
+    command: [worker, --control-url, 'http://trading-api:8080']
     depends_on:
-      control:
+      trading-api:
         condition: service_healthy
     networks: [workers]
     read_only: true
@@ -60,7 +164,7 @@ services:
     extends:
       service: research
     profiles: [paper]
-    command: [worker, --control-url, 'http://control:8080', --archive-root, /archive]
+    command: [worker, --control-url, 'http://trading-api:8080', --archive-root, /archive]
     volumes:
       - type: bind
         source: ${TRADINGBOT_PAPER_ARCHIVE_DIR:-./paper-archive}
@@ -76,7 +180,7 @@ services:
     command:
       - worker
       - --control-url
-      - http://control:8080
+      - http://trading-api:8080
       - --archive-root
       - /archive
       - --identity-registry-ref
@@ -98,7 +202,7 @@ services:
     command:
       - worker
       - --control-url
-      - http://control:8080
+      - http://trading-api:8080
       - --archive-root
       - /archive
       - --identity-registry-ref
@@ -133,7 +237,7 @@ services:
       context: ../../services/research
       target: paper-entry
       additional_contexts:
-        control-image: service:control
+        trading-api-image: service:trading-api
     command:
       - --root
       - /archive
@@ -148,17 +252,20 @@ services:
       - --poll-interval-seconds
       - '1'
     environment:
-      TRADINGBOT_DATABASE_URL: postgresql://research_control@postgres:5432/tradingbot?sslmode=disable
+      <<: *paper-service-endpoints
       TRADINGBOT_RESEARCH_IDENTITY_REGISTRY_SHA256: ${TRADINGBOT_RESEARCH_IDENTITY_REGISTRY_SHA256:-}
     depends_on:
-      control:
+      trading-api:
         condition: service_healthy
-    networks: [storage]
+      accounts:
+        condition: service_healthy
+    networks: [paper-api]
     init: true
     read_only: true
     tmpfs:
       - /tmp
     volumes:
+      - *paper-token-mount
       - paper-entry-journal:/journal
       - &paper-scheduler-archive
         type: bind
@@ -186,23 +293,27 @@ services:
       - --poll-interval-seconds
       - '1'
     volumes:
+      - *paper-token-mount
       - paper-review-journal:/journal
       - *paper-scheduler-archive
 
   paper-review:
     profiles: [paper]
-    image: ${TRADINGBOT_CONTROL_IMAGE:-tradingbot-control:local}
+    image: ${TRADINGBOT_CONTROL_IMAGE:-tradingbot-trading-api:local}
     entrypoint: [/usr/local/bin/paper]
     command: [schedule-review, --config, /paper-config/review.json, --archive-root, /archive, --poll-interval, 30s]
     environment:
-      TRADINGBOT_DATABASE_URL: postgresql://research_control@postgres:5432/tradingbot?sslmode=disable
+      <<: *paper-service-endpoints
       TRADINGBOT_RESEARCH_IDENTITY_REGISTRY_SHA256: ${TRADINGBOT_RESEARCH_IDENTITY_REGISTRY_SHA256:-}
     depends_on:
-      control:
+      trading-api:
         condition: service_healthy
-    networks: [storage]
+      accounts:
+        condition: service_healthy
+    networks: [paper-api]
     read_only: true
     volumes:
+      - *paper-token-mount
       - type: bind
         source: ${TRADINGBOT_PAPER_CONFIG_DIR:-./paper-config}
         target: /paper-config
@@ -216,27 +327,30 @@ services:
         bind:
           create_host_path: false
 
-  paper-dispatch: &paper-dispatch
+  orders: &orders
     profiles: [paper]
-    image: ${TRADINGBOT_CONTROL_IMAGE:-tradingbot-control:local}
+    image: ${TRADINGBOT_CONTROL_IMAGE:-tradingbot-trading-api:local}
     entrypoint: [/usr/local/bin/paper]
-    command: [dispatch, --account, '${TRADINGBOT_PAPER_ACCOUNT_ID:-}', --policy, /paper-config/policy.json, --quote-root, /quotes, --poll-interval, 5s]
-    environment: &paper-dispatch-environment
-      TRADINGBOT_DATABASE_URL: postgresql://research_control@postgres:5432/tradingbot?sslmode=disable
+    command: [orders, --account, '${TRADINGBOT_PAPER_ACCOUNT_ID:-}', --policy, /paper-config/policy.json, --quote-root, /quotes, --poll-interval, 5s]
+    environment: &orders-environment
+      <<: *paper-service-endpoints
     depends_on:
-      control:
+      trading-api:
         condition: service_healthy
-    networks: [storage]
+      accounts:
+        condition: service_healthy
+    networks: [paper-api]
     read_only: true
     volumes:
-      - &paper-dispatch-config
+      - *paper-token-mount
+      - &orders-config
         type: bind
         source: ${TRADINGBOT_PAPER_CONFIG_DIR:-./paper-config}
         target: /paper-config
         read_only: true
         bind:
           create_host_path: false
-      - &paper-dispatch-quotes
+      - &orders-quotes
         type: bind
         source: ${TRADINGBOT_PAPER_QUOTES_DIR:-./paper-quotes}
         target: /quotes
@@ -246,7 +360,7 @@ services:
 
   paper-quote: &paper-quote
     profiles: [paper-quote]
-    image: ${TRADINGBOT_CONTROL_IMAGE:-tradingbot-control:local}
+    image: ${TRADINGBOT_CONTROL_IMAGE:-tradingbot-trading-api:local}
     entrypoint: [/usr/local/bin/paper-quote-pin]
     command:
       - --account
@@ -260,13 +374,16 @@ services:
       - --poll-interval
       - 2s
     environment:
-      TRADINGBOT_DATABASE_URL: postgresql://research_control@postgres:5432/tradingbot?sslmode=disable
+      <<: *paper-service-endpoints
     depends_on:
-      control:
+      trading-api:
         condition: service_healthy
-    networks: [storage]
+      accounts:
+        condition: service_healthy
+    networks: [paper-api]
     read_only: true
     volumes:
+      - *paper-token-mount
       - &paper-quote-config
         type: bind
         source: ${TRADINGBOT_PAPER_CONFIG_DIR:-./paper-config}
@@ -281,17 +398,18 @@ services:
         bind:
           create_host_path: false
 
-  paper-identity-dispatch:
-    <<: *paper-dispatch
+  orders-identity:
+    <<: *orders
     profiles: [paper-identity]
-    command: [dispatch, --account, '${TRADINGBOT_PAPER_ACCOUNT_ID:-}', --policy, /paper-config/policy.json, --quote-root, /quotes, --archive-root, /archive, --poll-interval, 5s]
+    command: [orders, --account, '${TRADINGBOT_PAPER_ACCOUNT_ID:-}', --policy, /paper-config/policy.json, --quote-root, /quotes, --archive-root, /archive, --poll-interval, 5s]
     environment:
-      <<: *paper-dispatch-environment
+      <<: *orders-environment
       TRADINGBOT_RESEARCH_IDENTITY_REGISTRY_SHA256: ${TRADINGBOT_RESEARCH_IDENTITY_REGISTRY_SHA256:-}
       TRADINGBOT_PAPER_QUOTE_TAPE_SHA256: ${TRADINGBOT_PAPER_QUOTE_TAPE_SHA256:-}
     volumes:
-      - *paper-dispatch-config
-      - *paper-dispatch-quotes
+      - *paper-token-mount
+      - *orders-config
+      - *orders-quotes
       - &paper-identity-archive
         type: bind
         source: ${TRADINGBOT_PAPER_ARCHIVE_DIR:-./paper-archive}
@@ -315,6 +433,7 @@ services:
       - --poll-interval
       - 2s
     volumes:
+      - *paper-token-mount
       - *paper-quote-config
       - *paper-quote-output
       - *paper-identity-archive
@@ -342,13 +461,19 @@ services:
     command: [-paper-ledger]
     environment:
       <<: *paper-fill-kafka
-      TRADINGBOT_DATABASE_URL: postgresql://research_control@postgres:5432/tradingbot?sslmode=disable
+      TRADINGBOT_DATABASE_URL: postgresql://trade_events@trade-events-postgres:5432/trade_events?sslmode=disable
+      TRADINGBOT_ACCOUNTS_URL: http://accounts:8081
+      TRADINGBOT_ACCOUNTS_OUTBOX_TOKEN_FILE: /run/tradingbot/outbox/token
     depends_on:
-      control:
+      paper-internal-token:
+        condition: service_completed_successfully
+      trade-events-postgres:
         condition: service_healthy
       kafka-init:
         condition: service_completed_successfully
-    networks: [storage, events]
+    volumes:
+      - *outbox-token-mount
+    networks: [accounts-events, events-storage, events]
     read_only: true
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
@@ -375,7 +500,11 @@ services:
       - /tmp
 
 volumes:
-  research-data:
+  jobs-data:
+  accounts-data:
+  trade-events-data:
+  internal-token:
+  outbox-token:
   paper-entry-journal:
   paper-review-journal:
   provider-auth:
@@ -389,6 +518,14 @@ secrets:
 
 networks:
   storage:
+    internal: true
+  accounts-storage:
+    internal: true
+  events-storage:
+    internal: true
+  paper-api:
+    internal: true
+  accounts-events:
     internal: true
   workers:
     internal: true

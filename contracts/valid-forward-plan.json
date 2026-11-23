@@ -32,8 +32,8 @@
         "runtime": [
           "services/research/upstream.lock.json",
           "services/research/uv.lock",
-          "services/control/go.mod",
-          "services/control/go.sum",
+          "services/trading-api/go.mod",
+          "services/trading-api/go.sum",
           "services/evaluation/uv.lock",
           "deploy/research/compose.yaml"
         ]

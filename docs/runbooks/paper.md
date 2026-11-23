@@ -1,24 +1,25 @@
 # Восстановление локального paper-контура
 
 Запускайте проверку из корня репозитория. Нужны Python 3.11 или новее,
-установленный Go из `services/control/go.mod`, закэшированные модули Go
+установленный Go из `services/trading-api/go.mod`, закэшированные модули Go
 и образ PostgreSQL 17 с digest из [Compose](../../deploy/research/compose.yaml).
 
 ```powershell
 python deploy/research/restore_smoke.py
 ```
 
-Проверка собирает Go control и использует две отдельные временные базы с портами
-на `127.0.0.1`. Go использует локальный toolchain и кэш модулей, Docker использует
+Проверка собирает Trading API и последовательно поднимает две временные
+базы фикстуры с портами на `127.0.0.1`. Для раздельного стека используйте
+проверки журналов ниже. Go использует локальный toolchain и кэш модулей, Docker использует
 локальный образ. Скрипт создаёт виртуальный счёт с одним исполненным BUY и одним
 `UNKNOWN`, завершённый research job и активную попытку второго задания.
 Активная попытка получает одно разрешение на вызов модели. Оно полностью
 исчерпывает суточный лимит проверки. Все результаты синтетические, внешние
 вызовы не выполняются.
 
-После остановки исходного Control скрипт создаёт `pg_dump -Fc`, удаляет исходный
+После остановки исходного Trading API скрипт создаёт `pg_dump -Fc`, удаляет исходный
 контейнер и восстанавливает архив в пустой базе командой `pg_restore` в одной
-транзакции. Восстановленный Control должен вернуть прежний баланс, историю,
+транзакции. Восстановленный Trading API должен вернуть прежний баланс, историю,
 резерв, квитанции и исчерпанный суточный лимит. После истечения исходного
 lease база отклоняет новый вызов. Второе задание завершается офлайн-результатом
 без вызова. Контроль повторов проверяет, что появляются ровно одна новая
@@ -29,15 +30,15 @@ lease база отклоняет новый вызов. Второе задан
 ## Восстановление журнала планировщика
 
 ```powershell
-docker compose -f deploy/research/compose.yaml --profile paper-entry build control paper-entry
+docker compose -f deploy/research/compose.yaml --profile paper-entry build trading-api paper-entry
 python deploy/research/restore_smoke.py --entry-journal
 ```
 
-Проверка использует готовые образы Control и `paper-entry`. Если образы
+Проверка использует готовые образы Trading API и `paper-entry`. Если образы
 собраны с другими тегами, укажите `TRADINGBOT_CONTROL_IMAGE` и
 `TRADINGBOT_PAPER_ENTRY_IMAGE`. Первый запуск принимает одно задание и
 сохраняет запрос второго в журнале перед имитацией сбоя. Скрипт останавливает
-пишущие процессы и восстанавливает PostgreSQL и отдельный том журнала
+пишущие процессы и восстанавливает обе PostgreSQL и отдельный том журнала
 в новом Compose-проекте. После восстановления первое задание сверяется
 даже после дедлайна, второе ставится в очередь один раз. Повторная проверка
 сравнивает байты журнала и идентификаторы событий с первым успешным запуском.
@@ -49,7 +50,7 @@ python deploy/research/restore_smoke.py --review-journal
 ```
 
 Скрипт создаёт тестовую позицию и обрывает процесс между записью задания
-в PostgreSQL и подтверждением в SQLite. Затем он восстанавливает обе копии
+в PostgreSQL и подтверждением в SQLite. Затем он восстанавливает базы и журнал
 в отдельном Compose-проекте и повторяет исходное окно пересмотра.
 
 У `paper-review-cycles` отдельный SQLite-журнал `reviews.sqlite3`. Статус
@@ -65,17 +66,17 @@ python deploy/research/restore_smoke.py --review-journal
 
 1. Остановите планировщики `paper-entry`, `paper-review` и `paper-review-cycles`,
    воркеры и диспетчеры бумажного счёта. Проверьте `/readyz` и зафиксируйте
-   версию счёта и незавершённые заявки по API учёта. Затем остановите Control.
-2. Снимите custom-format архив базы торгового проекта через `pg_dump -Fc` и
+   версию счёта и незавершённые заявки по API учёта. Затем остановите Trading API и Accounts.
+2. Снимите custom-format архив каждой из баз Trading API и Accounts через `pg_dump -Fc` и
    скопируйте его за пределы исходного контейнера и тома. Сохраните SHA-256
-   архива, версию Postgres и идентификаторы версий Control и воркера.
+   архива, версию Postgres и идентификаторы версий Trading API и воркера.
    Сохраните содержимое томов `paper-entry-journal` и `paper-review-journal`,
    неизменённые архив и конфиг владельца, а также опубликованные котировки.
-3. Подготовьте пустую изолированную базу с нужной ролью. Примените `pg_restore
-   --single-transaction --exit-on-error` к этой базе. В тесте роль назначения
+3. Подготовьте по пустой базе с нужной ролью для каждого владельца. Восстановите
+   каждый архив через `pg_restore --single-transaction --exit-on-error`. В тесте роль назначения
    владеет всеми объектами, поэтому используется `--no-owner --no-privileges`.
-   При других ролях проверьте права Control на целевой базе до переключения.
-4. Запустите Control с новой базой и проверьте `/readyz`. До возобновления
+   При других ролях проверьте права Trading API на целевой базе до переключения.
+4. Запустите оба сервиса с восстановленными базами и проверьте `/readyz`. До возобновления
    планировщика и воркера сравните версии и резервы счёта, последние результаты
    и события. Проверьте `UNKNOWN` по источнику paper-наблюдений. При наличии
    повторной доставки используйте исходные ID и исходное содержимое заявки,
@@ -92,15 +93,15 @@ python deploy/research/restore_smoke.py --review-journal
 синтетические входы. Периодичность копирования, хранение архивов, целевые RPO/RTO
 и восстановление внешнего архива данных измеряются отдельно.
 
-## Проверка состояния после запуска Control
+## Проверка состояния после запуска Trading API
 
-Укажите параметры чтения целевой PostgreSQL в `TRADINGBOT_DATABASE_URL` и
-подставьте UUID счёта и задания. Роли нужны доступ к схеме и `SELECT` на таблицы
-журнала и учёта. С ключом `--job` добавляются таблицы research jobs, результатов
-и разрешений.
+Укажите `TRADINGBOT_ACCOUNTS_URL`, `TRADINGBOT_TRADING_API_URL` и
+`TRADINGBOT_PAPER_INTERNAL_TOKEN_FILE` или `TRADINGBOT_PAPER_INTERNAL_TOKEN`.
+`paper-check` читает наблюдения каждого владельца через HTTP. Compose задаёт
+эти параметры при запуске команды в контейнере Trading API.
 
 ```powershell
-go -C services/control run ./cmd/paper-check --account $paperAccountId --job $researchJobId
+go -C services/trading-api run ./cmd/paper-check --account $paperAccountId --job $researchJobId
 ```
 
 Проверка использует один read-only снимок PostgreSQL и возвращает JSON с
@@ -117,20 +118,19 @@ go -C services/control run ./cmd/paper-check --account $paperAccountId --job $re
 
 Для автоматизации соберите команду через `go build`. Код выхода `0` означает
 `ok`, `1` сопровождает результат `attention` со списком проблем и ID,
-`2` означает `unavailable` или ошибку конфигурации. Команда оставляет счёт и
-резервы под управлением Control. При `UNKNOWN` сверяйте исход наблюдения
+`2` означает `unavailable` или ошибку конфигурации. Счёт и
+резервы остаются под управлением Accounts. При `UNKNOWN` сверяйте исход наблюдения
 по исходному `order_id`. При расхождении учёта сначала проверьте журнал
 по указанной `account_version`. При сомнительном бюджете используйте записи
 выданных разрешений до возобновления research job.
 
 Ключ `--pipeline` добавляет состояния планирования, исследования и
 применения выбранного счёта, а также очередь передачи исполнений.
-Понадобится право `SELECT` на `research_paper_dispatch`, `research_jobs`,
-`research_job_attempts`, `research_job_results`, `paper_applications`,
-`paper_orders` и `paper_fill_outbox`.
+Проверка соединяет отдельные наблюдения Trading API и Accounts через
+внутренние диагностические ручки.
 
 ```powershell
-go -C services/control run ./cmd/paper-check --account $paperAccountId --pipeline --stall-after 2m
+go -C services/trading-api run ./cmd/paper-check --account $paperAccountId --pipeline --stall-after 2m
 ```
 
 Срез содержит до 100 незавершённых dispatch. При превышении лимита
@@ -164,7 +164,7 @@ PostgreSQL. Наличие локальной котировки, доступн
 [Контракт](../../contracts/paper-reconciliation.schema.json) · [Пример](../../contracts/valid-paper-reconciliation.json).
 
 ```powershell
-go -C services/control run ./cmd/paper reconcile --observation $observationPath --sha256 $observationSha256
+go -C services/trading-api run ./cmd/paper reconcile --observation $observationPath --sha256 $observationSha256
 ```
 
 Команда работает с виртуальными заявками в статусе `UNKNOWN` или
@@ -178,7 +178,7 @@ go -C services/control run ./cmd/paper reconcile --observation $observationPath 
 ## Отказы проверки риска до резервирования
 
 ```powershell
-go -C services/control run ./cmd/paper refusals --account $paperAccountId --job $jobId
+go -C services/trading-api run ./cmd/paper refusals --account $paperAccountId --job $jobId
 ```
 
 При проверке привязанных исследования и котировки `paper apply`
@@ -205,15 +205,14 @@ go -C services/control run ./cmd/paper refusals --account $paperAccountId --job 
 
 ## Аналитика портфеля в Telegram
 
-Сначала обновите локальный paper Control. При первом запуске новой версии
-он переносит историю ledger в outbox в одной транзакции. На время обновления
-завершите запись из предыдущей версии Control и локальных команд paper.
-Нужен UUID существующего виртуального счёта. Загрузите токен бота и ID
-личного чата через свой локальный скрипт окружения. Для команд также задайте
+Сначала запустите Trading API и Accounts в локальном paper-стеке. Нужен
+UUID виртуального счёта. Загрузите токен бота и ID личного чата через
+локальный скрипт окружения. Для команд задайте
 `TRADINGBOT_TELEGRAM_OWNER_USER_ID` с числовым ID пользователя Telegram.
-При другом имени Compose-проекта Control укажите фактическую storage network
-в `TRADINGBOT_PAPER_LEDGER_NETWORK`. Для отдельной роли relay укажите её DSN
-в `TRADINGBOT_ANALYTICS_LEDGER_DATABASE_URL`.
+При другом имени research Compose-проекта задайте внешнюю сеть
+`TRADINGBOT_ACCOUNTS_EVENTS_NETWORK` и том `TRADINGBOT_ACCOUNTS_OUTBOX_TOKEN_VOLUME`.
+Relay обращается к Accounts по HTTP, настройки подключения его PostgreSQL
+относятся к собственной очереди Trade Events.
 
 ```powershell
 $env:TRADINGBOT_ANALYTICS_ACCOUNT_ID = $paperAccountId

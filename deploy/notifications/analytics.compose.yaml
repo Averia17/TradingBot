@@ -42,14 +42,20 @@ services:
         GO_IMAGE: ${TRADINGBOT_GO_BUILD_IMAGE:-golang:1.26.5-bookworm@sha256:53eeac89074db483fdf0ab3be1df32bf6e47562263d2d0d6baa7f26acb4957dd}
     command: [-paper-account]
     environment:
-      TRADINGBOT_DATABASE_URL: ${TRADINGBOT_ANALYTICS_LEDGER_DATABASE_URL:-postgresql://research_control@postgres:5432/tradingbot?sslmode=disable}
+      TRADINGBOT_DATABASE_URL: postgresql://notifications@postgres:5432/notifications?sslmode=disable
+      TRADINGBOT_ACCOUNTS_URL: ${TRADINGBOT_ANALYTICS_ACCOUNTS_URL:-http://accounts:8081}
+      TRADINGBOT_ACCOUNTS_OUTBOX_TOKEN_FILE: /run/tradingbot/outbox/token
       TRADINGBOT_KAFKA_BROKERS: kafka:9092
       TRADINGBOT_TRADE_TOPIC: tradingbot.portfolio.account.paper.v1
       TRADINGBOT_PAPER_ACCOUNT_HEAD_INTERVAL: ${TRADINGBOT_PAPER_ACCOUNT_HEAD_INTERVAL:-20s}
     depends_on:
+      postgres:
+        condition: service_healthy
       analytics-kafka-init:
         condition: service_completed_successfully
-    networks: [events, paper-source]
+    volumes:
+      - accounts-outbox-token:/run/tradingbot/outbox:ro
+    networks: [events, outbox, paper-source]
     read_only: true
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
@@ -91,7 +97,10 @@ networks:
     internal: true
   paper-source:
     external: true
-    name: ${TRADINGBOT_PAPER_LEDGER_NETWORK:-tradingbot-research_storage}
+    name: ${TRADINGBOT_ACCOUNTS_EVENTS_NETWORK:-tradingbot-research_accounts-events}
 
 volumes:
   analytics-postgres-data: {}
+  accounts-outbox-token:
+    external: true
+    name: ${TRADINGBOT_ACCOUNTS_OUTBOX_TOKEN_VOLUME:-tradingbot-research_outbox-token}

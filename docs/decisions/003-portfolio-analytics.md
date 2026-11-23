@@ -35,7 +35,7 @@
 
 ```mermaid
 flowchart LR
-    C[Go control / paper ledger] --> O[Transactional outbox → relay]
+    C[Trading API / paper ledger] --> O[Transactional outbox → relay]
     O --> K[Kafka account events and observed head]
     O --> F[Kafka fill notices]
     D[Archived marks / benchmark / costs] --> I[Kafka valuation inputs]
@@ -56,17 +56,17 @@ flowchart LR
   FIFO-лоты и наблюдения цен. Дневной ряд рассчитывается по согласованному
   снимку этих данных при запросе отчёта. Права менять
   счёт, инициировать сделки и токен Telegram остаются вне сервиса.
-- Control записывает события потока `tradingbot.portfolio.account.paper.v1`
+- Trading API записывает события потока `tradingbot.portfolio.account.paper.v1`
   в outbox в транзакции ledger. После commit relay публикует их с ключом
   paper account ID. Контракт содержит версию схемы, `account_id`, `event_id`,
   `account_version`, тип события, время наблюдения (если применимо) и записи.
   Алгоритм хеширования содержимого фиксируется в контракте. Первая версия
   переносит создание счёта с финансированием,
-  резерв, partial fill, полный fill, `UNKNOWN` и отмену. Control передаёт
+  резерв, partial fill, полный fill, `UNKNOWN` и отмену. Trading API передаёт
   точные cash и reserved cash после изменения, обновлённые количества и
   резервы инструментов. Для fill нужны сторона, booked quantity, gross,
   fee, время и идентификаторы заявки, решения и котировки. Источник точных
-  резервов — Control, включая округление и сохранение резерва при `UNKNOWN`.
+  резервов — Trading API, включая округление и сохранение резерва при `UNKNOWN`.
 - Текущие paper fill-уведомления передают факты исполнения по ключу fill.
   Аналитика подписывается на полный поток счёта и считает каждое исполнение
   из него один раз. Тестовый `exchange_fixture` обслуживает контур уведомлений.
@@ -92,13 +92,13 @@ flowchart LR
    на `V`, со статусом отставания. Очередность записей определяет версия
    ledger независимо от времени исполнения и порядка доставки.
    [Apache Kafka, гарантии доставки](https://kafka.apache.org/43/design/design/#message-delivery-semantics).
-2. Control заполняет outbox нормализованной историей существующего счёта.
+2. Trading API заполняет outbox нормализованной историей существующего счёта.
    Legacy full fill с пропущенным raw quantity использует booked quantity
    из таблицы исполнений. При исчерпании Kafka retention relay может повторно
    опубликовать версии от начала счёта до зафиксированной головы. Перекрытие
    дедуплицируется. Архив рыночных входов импортируется с прежними ID.
-   [Чтение ledger](../../services/control/internal/ledger/read_snapshot.go),
-   [обработка старых fill](../../services/control/internal/paper_memory/outcomes.go).
+   [Чтение ledger](../../services/trading-api/internal/accounts/read_snapshot.go),
+   [обработка старых fill](../../services/trading-api/internal/paper_memory/outcomes.go).
 3. Relay регулярно читает голову ledger и публикует её в
    `tradingbot.portfolio.account-head.paper.v1`. Analytics сверяет эту версию
    и время наблюдения с применённой последовательностью событий. Свежесть
@@ -133,7 +133,7 @@ update может привести к повторному ответу. Ком�
   Комиссия покупки входит в базис. Частичные продажи используют существующее
   правило распределения базиса `fifo_recording_order_usd_scale8_v1`.
   В Go-сервисе используем те же целочисленные правила, включая точный
-  остаток после частичной продажи. [FIFO в Control](../../services/control/internal/paper_memory/outcomes.go).
+  остаток после частичной продажи. [FIFO в Trading API](../../services/trading-api/internal/paper_memory/outcomes.go).
 - Денежный P&L периода = NAV на конец − NAV на начало − чистые внешние
   потоки владельца. Покупки, продажи, резервы и дивиденды относятся к
   внутренней экономике портфеля. В разбор периода входят реализованный P&L
@@ -150,7 +150,7 @@ update может привести к повторному ответу. Ком�
   возраст последней допустимой цены настраивается в окружении сервиса.
   Исторические даты с пробелами учитываются при проверке полноты ряда. Исправленный отчёт
   получает новую версию с происхождением поправки.
-  [Дневные оценки `paper-nav`](../../services/control/internal/paper_nav/nav.go).
+  [Дневные оценки `paper-nav`](../../services/trading-api/internal/paper_nav/nav.go).
 - TWR геометрически сцепляет доходности подпериодов. При внешних потоках
   для точной TWR нужны оценки непосредственно до и после потока. Без них
   показатель недоступен. При отсутствии движений капитала в окне достаточно

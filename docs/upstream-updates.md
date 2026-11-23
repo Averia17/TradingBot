@@ -75,7 +75,7 @@ NautilusTrader по платформам и `msgspec 0.22.0` (BSD-3-Clause). Go-
 `uv --directory services/research lock --offline --check` и
 `uv --directory services/evaluation lock --offline --check`.
 Go-модули проверяются `go mod verify` в каталогах
-`services/control`, `services/trade-events` и `services/notifications`.
+`services/trading-api`, `services/trade-events` и `services/notifications`.
 
 ## Обновление
 

@@ -8,31 +8,26 @@ import (
 	"regexp"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/twmb/franz-go/pkg/kgo"
 )
 
 var paperAccountIDPattern = regexp.MustCompile(`^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$`)
 
-const paperAccountReplayPageSize = 128
-
-// ReplayPaperAccount republishes a bounded ledger prefix without changing its
-// pgqueue state. Consumers deduplicate overlap with concurrent delivery.
-func (o *Outbox) ReplayPaperAccount(ctx context.Context, producer *kgo.Client, accountID string) (int64, error) {
+// ReplayPaperAccount republishes a bounded history prefix without changing delivery state.
+func ReplayPaperAccount(ctx context.Context, producer *kgo.Client, source *PaperSource, accountID string) (int64, error) {
 	if !paperAccountIDPattern.MatchString(accountID) {
 		return 0, errors.New("-replay-paper-account requires a canonical account UUID")
 	}
-	var version int64
-	err := o.db.Conn.QueryRow(ctx, `SELECT account_version FROM paper_account_analytics_heads WHERE account_id=$1`, accountID).Scan(&version)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return 0, errors.New("paper account head not found")
-	}
+	head, err := source.head(ctx, accountID)
 	if err != nil {
-		return 0, errors.New("cannot read paper account replay head")
+		return 0, err
+	}
+	if !head.valid() || head.AccountID != accountID {
+		return 0, errors.New("invalid paper account replay head")
 	}
 	var replayed int64
-	for replayed < version {
-		batch, err := o.readPaperAccountReplayBatch(ctx, accountID, replayed, version)
+	for replayed < head.AccountVersion {
+		batch, err := readPaperAccountReplayBatch(ctx, source, accountID, replayed, head.AccountVersion)
 		if err != nil {
 			return replayed, err
 		}
@@ -47,39 +42,28 @@ func (o *Outbox) ReplayPaperAccount(ctx context.Context, producer *kgo.Client, a
 	return replayed, nil
 }
 
-func (o *Outbox) readPaperAccountReplayBatch(ctx context.Context, accountID string, after, through int64) ([]*kgo.Record, error) {
-	rows, err := o.db.Conn.Query(ctx, `SELECT account_version,event_id::text,payload FROM paper_account_outbox
-		WHERE account_id=$1 AND account_version>$2 AND account_version<=$3 ORDER BY account_version LIMIT 128`, accountID, after, through)
+func readPaperAccountReplayBatch(ctx context.Context, source *PaperSource, accountID string, after, through int64) ([]*kgo.Record, error) {
+	entries, err := source.accountHistory(ctx, accountID, after, through)
 	if err != nil {
 		return nil, fmt.Errorf("read paper account replay page after version %d: %w", after, err)
 	}
-	defer rows.Close()
-	records := make([]*kgo.Record, 0, min(paperAccountReplayPageSize, through-after))
+	if len(entries) == 0 || int64(len(entries)) > min(paperOutboxPageSize, through-after) {
+		return nil, fmt.Errorf("invalid paper account replay page after version %d", after)
+	}
+	records := make([]*kgo.Record, 0, len(entries))
 	kafkaKey := []byte(accountID)
-	want := after
-	for rows.Next() {
-		want++
-		var version int64
-		var eventID string
-		var payload []byte
-		if err := rows.Scan(&version, &eventID, &payload); err != nil {
-			return nil, fmt.Errorf("read paper account replay version %d: %w", want, err)
-		}
-		event, err := decodePaperAccountEvent(payload)
-		if err != nil || event.AccountID != accountID || version != want || event.AccountVersion != want || event.EventID != eventID {
+	for i, entry := range entries {
+		want := after + int64(i) + 1
+		event, err := decodePaperAccountEvent(entry.Payload)
+		if err != nil || event.AccountID != accountID || entry.AccountID != accountID ||
+			event.AccountVersion != want || entry.AccountVersion != want || event.EventID != entry.EventID {
 			return nil, fmt.Errorf("inconsistent paper account replay version %d", want)
 		}
-		payload, err = json.Marshal(json.RawMessage(payload))
+		payload, err := json.Marshal(entry.Payload)
 		if err != nil {
 			return nil, fmt.Errorf("encode paper account replay version %d: %w", want, err)
 		}
 		records = append(records, &kgo.Record{Topic: PaperAccountTopic, Key: kafkaKey, Value: payload})
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("read paper account replay page after version %d: %w", after, err)
-	}
-	if len(records) == 0 {
-		return nil, fmt.Errorf("no paper account replay event after version %d", after)
 	}
 	return records, nil
 }

@@ -171,7 +171,7 @@ func (p holding) remainingCostBasis() *big.Int {
 	return total
 }
 
-// Match Control's fifo_recording_order_usd_scale8_v1. Each sale takes the
+// Match the Trading API's fifo_recording_order_usd_scale8_v1. Each sale takes the
 // increment of the cumulatively rounded share, including the final remainder.
 func cumulativeSoldBasis(l *lot, consumed *big.Int) *big.Int {
 	units := usdAmount(l.Basis)

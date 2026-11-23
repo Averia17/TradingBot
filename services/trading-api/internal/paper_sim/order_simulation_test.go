@@ -1,0 +1,279 @@
+package paper_sim
+
+import (
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/santhosh-tekuri/jsonschema/v6"
+
+	"tradingbot/trading-api/internal/accounts"
+)
+
+type recordingLedger struct {
+	reserve []accounts.ReservationRequest
+	resolve []accounts.ResolutionRequest
+	created time.Time
+}
+
+func (l *recordingLedger) Reserve(_ context.Context, r accounts.ReservationRequest) (accounts.Order, bool, error) {
+	l.reserve = append(l.reserve, r)
+	return accounts.Order{ReservationRequest: r, CreatedAt: l.created, Status: "reserved"}, len(l.reserve) == 1, nil
+}
+
+func (l *recordingLedger) Resolve(_ context.Context, r accounts.ResolutionRequest) (accounts.Order, bool, error) {
+	l.resolve = append(l.resolve, r)
+	reservation := l.reserve[len(l.reserve)-1]
+	order := accounts.Order{
+		ReservationRequest: reservation, Status: r.Outcome, AccountVersion: 3, CreatedAt: l.created,
+		FilledQuantityRaw: "0", RemainingQuantityRaw: reservation.QuantityRaw, Fills: []accounts.Fill{},
+	}
+	if r.Outcome == "filled" {
+		fill := accounts.Fill{
+			EventID: r.EventID, QuantityRaw: reservation.QuantityRaw, GrossUSD: r.GrossUSD, FeeUSD: r.FeeUSD, ObservedAt: r.ObservedAt,
+		}
+		order.FilledQuantityRaw, order.RemainingQuantityRaw = fill.QuantityRaw, "0"
+		order.Fills, order.Fill = []accounts.Fill{fill}, &fill
+	}
+	return order, len(l.resolve) == 1, nil
+}
+
+type fixtureSettlementLedger struct{ *recordingLedger }
+
+func (fixtureSettlementLedger) JupiterFixtureSettlementEnabled() bool { return true }
+
+func TestJupiterFixtureRouteIsBoundBeforeReservation(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	for _, test := range []struct {
+		name, mode string
+		bridge     bool
+		wantOrder  bool
+	}{
+		{"tagged without bridge", JupiterFixtureExecution, false, false},
+		{"ordinary fill with bridge", "fill", true, false},
+		{"tagged with bridge", JupiterFixtureExecution, true, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			in, quote := fixture(now)
+			quote.Execution = test.mode
+			raw := bindQuote(t, &in, quote)
+			records := &recordingLedger{created: now}
+			var store Store = records
+			if test.bridge {
+				store = fixtureSettlementLedger{records}
+			}
+			got, err := Run(t.Context(), store, in, raw, now)
+			if !test.wantOrder {
+				if err == nil || len(records.reserve) != 0 || len(records.resolve) != 0 {
+					t.Fatal("settlement mode mismatch reached the ledger")
+				}
+				return
+			}
+			if err != nil || len(records.reserve) != 1 || len(records.resolve) != 1 || got.Order.Status != "filled" ||
+				got.SimulatedExecution != JupiterFixtureExecution {
+				t.Fatalf("tagged fixture did not use its bound route: %+v / %v", got, err)
+			}
+		})
+	}
+}
+
+func TestPublishedFixtureContract(t *testing.T) {
+	const base = "https://tradingbot.local/contracts/"
+	const fixtureSchema = "paper-replay.schema.json"
+	compiler := jsonschema.NewCompiler()
+	compiler.AssertFormat()
+	for _, file := range []string{fixtureSchema, "paper-account.schema.json"} {
+		data, err := os.ReadFile(filepath.Join("..", "..", "..", "..", "contracts", file))
+		if err != nil {
+			t.Fatal(err)
+		}
+		parsed, err := jsonschema.UnmarshalJSON(bytes.NewReader(data))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := compiler.AddResource(base+file, parsed); err != nil {
+			t.Fatal(err)
+		}
+	}
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	in, quote := fixture(now)
+	raw := bindQuote(t, &in, quote)
+	result, err := Run(context.Background(), &recordingLedger{created: now}, in, raw, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, value := range map[string]any{"Intent": in, "Quote": quote, "Result": result} {
+		schema, err := compiler.Compile(base + fixtureSchema + "#/$defs/" + name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		serialized, err := json.Marshal(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		parsed, err := jsonschema.UnmarshalJSON(bytes.NewReader(serialized))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := schema.Validate(parsed); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+	}
+}
+
+func fixture(now time.Time) (Intent, Quote) {
+	instrument := accounts.Instrument{ID: "fixture:NVDAx", RegistryVersion: "synthetic-v1", Decimals: 8}
+	return Intent{
+			Version: "0.1", AccountID: "11111111-1111-4111-8111-111111111111", DecisionID: "22222222-2222-4222-8222-222222222222",
+			SnapshotVersion: 1, Instrument: instrument, Side: "BUY", QuantityRaw: "125000000", GrossLimitUSD: "124", MaxFeeUSD: "0.20",
+			DecidedAt: now.Add(-time.Second), ExpiresAt: now.Add(time.Minute),
+		}, Quote{
+			Version: "0.1", Source: "synthetic_fixture", Instrument: instrument, Side: "BUY", QuantityRaw: "125000000",
+			GrossUSD: "123.45678901", FeeBPS: new(15), FixedFeeUSD: "0.01", ObservedAt: now, ExpiresAt: now.Add(2 * time.Minute), Execution: "fill",
+		}
+}
+
+func bindQuote(t *testing.T, in *Intent, q Quote) []byte {
+	t.Helper()
+	raw, err := json.Marshal(q)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(raw)
+	in.QuoteSHA256 = hex.EncodeToString(digest[:])
+	return raw
+}
+
+func TestReplayUsesExactFixtureAndStableIDs(t *testing.T) {
+	now := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+	intent, quote := fixture(now)
+	raw := bindQuote(t, &intent, quote)
+	store := &recordingLedger{created: now}
+	first, err := Run(context.Background(), store, intent, raw, now)
+	if err != nil || first.Order.Status != "filled" {
+		t.Fatalf("first attempt: %+v, %v", first, err)
+	}
+	second, err := Run(context.Background(), store, intent, raw, now.Add(3*time.Minute))
+	if err != nil || second.QuoteSHA256 != intent.QuoteSHA256 {
+		t.Fatalf("retry after quote expiry: %+v, %v", second, err)
+	}
+	if store.reserve[0] != store.reserve[1] || store.resolve[0] != store.resolve[1] {
+		t.Fatalf("retry changed persisted identity or content: %+v %+v", store.reserve, store.resolve)
+	}
+	r, outcome := store.reserve[0], store.resolve[0]
+	if r.OrderID != "77b024de-5095-8cfe-b78f-65768a6d4bf2" || r.QuoteID != "6a7f2cad-6517-8428-92a4-126fe0a82c48" ||
+		outcome.EventID != "b0ad2bbe-dcea-8905-881d-e303a99c991e" {
+		t.Fatalf("persisted v1 order, quote or settlement identity changed: %s, %s, %s", r.OrderID, r.QuoteID, outcome.EventID)
+	}
+	if !r.ExpiresAt.Equal(intent.ExpiresAt) || r.Instrument != intent.Instrument || r.GrossUSD != intent.GrossLimitUSD || r.MaxFeeUSD != intent.MaxFeeUSD ||
+		outcome.GrossUSD != quote.GrossUSD || outcome.FeeUSD != "0.19518519" || !outcome.ObservedAt.Equal(now) {
+		t.Fatalf("unexpected reserve or outcome: %+v %+v", r, outcome)
+	}
+}
+
+func TestPreparedReplayUsesOnlyValidatedFixture(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	intent, quote := fixture(now)
+	quote.Version, quote.Execution, quote.ExecutedQuantityRaw = PartialVersion, "partial", "62500000"
+	raw := bindQuote(t, &intent, quote)
+	reference := &recordingLedger{created: now}
+	if _, err := Run(t.Context(), reference, intent, raw, now); err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := Prepare(intent, raw, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	preview := prepared.Preview()
+	preview.OrderID, preview.ExpiresAt, preview.GrossUSD, preview.FeeUSD = "changed", now, "1", "0"
+	*preview.Fill = FixtureFill{QuantityRaw: "1", GrossUSD: "1", FeeUSD: "0"}
+	clear(raw)
+
+	store := &recordingLedger{created: now}
+	if _, err := (&PreparedFixture{}).Run(t.Context(), store); err == nil || len(store.reserve) != 0 {
+		t.Fatalf("unprepared fixture reached the ledger: %v", err)
+	}
+	if _, err := prepared.Run(t.Context(), store); err != nil {
+		t.Fatal(err)
+	}
+	if len(store.reserve) != 1 || len(store.resolve) != 1 ||
+		store.reserve[0] != reference.reserve[0] || store.resolve[0] != reference.resolve[0] {
+		t.Fatalf("preview mutation changed persisted reservation or resolution: %+v %+v", store.reserve, store.resolve)
+	}
+}
+
+func TestReplayRejectsBeforeReservation(t *testing.T) {
+	now := time.Now().UTC()
+	mutations := map[string]func(*Intent, *Quote){
+		"other source":        func(_ *Intent, q *Quote) { q.Source = "market" },
+		"instrument mismatch": func(_ *Intent, q *Quote) { q.Instrument.RegistryVersion = "v2" },
+		"raw units mismatch":  func(_ *Intent, q *Quote) { q.QuantityRaw = "123" },
+		"side mismatch":       func(_ *Intent, q *Quote) { q.Side = "SELL" },
+		"future quote":        func(_ *Intent, q *Quote) { q.ObservedAt = now.Add(time.Second) },
+		"quote before intent": func(_ *Intent, q *Quote) { q.ObservedAt = now.Add(-2 * time.Second) },
+		"missing fee model":   func(_ *Intent, q *Quote) { q.FeeBPS = nil },
+		"price too high":      func(i *Intent, _ *Quote) { i.GrossLimitUSD = "123" },
+		"fee too high":        func(i *Intent, _ *Quote) { i.MaxFeeUSD = "0.19" },
+	}
+	for name, mutate := range mutations {
+		t.Run(name, func(t *testing.T) {
+			intent, quote := fixture(now)
+			mutate(&intent, &quote)
+			raw := bindQuote(t, &intent, quote)
+			store := &recordingLedger{}
+			if _, err := Run(context.Background(), store, intent, raw, now); err == nil || len(store.reserve) != 0 {
+				t.Fatalf("invalid quote reached ledger: %v, %+v", err, store.reserve)
+			}
+		})
+	}
+	intent, quote := fixture(now)
+	raw := bindQuote(t, &intent, quote)
+	if _, err := Run(context.Background(), &recordingLedger{}, intent, append(raw, '\n'), now); err == nil {
+		t.Fatal("modified fixture bytes accepted")
+	}
+}
+
+func TestIdentityQuoteRequiresMatchingBoundIntent(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	intent, quote := fixture(now)
+	registry := strings.Repeat("d", 64)
+	quote.Version, quote.SecurityID, quote.IdentityRegistrySHA256 = IdentityQuoteVersion, "fixture-nvidia", registry
+	raw := bindQuote(t, &intent, quote)
+	if _, err := Preview(intent, raw, now); err == nil {
+		t.Fatal("legacy intent accepted a security-bound quote")
+	}
+	intent.Version, intent.SecurityID, intent.IdentityRegistrySHA256 = IdentityIntentVersion, "fixture-nvidia", registry
+	for _, mismatch := range []func(*Intent){
+		func(in *Intent) { in.SecurityID = "different-security" },
+		func(in *Intent) { in.IdentityRegistrySHA256 = strings.Repeat("a", 64) },
+		func(in *Intent) { in.Instrument.RegistryVersion = "different-version" },
+		func(in *Intent) { in.Instrument.Decimals = 2 },
+	} {
+		changed := intent
+		mismatch(&changed)
+		if _, err := Preview(changed, raw, now); err == nil {
+			t.Fatal("security-bound simulator accepted a different exact identity")
+		}
+	}
+	store := &recordingLedger{created: now}
+	result, err := Run(t.Context(), store, intent, raw, now)
+	if err != nil || result.Order.Status != "filled" || result.Version != IdentityQuoteVersion ||
+		result.SecurityID != quote.SecurityID || result.IdentityRegistrySHA256 != registry ||
+		result.QuoteSHA256 != intent.QuoteSHA256 {
+		t.Fatalf("identity quote result = %+v, %v", result, err)
+	}
+	encoded, err := json.Marshal(intent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ParseIntent(encoded); err == nil {
+		t.Fatal("standalone replay accepted a security-bound intent")
+	}
+}

@@ -26,14 +26,20 @@ import (
 )
 
 // TestJupiterPaperFillsReachTelegram consumes the exact outbox of the
-// scheduled or provider-backed paper rehearsal. It only runs with its prepared DSN.
+// scheduled or provider-backed paper rehearsal through the isolated HTTP outbox.
 func TestJupiterPaperFillsReachTelegram(t *testing.T) {
 	dsn, raw := os.Getenv("TRADINGBOT_TEST_JUPITER_NOTIFICATION_DSN"), os.Getenv("TRADINGBOT_TEST_JUPITER_NOTIFICATION_EVENTS")
-	if dsn == "" && raw == "" {
+	source, token := os.Getenv("TRADINGBOT_TEST_JUPITER_NOTIFICATION_ACCOUNTS_URL"), os.Getenv("TRADINGBOT_TEST_JUPITER_NOTIFICATION_TOKEN")
+	if dsn == "" && raw == "" && source == "" && token == "" {
 		t.Skip("run through an opt-in scheduled or provider-backed Control rehearsal")
 	}
 	if !validNotificationDatabase(dsn) {
 		t.Fatal("notification rehearsal requires an isolated loopback paper rehearsal schema")
+	}
+	accountsURL, err := url.Parse(source)
+	if err != nil || accountsURL.Scheme != "http" || !numericNotificationLoopback(accountsURL.Host) ||
+		accountsURL.User != nil || accountsURL.Path != "" || accountsURL.RawQuery != "" || accountsURL.Fragment != "" || token == "" {
+		t.Fatal("notification rehearsal requires an authenticated loopback Accounts HTTP endpoint")
 	}
 	var payloads []json.RawMessage
 	if err := json.Unmarshal([]byte(raw), &payloads); err != nil || len(payloads) != 2 {
@@ -66,7 +72,7 @@ func TestJupiterPaperFillsReachTelegram(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer observer.Close()
-	startPaperNotificationRelay(t, ctx, dsn, brokers)
+	startPaperNotificationRelay(t, ctx, dsn, source, token, brokers)
 
 	deliveries := make(chan string, 3)
 	telegram := testTelegram(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -140,6 +146,7 @@ func TestJupiterPaperFillsReachTelegram(t *testing.T) {
 		}
 	}
 	waitForPaperNotificationCommit(t, ctx, observer, group)
+	waitForAccountAcknowledgements(t, ctx, source, token)
 	end := kmsg.NewPtrListOffsetsRequest()
 	end.Topics = []kmsg.ListOffsetsRequestTopic{{
 		Topic: topic, Partitions: []kmsg.ListOffsetsRequestTopicPartition{{Partition: 0, Timestamp: -1, CurrentLeaderEpoch: -1}},
@@ -152,7 +159,7 @@ func TestJupiterPaperFillsReachTelegram(t *testing.T) {
 	t.Log("the two exact committed ledger fills reached the paper Kafka topic and Telegram stub; consumer committed offset 2")
 }
 
-var paperNotificationSchema = regexp.MustCompile(`^(?:jupiter_scheduled|provider_paper)_[a-z0-9]+$`)
+var paperNotificationSchema = regexp.MustCompile(`^trade_delivery_[a-z0-9]+$`)
 
 func validNotificationDatabase(dsn string) bool {
 	uri, err := url.Parse(dsn)
@@ -210,7 +217,7 @@ func notificationBrokers(t *testing.T, ctx context.Context) []string {
 	return brokers
 }
 
-func startPaperNotificationRelay(t *testing.T, ctx context.Context, dsn string, brokers []string) {
+func startPaperNotificationRelay(t *testing.T, ctx context.Context, dsn, source, token string, brokers []string) {
 	t.Helper()
 	name := "paper-notification-relay"
 	if runtime.GOOS == "windows" {
@@ -232,6 +239,7 @@ func startPaperNotificationRelay(t *testing.T, ctx context.Context, dsn string, 
 		}
 	}
 	relay.Env = append(relay.Env, "TRADINGBOT_DATABASE_URL="+dsn,
+		"TRADINGBOT_ACCOUNTS_URL="+source, "TRADINGBOT_ACCOUNTS_OUTBOX_TOKEN="+token,
 		"TRADINGBOT_KAFKA_BROKERS="+strings.Join(brokers, ","), "TRADINGBOT_TRADE_TOPIC="+fill_event.PaperTopic)
 	relay.Stdout, relay.Stderr = os.Stdout, os.Stderr
 	if err := relay.Start(); err != nil {
@@ -241,6 +249,35 @@ func startPaperNotificationRelay(t *testing.T, ctx context.Context, dsn string, 
 		_ = relay.Process.Kill()
 		_ = relay.Wait()
 	})
+}
+
+func waitForAccountAcknowledgements(t *testing.T, ctx context.Context, origin, token string) {
+	t.Helper()
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, origin+"/internal/v1/paper/outbox/fills/next", nil)
+		if err != nil {
+			t.Fatal("create Accounts acknowledgement probe")
+		}
+		req.Header.Set("Authorization", "Bearer "+token)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal("probe Accounts acknowledgement")
+		}
+		resp.Body.Close()
+		if resp.StatusCode == http.StatusNoContent {
+			return
+		}
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("Accounts acknowledgement probe returned HTTP %d", resp.StatusCode)
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatal("relay did not acknowledge the Accounts outbox")
+		case <-ticker.C:
+		}
+	}
 }
 
 func waitForPaperNotificationCommit(t *testing.T, ctx context.Context, client *kgo.Client, group string) {

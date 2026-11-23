@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -24,7 +25,7 @@ import (
 
 func main() {
 	requeue := flag.Int64("requeue-task", 0, "requeue a failed trade outbox task by ID and exit")
-	paperLedger := flag.Bool("paper-ledger", false, "relay authoritative virtual paper fills from Control's PostgreSQL database")
+	paperLedger := flag.Bool("paper-ledger", false, "relay authoritative virtual paper fills from Accounts")
 	paperAccount := flag.Bool("paper-account", false, "relay authoritative paper account events and publish account heads")
 	replayAccount := flag.String("replay-paper-account", "", "republish the retained source events of one paper account and exit")
 	flag.Parse()
@@ -38,7 +39,7 @@ func main() {
 
 func run(ctx context.Context, requeue int64, paperLedger, paperAccount bool, replayAccount string) error {
 	dsn := os.Getenv("TRADINGBOT_DATABASE_URL")
-	if dsn == "" {
+	if dsn == "" && replayAccount == "" {
 		return errors.New("TRADINGBOT_DATABASE_URL is required")
 	}
 	accountMode := paperAccount || replayAccount != ""
@@ -75,6 +76,14 @@ func run(ctx context.Context, requeue int64, paperLedger, paperAccount bool, rep
 			return errors.New("TRADINGBOT_PAPER_ACCOUNT_HEAD_INTERVAL must contain a positive duration")
 		}
 	}
+	var paperSource *outbox.PaperSource
+	if paperLedger || accountMode {
+		paperSource, err = loadPaperSource()
+		if err != nil {
+			return err
+		}
+		defer paperSource.Close()
+	}
 	producer, err := kgo.NewClient(kgo.SeedBrokers(kafkaConfig.Brokers...), kgo.RequiredAcks(kgo.AllISRAcks()),
 		kgo.RecordDeliveryTimeout(10*time.Second))
 	if err != nil {
@@ -83,28 +92,28 @@ func run(ctx context.Context, requeue int64, paperLedger, paperAccount bool, rep
 	defer producer.Close()
 	startup, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	queue, err := outbox.Open(startup, dsn)
-	if err != nil {
-		return err
-	}
-	defer queue.Close()
 	if err := producer.Ping(startup); err != nil {
 		return errors.New("Kafka unreachable at startup")
 	}
 	if replayAccount != "" {
-		count, err := queue.ReplayPaperAccount(ctx, producer, replayAccount)
+		count, err := outbox.ReplayPaperAccount(ctx, producer, paperSource, replayAccount)
 		if err != nil {
 			return err
 		}
 		slog.Info("paper account replay published", "account_id", replayAccount, "events", count)
 		return nil
 	}
+	queue, err := outbox.Open(startup, dsn)
+	if err != nil {
+		return err
+	}
+	defer queue.Close()
 	slog.Info("trade relay started", "topic", kafkaConfig.Topic)
 	if paperAccount {
-		return queue.RelayPaperAccounts(ctx, producer, headInterval)
+		return queue.RelayPaperAccounts(ctx, producer, paperSource, headInterval)
 	}
 	if paperLedger {
-		return queue.RelayPaper(ctx, producer)
+		return queue.RelayPaper(ctx, producer, paperSource)
 	}
 	if address == "" {
 		return queue.Relay(ctx, producer, kafkaConfig.Topic)
@@ -119,6 +128,21 @@ func run(ctx context.Context, requeue int64, paperLedger, paperAccount bool, rep
 	defer listener.Close()
 	cancel()
 	return serveFixture(ctx, listener, queue, producer, kafkaConfig.Topic)
+}
+
+func loadPaperSource() (*outbox.PaperSource, error) {
+	token := os.Getenv("TRADINGBOT_ACCOUNTS_OUTBOX_TOKEN")
+	if path := os.Getenv("TRADINGBOT_ACCOUNTS_OUTBOX_TOKEN_FILE"); path != "" {
+		if token != "" {
+			return nil, errors.New("configure the Accounts outbox token with either the value or a file")
+		}
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return nil, errors.New("cannot read the Accounts outbox token file")
+		}
+		token = strings.TrimSpace(string(raw))
+	}
+	return outbox.NewPaperSource(os.Getenv("TRADINGBOT_ACCOUNTS_URL"), token)
 }
 
 func serveFixture(ctx context.Context, listener net.Listener, queue *outbox.Outbox, producer *kgo.Client, topic string) error {

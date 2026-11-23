@@ -37,7 +37,7 @@ type Outbox struct {
 	queue *pgqueue.Queue
 }
 
-// Open prepares the pgqueue schema in the same database as fill transactions.
+// Open prepares pgqueue in the trade-events database.
 func Open(ctx context.Context, dsn string) (*Outbox, error) {
 	config, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
@@ -73,6 +73,10 @@ func migrate(ctx context.Context, tx pgx.Tx, queue *pgqueue.Queue) error {
 		defer cancel()
 		_ = tx.Rollback(ctx)
 	}()
+	var fsync string
+	if err := tx.QueryRow(ctx, "SHOW fsync").Scan(&fsync); err != nil || fsync != "on" {
+		return errors.New("trade-events PostgreSQL durability requires fsync enabled")
+	}
 	const migrationLock = 79077101940501201
 	if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock($1)", int64(migrationLock)); err != nil {
 		return errors.New("lock PostgreSQL outbox migration")

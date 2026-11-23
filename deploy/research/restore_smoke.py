@@ -90,24 +90,24 @@ def postgres(name):
 
 
 @contextmanager
-def control(binary, dsn):
+def trading_api(binary, dsn):
     address = f"127.0.0.1:{free_port()}"
     origin = "http://" + address
-    env = os.environ | {"TRADINGBOT_DATABASE_URL": dsn}
+    env = os.environ | {"TRADINGBOT_OFFLINE_TEST_DATABASE_URL": dsn}
     child = subprocess.Popen([str(binary), "--listen", address], env=env)
     try:
         deadline = time.monotonic() + 15
         while time.monotonic() < deadline:
-            checked(child.poll() is None, "Go control exited before readiness")
+            checked(child.poll() is None, "Trading API exited before readiness")
             try:
                 status = request(origin, "/readyz", 200)
             except (TimeoutError, URLError):
                 time.sleep(0.1)
                 continue
-            checked(status["storage_enabled"], "Go control did not enable storage")
+            checked(status["storage_enabled"], "Trading API did not enable storage")
             break
         else:
-            raise RuntimeError("Go control did not become ready")
+            raise RuntimeError("Trading API did not become ready")
         yield origin
     finally:
         child.terminate()
@@ -231,7 +231,7 @@ def drill(binary, budget, archive):
     prefix = "tradingbot-restore-" + uuid4().hex[:10]
     source, target = prefix + "-source", prefix + "-target"
     with postgres(source) as dsn:
-        with control(binary, dsn) as origin:
+        with trading_api(binary, dsn) as origin:
             paper_path, _ = check_paper_order(origin)
             events_path = paper_path + "/events"
             events = request(origin, events_path, 200)
@@ -339,7 +339,7 @@ def drill(binary, budget, archive):
             budget_command(budget, dsn, "show", "--day", day) == daily,
             "restored daily budget changed",
         )
-        with control(binary, dsn) as origin:
+        with trading_api(binary, dsn) as origin:
             checked(
                 request(origin, paper_path, 200) == before_account,
                 "restored account changed",
@@ -463,10 +463,10 @@ def scheduler_project(project, archive_root, service, **settings):
     profiles = (service,) if service == "paper-entry" else (service, "paper-entry")
     profile_args = [arg for profile in profiles for arg in ("--profile", profile)]
     images_only = archive_root.parent / "images-only.compose.yaml"
-    # Running the Python scheduler may otherwise build its additional control context.
+    # The scheduler build also uses the Trading API image.
     images_only.write_text(
         "services:\n"
-        + "".join(f"  {name}:\n    build: !reset null\n" for name in ("control", *profiles)),
+        + "".join(f"  {name}:\n    build: !reset null\n" for name in ("trading-api", "accounts", *profiles)),
         encoding="utf-8",
     )
 
@@ -492,19 +492,23 @@ def scheduler_project(project, archive_root, service, **settings):
         compose("down", "--volumes")
 
 
-def compose_sql(compose, query):
+SCHEDULER_DATABASES = (("postgres", COMPOSE_ROLE, DATABASE), ("accounts-postgres", "accounts", "accounts"))
+
+
+def compose_sql(compose, query, database=SCHEDULER_DATABASES[0]):
+    container, user, name = database
     return compose(
         "exec",
         "-T",
-        "postgres",
+        container,
         "psql",
         "-XAt",
         "-v",
         "ON_ERROR_STOP=1",
         "-U",
-        COMPOSE_ROLE,
+        user,
         "-d",
-        DATABASE,
+        name,
         "-c",
         query,
         capture=True,
@@ -512,7 +516,7 @@ def compose_sql(compose, query):
 
 
 def scheduler_state(compose):
-    return json.loads(
+    jobs = json.loads(
         compose_sql(
             compose,
             """
@@ -523,9 +527,6 @@ def scheduler_state(compose):
             'permits', (SELECT count(*) FROM research_call_permits),
             'attempts', (SELECT count(*) FROM research_job_attempts),
             'results', (SELECT count(*) FROM research_job_results),
-            'orders', (SELECT count(*) FROM paper_orders),
-            'fills', (SELECT count(*) FROM paper_fills),
-            'paper_events', (SELECT count(*) FROM paper_events),
             'dispatch', (SELECT coalesce(json_agg(json_build_object(
                 'job_id', j.id, 'status', j.status, 'created_at', j.created_at,
                 'request', convert_from(j.request, 'UTF8'),
@@ -543,6 +544,15 @@ def scheduler_state(compose):
     """,
         )
     )
+
+    accounts = json.loads(compose_sql(compose, """
+        SELECT json_build_object(
+            'orders', (SELECT count(*) FROM paper_orders),
+            'fills', (SELECT count(*) FROM paper_fills),
+            'paper_events', (SELECT count(*) FROM paper_events)
+        )
+    """, SCHEDULER_DATABASES[1]))
+    return jobs | accounts
 
 
 def compose_clock(compose):
@@ -594,43 +604,29 @@ def journal_transfer(project, archive, service, *, restore=False):
     )
 
 
-def dump_scheduler_database(compose, dump):
-    compose("stop", "control")
-    compose(
-        "exec",
-        "-T",
-        "postgres",
-        "pg_dump",
-        "-U",
-        COMPOSE_ROLE,
-        "-d",
-        DATABASE,
-        "-Fc",
-        "--file",
-        DUMP_PATH,
+def scheduler_dump_files(dump):
+    return (
+        (SCHEDULER_DATABASES[0], dump),
+        (SCHEDULER_DATABASES[1], dump.with_name(dump.stem + "-accounts" + dump.suffix)),
     )
-    compose("cp", f"postgres:{DUMP_PATH}", str(dump))
+
+
+def dump_scheduler_database(compose, dump):
+    compose("stop", "trading-api", "accounts")
+    for (container, user, name), target in scheduler_dump_files(dump):
+        compose("exec", "-T", container, "pg_dump", "-U", user, "-d", name, "-Fc", "--file", DUMP_PATH)
+        compose("cp", f"{container}:{DUMP_PATH}", str(target))
 
 
 def restore_scheduler_database(compose, dump, service):
-    compose(*COMPOSE_START, "postgres")
-    compose("cp", str(dump), f"postgres:{DUMP_PATH}")
-    compose(
-        "exec",
-        "-T",
-        "postgres",
-        "pg_restore",
-        "-U",
-        COMPOSE_ROLE,
-        "-d",
-        DATABASE,
-        "--single-transaction",
-        "--exit-on-error",
-        "--no-owner",
-        "--no-privileges",
-        DUMP_PATH,
-    )
-    compose(*COMPOSE_START, "control")
+    compose(*COMPOSE_START, "postgres", "accounts-postgres")
+    for (container, user, name), source in scheduler_dump_files(dump):
+        compose("cp", str(source), f"{container}:{DUMP_PATH}")
+        compose(
+            "exec", "-T", container, "pg_restore", "-U", user, "-d", name,
+            "--single-transaction", "--exit-on-error", "--no-owner", "--no-privileges", DUMP_PATH,
+        )
+    compose(*COMPOSE_START, "trading-api", "accounts")
     # Initialize the empty journal volume under the configured scheduler user.
     compose(*COMPOSE_RUN, "--entrypoint", "/bin/true", service)
 
@@ -695,7 +691,7 @@ def entry_journal_drill(directory):
     service, volume = "paper-entry", "paper-entry-journal"
 
     with scheduler_project(source, root, service) as (compose, origin):
-        compose(*COMPOSE_START, "postgres", "control")
+        compose(*COMPOSE_START, "postgres", "accounts", "trading-api")
         account = request(
             origin,
             account_path,
@@ -727,27 +723,33 @@ def entry_journal_drill(directory):
         )
         first_at = first_occurrence["scheduled_at"]
         second_at = second_occurrence["scheduled_at"]
-        wait_until(compose, datetime.fromisoformat(second_at))
-        interrupted = json.loads(
-            compose(
-                *COMPOSE_RUN,
-                "--entrypoint",
-                "python",
-                "paper-entry",
-                "/archive/restore-fault.py",
-                plan["ref"],
-                plan_sha,
-                second_at,
-                capture=True,
-            )
-        )
-        accepted, staged_only = interrupted["occurrences"]
+        def stage_entries():
+            return json.loads(
+                compose(
+                    *COMPOSE_RUN,
+                    "--entrypoint",
+                    "python",
+                    "paper-entry",
+                    "/archive/restore-fault.py",
+                    plan["ref"],
+                    plan_sha,
+                    second_at,
+                    capture=True,
+                )
+            )["occurrences"]
+
+        wait_until(compose, datetime.fromisoformat(first_at))
+        accepted, staged_only = stage_entries()
         checked(
-            accepted["status"] == "queued"
-            and accepted["created"] is True
-            and staged_only["status"] == "pending_go"
-            and staged_only["error"] == "TimeoutExpired",
-            "source did not stage and interrupt the second occurrence as planned",
+            accepted["status"] == "queued" and accepted["created"] is True,
+            f"source did not accept the first occurrence: {accepted['status']}",
+        )
+        if staged_only["status"] == "not_due":
+            wait_until(compose, datetime.fromisoformat(second_at))
+            _, staged_only = stage_entries()
+        checked(
+            staged_only["status"] == "pending_go" and staged_only.get("error") == "TimeoutExpired",
+            f"source did not interrupt the second occurrence: {staged_only['status']}",
         )
         before = scheduler_state(compose)
         checked(
@@ -944,7 +946,7 @@ def review_journal_drill(directory):
         )
 
     with scheduler_project(source, root, service, **settings) as (compose, origin):
-        compose(*COMPOSE_START, "postgres", "control")
+        compose(*COMPOSE_START, "postgres", "accounts", "trading-api")
         plan, seed_registry = seed_review_restore(
             compose,
             origin,
@@ -1092,7 +1094,7 @@ def review_journal_drill(directory):
             compose(
                 "exec",
                 "-T",
-                "control",
+                "trading-api",
                 "/usr/local/bin/paper-check",
                 "--account",
                 account_id,
@@ -1172,18 +1174,18 @@ def main():
             print(json.dumps(review_journal_drill(directory), indent=2))
             return
         extension = ".exe" if os.name == "nt" else ""
-        binary = directory / ("control" + extension)
+        binary = directory / ("trading-api" + extension)
         budget = directory / ("research-budget" + extension)
         subprocess.run(
             [
                 "go",
                 "-C",
-                "services/control",
+                "services/trading-api",
                 "build",
                 "-mod=readonly",
                 "-o",
                 str(directory),
-                "./cmd/control",
+                "./cmd/trading-api",
                 "./cmd/research-budget",
             ],
             cwd=ROOT,
